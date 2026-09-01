@@ -9,6 +9,7 @@
 
 use std::fs::File;
 use std::io::Read;
+use std::rc::Rc;
 
 use adapter_btc::roster::{BitcoinSignerRoleV1, ParticipantKeyRosterV1, ParticipantKeyV1};
 use blake2::{
@@ -48,7 +49,12 @@ use crate::admission::{
     AuthenticatedRouteAdmissionV1, RegistryRouteAdmissionAuthorityV1, RouteRosterSnapshotsV1,
 };
 use crate::production_config::{
-    ProductionBootstrapModeV1, ProductionPathRoleV1, ValidatedProductionBootstrapV1,
+    read_owner_file_bounded, ProductionBootstrapModeV1, ProductionConfigErrorV1,
+    ProductionContractsBootstrapPinsV5, ProductionPathRoleV1, ValidatedProductionBootstrapV1,
+};
+use crate::production_contracts_bootstrap::{
+    authenticate_contracts_bootstrap_v1, AuthenticatedContractsBootstrapV1,
+    CONTRACTS_BOOTSTRAP_BYTES_V1,
 };
 use crate::production_provisioning::{
     DurableProductionProvisioningJournalV1, ProductionProvisioningStageStateV1,
@@ -1007,10 +1013,11 @@ impl AuthenticatedBitcoinParticipantBindingsV1 {
 pub struct AuthenticatedProductionInputsV1 {
     pub(crate) admission: AuthenticatedRouteAdmissionV1,
     pub(crate) admission_authority: RegistryRouteAdmissionAuthorityV1,
-    pub(crate) composition: ComposedBindingV2,
+    composition: Rc<ComposedBindingV2>,
     pub(crate) resolved_registry: ResolvedRegistryV1,
-    pub(crate) route_store: DurableRouteStoreV1,
+    route_store: Option<DurableRouteStoreV1>,
     pub(crate) time_store: DurableRouteTimeAnchorStoreV2,
+    pub(crate) registry_authorities: AuthoritySetV1,
     pub(crate) time_policy_authorities: AuthoritySetV1,
     pub(crate) time_evidence_authorities: AuthoritySetV1,
     pub(crate) time_verification_context: SecpContext,
@@ -1020,6 +1027,7 @@ pub struct AuthenticatedProductionInputsV1 {
     pub(crate) roster_bundle: ProductionRelayRosterBundleV1,
     pub(crate) evm_sessions: [Option<AuthenticatedEvmSessionBindingsV1>; 2],
     pub(crate) bitcoin_sessions: [Option<AuthenticatedBitcoinParticipantBindingsV1>; 2],
+    pub(crate) contracts_bootstrap: Option<AuthenticatedContractsBootstrapV1>,
     pub(crate) current_time_ancestry_ready: bool,
 }
 
@@ -1029,9 +1037,22 @@ impl AuthenticatedProductionInputsV1 {
         &self.admission
     }
 
+    /// Moves the route-scoped admission out by value for the concrete route
+    /// runtime, which takes ownership of the non-`Clone` capability.
+    pub(crate) fn into_admission(self) -> AuthenticatedRouteAdmissionV1 {
+        self.admission
+    }
+
     /// Exact threshold-authenticated mixed-clock composition.
-    pub const fn composition(&self) -> &ComposedBindingV2 {
-        &self.composition
+    pub fn composition(&self) -> &ComposedBindingV2 {
+        self.composition.as_ref()
+    }
+
+    /// Shares only the immutable authenticated composition with long-lived
+    /// production owners. The proof-derived binding remains impossible to
+    /// replace or reconstruct from caller-shaped fields.
+    pub(crate) fn composition_owner(&self) -> Rc<ComposedBindingV2> {
+        Rc::clone(&self.composition)
     }
 
     /// Verified EVM account session for an applicable leg.
@@ -1075,13 +1096,91 @@ impl AuthenticatedProductionInputsV1 {
         &self,
     ) -> Result<FrozenRouteAdmissionCheckpointV2, ProductionInputErrorV1> {
         self.route_store
+            .as_ref()
+            .ok_or(ProductionInputErrorV1::RouteStateRefused)?
             .audit_frozen_admission_checkpoint_v2(self.admission.route_id())
+            .map_err(|_| ProductionInputErrorV1::RouteStateRefused)
+    }
+
+    /// Transfers the single authenticated route-store owner into the F6 pair
+    /// activation cycle. All public authenticated inputs remain borrowable;
+    /// a second transfer fails closed.
+    pub(crate) fn take_route_store_for_f6(
+        &mut self,
+    ) -> Result<DurableRouteStoreV1, ProductionInputErrorV1> {
+        self.route_store
+            .take()
+            .ok_or(ProductionInputErrorV1::RouteStateRefused)
+    }
+
+    /// Consumes the authenticated bootstrap handoff after every child and
+    /// transport owner has borrowed the public route facts.  The route Store
+    /// must already have moved into F6; this transition then keeps the runtime
+    /// admission adjacent to the sole durable time authority used for future
+    /// funding decisions.
+    #[cfg(feature = "production")]
+    #[expect(
+        dead_code,
+        reason = "frozen funding-time guard accessor (F7/M8); fails the build when first wired"
+    )]
+    pub(crate) fn into_runtime_admission_and_time_guard(
+        self,
+    ) -> Result<
+        (
+            AuthenticatedRouteAdmissionV1,
+            crate::production_time_guard::ProductionRouteTimeGuardV2,
+        ),
+        ProductionInputErrorV1,
+    > {
+        let Self {
+            admission,
+            composition,
+            resolved_registry,
+            route_store,
+            time_store,
+            time_policy_authorities,
+            time_evidence_authorities,
+            time_verification_context,
+            ..
+        } = self;
+        if route_store.is_some() {
+            return Err(ProductionInputErrorV1::RouteStateRefused);
+        }
+        let context = crate::production_time_guard::ProductionRouteTimeGuardContextV2 {
+            policy_authorities: time_policy_authorities,
+            evidence_authorities: time_evidence_authorities,
+            secp: time_verification_context,
+            registry: resolved_registry,
+            upstream: composition.upstream().clone(),
+            downstream: composition.downstream().clone(),
+        };
+        let guard = crate::production_time_guard::ProductionRouteTimeGuardV2::new(
+            time_store, &admission, context,
+        )
+        .map_err(|_| ProductionInputErrorV1::TimeRefused)?;
+        Ok((admission, guard))
+    }
+
+    /// Verifies the production journal policy before the sole store owner is
+    /// transferred into F6 activation.
+    pub(crate) fn audit_external_custody_only(&self) -> Result<(), ProductionInputErrorV1> {
+        self.route_store
+            .as_ref()
+            .ok_or(ProductionInputErrorV1::RouteStateRefused)?
+            .audit_external_custody_only_v1(self.admission.route_id())
+            .map(|_| ())
             .map_err(|_| ProductionInputErrorV1::RouteStateRefused)
     }
 
     /// Durable route-scoped time authority for later economic guards.
     pub fn time_store_mut(&mut self) -> &mut DurableRouteTimeAnchorStoreV2 {
         &mut self.time_store
+    }
+
+    /// Registry threshold set that authenticated the retained deployment
+    /// snapshot and any route-scoped production authority extensions.
+    pub const fn registry_authorities(&self) -> &AuthoritySetV1 {
+        &self.registry_authorities
     }
 
     /// Static time-policy threshold set pinned by the time store.
@@ -1113,6 +1212,12 @@ impl AuthenticatedProductionInputsV1 {
     pub const fn roster_bundle(&self) -> &ProductionRelayRosterBundleV1 {
         &self.roster_bundle
     }
+
+    /// Bilaterally authenticated Contracts identities and contribution
+    /// material retained only by a V5 production bootstrap.
+    pub(crate) const fn contracts_bootstrap(&self) -> Option<&AuthenticatedContractsBootstrapV1> {
+        self.contracts_bootstrap.as_ref()
+    }
 }
 
 /// Redacted, fail-closed production input refusal.
@@ -1136,6 +1241,10 @@ pub enum ProductionInputErrorV1 {
     /// Participant proof shape, scope or signatures were invalid.
     #[error("invalid production participant binding bundle")]
     InvalidParticipantBundle,
+    /// The owner-retained V5 Contracts bootstrap was unavailable, malformed,
+    /// outside the authenticated route scope, or disagreed with either pin.
+    #[error("production Contracts bootstrap refused input")]
+    ContractsBootstrapRefused,
     /// A recomputed public commitment differed from bootstrap.
     #[error("production public input pin mismatch")]
     PinMismatch,
@@ -1202,6 +1311,7 @@ fn load_authenticated_production_inputs_inner_v1(
     let pins = config.pins();
     let layout = bootstrap.layout();
     let secp = SecpContext::new(&VERIFICATION_CONTEXT_SEED_V1);
+    let mut retained_contracts_bootstrap = read_retained_contracts_bootstrap_v5(config, layout)?;
 
     let authority_bytes = read_bounded(
         layout.path(ProductionPathRoleV1::RegistryAuthorities),
@@ -1496,153 +1606,74 @@ fn load_authenticated_production_inputs_inner_v1(
         &authority_bundle.time_evidence,
     );
 
-    let (admission, composition, participant_sessions, checkpoint, current_time_ancestry_ready) =
-        match recovered_checkpoint {
-            None => {
-                let original_validation_seconds = decoded_evidence.observed_at_seconds();
-                time_store
-                    .install_policy(
-                        &signed_policy,
-                        time_policy_context,
-                        original_validation_seconds,
-                    )
-                    .map_err(|_| ProductionInputErrorV1::TimeRefused)?;
-                time_store
-                    .install_evidence(
-                        &signed_evidence,
-                        time_evidence_context,
-                        original_validation_seconds,
-                    )
-                    .map_err(|_| ProductionInputErrorV1::TimeRefused)?;
-                let proof = time_store
-                    .prove_route_ladder(time_evidence_context, original_validation_seconds)
-                    .map_err(|_| ProductionInputErrorV1::TimeRefused)?;
-                let original = time_store
-                    .consume_capability_at(proof, original_validation_seconds)
-                    .map_err(|_| ProductionInputErrorV1::TimeRefused)?;
-                let composition =
-                    ComposedBindingV2::bind(upstream.clone(), downstream.clone(), original)
-                        .map_err(|_| ProductionInputErrorV1::CompositionRefused)?;
-                validate_composition_stable_pins(&composition, pins)?;
-                let admission = admission_authority
-                    .admit_validated_composed_route_v2(
-                        trusted_now_seconds,
-                        pins.route_id,
-                        &composition,
-                        rosters,
-                    )
-                    .map_err(|_| ProductionInputErrorV1::AdmissionRefused)?;
-                if admission.registry_digest() != resolved_registry.manifest_digest()
-                    || admission.registry_epoch() != resolved_registry.epoch()
-                {
-                    return Err(ProductionInputErrorV1::PinMismatch);
-                }
-                let participant_sessions = authenticate_participant_bundle(
-                    &participant_bundle,
-                    ParticipantAuthenticationContextV1 {
-                        secp: &secp,
-                        rosters: &roster_bundle,
-                        registry: &resolved_registry,
-                        upstream: &upstream,
-                        downstream: &downstream,
-                        admission: &admission,
-                        now: composition.time_proof_validated_at_seconds(),
-                    },
-                )?;
-                if trusted_now_seconds != composition.time_proof_validated_at_seconds() {
-                    let _ = authenticate_participant_bundle(
-                        &participant_bundle,
-                        ParticipantAuthenticationContextV1 {
-                            secp: &secp,
-                            rosters: &roster_bundle,
-                            registry: &resolved_registry,
-                            upstream: &upstream,
-                            downstream: &downstream,
-                            admission: &admission,
-                            now: trusted_now_seconds,
-                        },
-                    )?;
-                }
-                let checkpoint = build_admission_checkpoint(AdmissionCheckpointContextV1 {
-                    pins,
-                    registry: &resolved_registry,
-                    admission: &admission,
-                    composition: &composition,
-                    rosters: &roster_bundle,
-                    participant_bindings_digest: participant_bundle.bundle_digest()?,
-                    relay_binding_digest: roster_bundle.bundle_digest()?,
-                    registry_authority_set_digest,
-                    time_policy_authority_set_digest,
-                    time_evidence_authority_set_digest,
-                })?;
-                prove_current_time_ancestry(
-                    &mut time_store,
-                    CurrentTimeAncestryContextV1 {
-                        checkpoint: &checkpoint,
-                        authorities: &authority_bundle,
-                        secp: &secp,
-                        registry: &resolved_registry,
-                        upstream: &upstream,
-                        downstream: &downstream,
-                        trusted_now_seconds,
-                        require_ready: true,
-                    },
-                )?;
-                if let Some(journal) = provisioning.as_deref_mut() {
-                    journal
-                        .complete(ProductionProvisioningStageV1::TimeAnchorStore)
-                        .map_err(|_| ProductionInputErrorV1::ProvisioningRefused)?;
-                    journal
-                        .begin(ProductionProvisioningStageV1::RouteStore)
-                        .map_err(|_| ProductionInputErrorV1::ProvisioningRefused)?;
-                }
-                let mut created_route_store = match route_store.take() {
-                    Some(store) => store,
-                    None if path_is_present(route_path)? => {
-                        return Err(ProductionInputErrorV1::RouteStateRefused)
-                    }
-                    None => DurableRouteStoreV1::create(route_path)
-                        .map_err(|_| ProductionInputErrorV1::RouteStateRefused)?,
-                };
-                persist_new_route_checkpoint(
-                    &mut created_route_store,
-                    &checkpoint,
-                    pins.process_owner_id,
+    let (
+        admission,
+        composition,
+        participant_sessions,
+        contracts_bootstrap,
+        checkpoint,
+        current_time_ancestry_ready,
+    ) = match recovered_checkpoint {
+        None => {
+            let original_validation_seconds = decoded_evidence.observed_at_seconds();
+            time_store
+                .install_policy(
+                    &signed_policy,
+                    time_policy_context,
+                    original_validation_seconds,
+                )
+                .map_err(|_| ProductionInputErrorV1::TimeRefused)?;
+            time_store
+                .install_evidence(
+                    &signed_evidence,
+                    time_evidence_context,
+                    original_validation_seconds,
+                )
+                .map_err(|_| ProductionInputErrorV1::TimeRefused)?;
+            let proof = time_store
+                .prove_route_ladder(time_evidence_context, original_validation_seconds)
+                .map_err(|_| ProductionInputErrorV1::TimeRefused)?;
+            let original = time_store
+                .consume_capability_at(proof, original_validation_seconds)
+                .map_err(|_| ProductionInputErrorV1::TimeRefused)?;
+            let composition =
+                ComposedBindingV2::bind(upstream.clone(), downstream.clone(), original)
+                    .map_err(|_| ProductionInputErrorV1::CompositionRefused)?;
+            validate_composition_stable_pins(&composition, pins)?;
+            let contracts_bootstrap = authenticate_retained_contracts_bootstrap_v5(
+                retained_contracts_bootstrap.take(),
+                &composition,
+                &resolved_registry,
+                &roster_bundle,
+                &secp,
+            )?;
+            let admission = admission_authority
+                .admit_validated_composed_route_v2(
                     trusted_now_seconds,
-                    config.bounds().lease_duration_ms,
-                )?;
-                route_store = Some(created_route_store);
-                (
-                    admission,
-                    composition,
-                    participant_sessions,
-                    checkpoint,
-                    true,
+                    pins.route_id,
+                    &composition,
+                    rosters,
                 )
+                .map_err(|_| ProductionInputErrorV1::AdmissionRefused)?;
+            if admission.registry_digest() != resolved_registry.manifest_digest()
+                || admission.registry_epoch() != resolved_registry.epoch()
+            {
+                return Err(ProductionInputErrorV1::PinMismatch);
             }
-            Some(checkpoint) => {
-                let historical = time_store
-                    .verify_frozen_route_ladder(
-                        frozen_time_proof_checkpoint(&checkpoint)?,
-                        &signed_policy,
-                        &signed_evidence,
-                        time_evidence_context,
-                    )
-                    .map_err(|_| ProductionInputErrorV1::TimeRefused)?;
-                let composition = ComposedBindingV2::bind_recovered(
-                    upstream.clone(),
-                    downstream.clone(),
-                    historical,
-                )
-                .map_err(|_| ProductionInputErrorV1::CompositionRefused)?;
-                validate_composition_stable_pins(&composition, pins)?;
-                if composition.binding_digest() != checkpoint.composition_v2_digest {
-                    return Err(ProductionInputErrorV1::PinMismatch);
-                }
-                let admission = admission_authority
-                    .recover_validated_composed_route_v2(pins.route_id, &composition, &checkpoint)
-                    .map_err(|_| ProductionInputErrorV1::AdmissionRefused)?;
-                let participant_sessions = authenticate_participant_bundle(
+            let participant_sessions = authenticate_participant_bundle(
+                &participant_bundle,
+                ParticipantAuthenticationContextV1 {
+                    secp: &secp,
+                    rosters: &roster_bundle,
+                    registry: &resolved_registry,
+                    upstream: &upstream,
+                    downstream: &downstream,
+                    admission: &admission,
+                    now: composition.time_proof_validated_at_seconds(),
+                },
+            )?;
+            if trusted_now_seconds != composition.time_proof_validated_at_seconds() {
+                let _ = authenticate_participant_bundle(
                     &participant_bundle,
                     ParticipantAuthenticationContextV1 {
                         secp: &secp,
@@ -1651,36 +1682,134 @@ fn load_authenticated_production_inputs_inner_v1(
                         upstream: &upstream,
                         downstream: &downstream,
                         admission: &admission,
-                        now: checkpoint.time.validated_at_seconds,
+                        now: trusted_now_seconds,
                     },
                 )?;
-                let current_time_ancestry_ready = prove_current_time_ancestry(
-                    &mut time_store,
-                    CurrentTimeAncestryContextV1 {
-                        checkpoint: &checkpoint,
-                        authorities: &authority_bundle,
-                        secp: &secp,
-                        registry: &resolved_registry,
-                        upstream: &upstream,
-                        downstream: &downstream,
-                        trusted_now_seconds,
-                        require_ready: false,
-                    },
-                )?;
-                if let Some(journal) = provisioning.as_deref_mut() {
-                    journal
-                        .complete(ProductionProvisioningStageV1::TimeAnchorStore)
-                        .map_err(|_| ProductionInputErrorV1::ProvisioningRefused)?;
-                }
-                (
-                    admission,
-                    composition,
-                    participant_sessions,
-                    checkpoint,
-                    current_time_ancestry_ready,
-                )
             }
-        };
+            let checkpoint = build_admission_checkpoint(AdmissionCheckpointContextV1 {
+                pins,
+                registry: &resolved_registry,
+                admission: &admission,
+                composition: &composition,
+                rosters: &roster_bundle,
+                participant_bindings_digest: participant_bundle.bundle_digest()?,
+                relay_binding_digest: roster_bundle.bundle_digest()?,
+                registry_authority_set_digest,
+                time_policy_authority_set_digest,
+                time_evidence_authority_set_digest,
+            })?;
+            prove_current_time_ancestry(
+                &mut time_store,
+                CurrentTimeAncestryContextV1 {
+                    checkpoint: &checkpoint,
+                    authorities: &authority_bundle,
+                    secp: &secp,
+                    registry: &resolved_registry,
+                    upstream: &upstream,
+                    downstream: &downstream,
+                    trusted_now_seconds,
+                    require_ready: true,
+                },
+            )?;
+            if let Some(journal) = provisioning.as_deref_mut() {
+                journal
+                    .complete(ProductionProvisioningStageV1::TimeAnchorStore)
+                    .map_err(|_| ProductionInputErrorV1::ProvisioningRefused)?;
+                journal
+                    .begin(ProductionProvisioningStageV1::RouteStore)
+                    .map_err(|_| ProductionInputErrorV1::ProvisioningRefused)?;
+            }
+            let mut created_route_store = match route_store.take() {
+                Some(store) => store,
+                None if path_is_present(route_path)? => {
+                    return Err(ProductionInputErrorV1::RouteStateRefused)
+                }
+                None => DurableRouteStoreV1::create(route_path)
+                    .map_err(|_| ProductionInputErrorV1::RouteStateRefused)?,
+            };
+            persist_new_route_checkpoint(
+                &mut created_route_store,
+                &checkpoint,
+                pins.process_owner_id,
+                trusted_now_seconds,
+                config.bounds().lease_duration_ms,
+            )?;
+            route_store = Some(created_route_store);
+            (
+                admission,
+                composition,
+                participant_sessions,
+                contracts_bootstrap,
+                checkpoint,
+                true,
+            )
+        }
+        Some(checkpoint) => {
+            let historical = time_store
+                .verify_frozen_route_ladder(
+                    frozen_time_proof_checkpoint(&checkpoint)?,
+                    &signed_policy,
+                    &signed_evidence,
+                    time_evidence_context,
+                )
+                .map_err(|_| ProductionInputErrorV1::TimeRefused)?;
+            let composition =
+                ComposedBindingV2::bind_recovered(upstream.clone(), downstream.clone(), historical)
+                    .map_err(|_| ProductionInputErrorV1::CompositionRefused)?;
+            validate_composition_stable_pins(&composition, pins)?;
+            let contracts_bootstrap = authenticate_retained_contracts_bootstrap_v5(
+                retained_contracts_bootstrap.take(),
+                &composition,
+                &resolved_registry,
+                &roster_bundle,
+                &secp,
+            )?;
+            if composition.binding_digest() != checkpoint.composition_v2_digest {
+                return Err(ProductionInputErrorV1::PinMismatch);
+            }
+            let admission = admission_authority
+                .recover_validated_composed_route_v2(pins.route_id, &composition, &checkpoint)
+                .map_err(|_| ProductionInputErrorV1::AdmissionRefused)?;
+            let participant_sessions = authenticate_participant_bundle(
+                &participant_bundle,
+                ParticipantAuthenticationContextV1 {
+                    secp: &secp,
+                    rosters: &roster_bundle,
+                    registry: &resolved_registry,
+                    upstream: &upstream,
+                    downstream: &downstream,
+                    admission: &admission,
+                    now: checkpoint.time.validated_at_seconds,
+                },
+            )?;
+            let current_time_ancestry_ready = prove_current_time_ancestry(
+                &mut time_store,
+                CurrentTimeAncestryContextV1 {
+                    checkpoint: &checkpoint,
+                    authorities: &authority_bundle,
+                    secp: &secp,
+                    registry: &resolved_registry,
+                    upstream: &upstream,
+                    downstream: &downstream,
+                    trusted_now_seconds,
+                    require_ready: false,
+                },
+            )?;
+            if let Some(journal) = provisioning.as_deref_mut() {
+                journal
+                    .complete(ProductionProvisioningStageV1::TimeAnchorStore)
+                    .map_err(|_| ProductionInputErrorV1::ProvisioningRefused)?;
+            }
+            (
+                admission,
+                composition,
+                participant_sessions,
+                contracts_bootstrap,
+                checkpoint,
+                current_time_ancestry_ready,
+            )
+        }
+    };
     let route_store = route_store.ok_or(ProductionInputErrorV1::RouteStateRefused)?;
     if route_store
         .audit_frozen_admission_checkpoint_v2(pins.route_id)
@@ -1707,10 +1836,11 @@ fn load_authenticated_production_inputs_inner_v1(
     Ok(AuthenticatedProductionInputsV1 {
         admission,
         admission_authority,
-        composition,
+        composition: Rc::new(composition),
         resolved_registry,
-        route_store,
+        route_store: Some(route_store),
         time_store,
+        registry_authorities: authority_bundle.registry,
         time_policy_authorities: authority_bundle.time_policy,
         time_evidence_authorities: authority_bundle.time_evidence,
         time_verification_context: SecpContext::new(&VERIFICATION_CONTEXT_SEED_V1),
@@ -1720,8 +1850,83 @@ fn load_authenticated_production_inputs_inner_v1(
         roster_bundle,
         evm_sessions: participant_sessions.evm,
         bitcoin_sessions: participant_sessions.bitcoin,
+        contracts_bootstrap,
         current_time_ancestry_ready,
     })
+}
+
+/// One owner-file read retained until an authenticated composition exists.
+///
+/// This type deliberately has no `Clone`: V5 reads the artifact once from one
+/// opened inode and moves those exact bytes into the applicable create or
+/// recovery arm.  A path is never reopened after composition.
+struct RetainedContractsBootstrapV5 {
+    bytes: Vec<u8>,
+    pins: ProductionContractsBootstrapPinsV5,
+}
+
+fn read_retained_contracts_bootstrap_v5(
+    config: &crate::production_config::ProductionBootstrapConfigV1,
+    layout: &crate::production_config::ValidatedProductionLayoutV1,
+) -> Result<Option<RetainedContractsBootstrapV5>, ProductionInputErrorV1> {
+    match (
+        layout.contracts_bootstrap(),
+        config.contracts_bootstrap_pins_v5(),
+    ) {
+        (None, None) => Ok(None),
+        (Some(path), Some(pins)) => {
+            let bytes = read_owner_file_bounded(
+                path,
+                CONTRACTS_BOOTSTRAP_BYTES_V1 as u64,
+                ProductionConfigErrorV1::InputArtifactUnavailable,
+            )
+            .map_err(|_| ProductionInputErrorV1::ContractsBootstrapRefused)?;
+            if bytes.len() != CONTRACTS_BOOTSTRAP_BYTES_V1 {
+                return Err(ProductionInputErrorV1::ContractsBootstrapRefused);
+            }
+            Ok(Some(RetainedContractsBootstrapV5 { bytes, pins }))
+        }
+        (None, Some(_)) | (Some(_), None) => Err(ProductionInputErrorV1::ContractsBootstrapRefused),
+    }
+}
+
+fn authenticate_retained_contracts_bootstrap_v5(
+    retained: Option<RetainedContractsBootstrapV5>,
+    composition: &ComposedBindingV2,
+    registry: &ResolvedRegistryV1,
+    relay_rosters: &ProductionRelayRosterBundleV1,
+    secp: &SecpContext,
+) -> Result<Option<AuthenticatedContractsBootstrapV1>, ProductionInputErrorV1> {
+    let Some(retained) = retained else {
+        return Ok(None);
+    };
+    let authenticated = authenticate_contracts_bootstrap_v1(
+        &retained.bytes,
+        composition,
+        registry,
+        relay_rosters,
+        secp,
+    )
+    .map_err(|_| ProductionInputErrorV1::ContractsBootstrapRefused)?;
+    validate_contracts_bootstrap_stage_pins_v5(
+        *authenticated.commit_stage_digest(),
+        *authenticated.reveal_stage_digest(),
+        retained.pins,
+    )?;
+    Ok(Some(authenticated))
+}
+
+fn validate_contracts_bootstrap_stage_pins_v5(
+    actual_commit: Digest32,
+    actual_reveal: Digest32,
+    expected: ProductionContractsBootstrapPinsV5,
+) -> Result<(), ProductionInputErrorV1> {
+    if actual_commit != expected.commit_stage_digest()
+        || actual_reveal != expected.reveal_stage_digest()
+    {
+        return Err(ProductionInputErrorV1::ContractsBootstrapRefused);
+    }
+    Ok(())
 }
 
 fn validate_checkpoint_against_public_inputs(
@@ -2358,10 +2563,13 @@ mod tests {
 
     use super::*;
     use crate::production_config::{
-        load_production_create_bootstrap_v1, load_production_reopen_bootstrap_v1,
-        ProductionBootstrapConfigV1, ProductionPathKindV1, ProductionPathReferencesV1,
-        ProductionRoutePinsV1, ProductionRuntimeBoundsV1, PRODUCTION_CREATE_CONFIG_FILE_V1,
-        PRODUCTION_REOPEN_CONFIG_FILE_V1,
+        load_production_create_bootstrap_v1, load_production_create_bootstrap_v5,
+        load_production_reopen_bootstrap_v1, ProductionBootstrapConfigV1,
+        ProductionF6PathReferencesV4, ProductionFamilyInputsV5, ProductionPathKindV1,
+        ProductionPathReferencesV1, ProductionRoutePinsV1, ProductionRuntimeBoundsV1,
+        PRODUCTION_CREATE_CONFIG_FILE_V1, PRODUCTION_CREATE_CONFIG_FILE_V5,
+        PRODUCTION_F6_PATH_ROLE_COUNT_V4, PRODUCTION_REOPEN_CONFIG_FILE_V1,
+        PRODUCTION_REOPEN_CONFIG_FILE_V5,
     };
     #[cfg(feature = "production")]
     use crate::production_config::{
@@ -2376,6 +2584,9 @@ mod tests {
     const REGISTRY_SECRETS: [[u8; 32]; 3] = [[0x03; 32], [0x04; 32], [0x05; 32]];
     const PARTICIPANT_SECRETS: [[u8; 32]; 2] = [[0x61; 32], [0x62; 32]];
     const BITCOIN_PARTICIPANT_SECRETS: [[u8; 32]; 2] = [[0x63; 32], [0x64; 32]];
+    const IDENTITY_STORE_PATH_V5: &str = "inputs/contracts-transport-identity-v5";
+    const BUDGET_POLICY_PATH_V5: &str = "inputs/contracts-budget-policy-v5";
+    const CONTRACTS_BOOTSTRAP_PATH_V5: &str = "inputs/contracts-bootstrap.v1";
     #[cfg(feature = "production")]
     const IDENTITY_STORE_PATH_V3: &str = "inputs/contracts-transport-identity-v3";
     #[cfg(feature = "production")]
@@ -2436,6 +2647,50 @@ mod tests {
 
         fn write_manifests(&self, pins: ProductionRoutePinsV1) {
             write_bootstrap_manifests(&self.root, pins, self.bounds, self.paths.clone());
+        }
+
+        fn install_v5_manifests_and_artifact(
+            &self,
+            artifact: &[u8],
+            contracts_pins: ProductionContractsBootstrapPinsV5,
+        ) {
+            make_owner_directory(&self.root.join(IDENTITY_STORE_PATH_V5));
+            write_owner_file(&self.root.join(BUDGET_POLICY_PATH_V5), b"budget-policy-v5");
+            write_owner_file(&self.root.join(CONTRACTS_BOOTSTRAP_PATH_V5), artifact);
+            let inputs = || {
+                ProductionFamilyInputsV5::new(
+                    IDENTITY_STORE_PATH_V5.to_owned(),
+                    BUDGET_POLICY_PATH_V5.to_owned(),
+                    ProductionF6PathReferencesV4::from_ordered(f6_path_references_v4())
+                        .expect("V5 F6 paths"),
+                    CONTRACTS_BOOTSTRAP_PATH_V5.to_owned(),
+                    contracts_pins,
+                )
+            };
+            let create = ProductionBootstrapConfigV1::from_parts_v5(
+                ProductionBootstrapModeV1::Create,
+                self.pins,
+                self.bounds,
+                self.paths.clone(),
+                inputs(),
+            )
+            .expect("V5 create config");
+            let reopen = ProductionBootstrapConfigV1::from_parts_v5(
+                ProductionBootstrapModeV1::ReopenExisting,
+                self.pins,
+                self.bounds,
+                self.paths.clone(),
+                inputs(),
+            )
+            .expect("V5 reopen config");
+            write_owner_file(
+                &self.root.join(PRODUCTION_CREATE_CONFIG_FILE_V5),
+                &create.canonical_bytes().expect("V5 create bytes"),
+            );
+            write_owner_file(
+                &self.root.join(PRODUCTION_REOPEN_CONFIG_FILE_V5),
+                &reopen.canonical_bytes().expect("V5 reopen bytes"),
+            );
         }
 
         #[cfg(feature = "production")]
@@ -2723,6 +2978,131 @@ mod tests {
             &created_bitcoin_roster
         );
         assert!(reopened.current_time_ancestry_ready());
+    }
+
+    #[test]
+    fn route_store_transfer_is_one_shot_while_composition_owner_remains_exact() {
+        let prepared = prepare_inputs();
+        let create = load_production_create_bootstrap_v1(&prepared.root)
+            .expect("validated create bootstrap");
+        let mut inputs =
+            load_authenticated_production_inputs_v1(&create, time_common::EVIDENCE_TIME)
+                .expect("authenticated create inputs");
+        let composition = inputs.composition_owner();
+        assert_eq!(
+            composition.binding_digest(),
+            inputs.composition().binding_digest()
+        );
+        assert_eq!(
+            composition.route_scope_digest(),
+            inputs.composition().route_scope_digest()
+        );
+
+        let route_store = inputs
+            .take_route_store_for_f6()
+            .expect("single route-store transfer");
+        assert!(inputs.take_route_store_for_f6().is_err());
+        assert!(inputs.audited_route_checkpoint().is_err());
+        assert_eq!(
+            composition.binding_digest(),
+            inputs.composition().binding_digest()
+        );
+        drop(route_store);
+    }
+
+    #[test]
+    fn v5_contracts_tamper_is_refused_before_route_store_creation() {
+        let prepared = prepare_inputs();
+        let contracts_pins = ProductionContractsBootstrapPinsV5::new([0x91; 32], [0x92; 32])
+            .expect("distinct Contracts pins");
+        let mut tampered = vec![0_u8; CONTRACTS_BOOTSTRAP_BYTES_V1];
+        tampered[0] = 1;
+        prepared.install_v5_manifests_and_artifact(&tampered, contracts_pins);
+        let route_path = prepared.path(ProductionPathRoleV1::RouteStore);
+        assert!(!route_path.exists());
+
+        let bootstrap = load_production_create_bootstrap_v5(&prepared.root)
+            .expect("physically valid V5 bootstrap");
+        assert_eq!(
+            input_error(load_authenticated_production_inputs_v1(
+                &bootstrap,
+                time_common::EVIDENCE_TIME,
+            )),
+            ProductionInputErrorV1::ContractsBootstrapRefused
+        );
+        assert!(
+            !route_path.exists(),
+            "Contracts refusal must precede every RouteStore mutation"
+        );
+    }
+
+    #[test]
+    fn v5_composition_inputs_are_refused_before_contracts_artifact_authentication() {
+        let prepared = prepare_inputs();
+        let contracts_pins = ProductionContractsBootstrapPinsV5::new([0x93; 32], [0x94; 32])
+            .expect("distinct Contracts pins");
+        prepared.install_v5_manifests_and_artifact(
+            &vec![0_u8; CONTRACTS_BOOTSTRAP_BYTES_V1],
+            contracts_pins,
+        );
+        write_owner_file(
+            &prepared.path(ProductionPathRoleV1::UpstreamTerms),
+            b"tampered-upstream-terms",
+        );
+        let route_path = prepared.path(ProductionPathRoleV1::RouteStore);
+        let bootstrap = load_production_create_bootstrap_v5(&prepared.root)
+            .expect("physically valid V5 bootstrap");
+        assert_eq!(
+            input_error(load_authenticated_production_inputs_v1(
+                &bootstrap,
+                time_common::EVIDENCE_TIME,
+            )),
+            ProductionInputErrorV1::TermsRefused
+        );
+        assert!(!route_path.exists());
+    }
+
+    #[test]
+    fn v5_contracts_artifact_is_retained_from_one_owner_file_open() {
+        let prepared = prepare_inputs();
+        let contracts_pins = ProductionContractsBootstrapPinsV5::new([0x95; 32], [0x96; 32])
+            .expect("distinct Contracts pins");
+        let original = vec![0x31_u8; CONTRACTS_BOOTSTRAP_BYTES_V1];
+        prepared.install_v5_manifests_and_artifact(&original, contracts_pins);
+        let bootstrap = load_production_create_bootstrap_v5(&prepared.root)
+            .expect("physically valid V5 bootstrap");
+        let retained = read_retained_contracts_bootstrap_v5(bootstrap.config(), bootstrap.layout())
+            .expect("retained Contracts artifact")
+            .expect("V5 artifact present");
+
+        let replacement = vec![0x32_u8; CONTRACTS_BOOTSTRAP_BYTES_V1];
+        let replacement_path = prepared
+            .root
+            .join("inputs/contracts-bootstrap-replacement.v1");
+        write_owner_file(&replacement_path, &replacement);
+        fs::rename(
+            &replacement_path,
+            prepared.root.join(CONTRACTS_BOOTSTRAP_PATH_V5),
+        )
+        .expect("substitute Contracts artifact inode after retained read");
+        assert_eq!(retained.bytes, original);
+        assert_ne!(retained.bytes, replacement);
+        assert!(!prepared.path(ProductionPathRoleV1::RouteStore).exists());
+    }
+
+    #[test]
+    fn v5_contracts_commit_and_reveal_pins_are_independently_required() {
+        let pins = ProductionContractsBootstrapPinsV5::new([0x97; 32], [0x98; 32])
+            .expect("distinct Contracts pins");
+        assert!(validate_contracts_bootstrap_stage_pins_v5([0x97; 32], [0x98; 32], pins).is_ok());
+        assert_eq!(
+            validate_contracts_bootstrap_stage_pins_v5([0x99; 32], [0x98; 32], pins),
+            Err(ProductionInputErrorV1::ContractsBootstrapRefused)
+        );
+        assert_eq!(
+            validate_contracts_bootstrap_stage_pins_v5([0x97; 32], [0x99; 32], pins),
+            Err(ProductionInputErrorV1::ContractsBootstrapRefused)
+        );
     }
 
     #[cfg(feature = "production")]
@@ -3075,6 +3455,8 @@ mod tests {
             .expect("authenticated create inputs");
         let snapshot_bytes = created
             .route_store
+            .as_ref()
+            .expect("route store retained")
             .load_snapshot(ROUTE_ID)
             .expect("route snapshot")
             .encode_canonical()
@@ -3670,6 +4052,23 @@ mod tests {
             .map(str::to_owned),
         )
         .expect("canonical path references")
+    }
+
+    fn f6_path_references_v4() -> [String; PRODUCTION_F6_PATH_ROLE_COUNT_V4] {
+        [
+            "state/solver-status.sqlite3",
+            "state/upstream-pre-f6-time.sqlite3",
+            "state/downstream-pre-f6-time.sqlite3",
+            "state/upstream-f6-binding.log",
+            "state/upstream-f6-receipts.sqlite3",
+            "state/upstream-f6-candidates.log",
+            "state/upstream-f6-attestation.sqlite3",
+            "state/downstream-f6-binding.log",
+            "state/downstream-f6-receipts.sqlite3",
+            "state/downstream-f6-candidates.log",
+            "state/downstream-f6-attestation.sqlite3",
+        ]
+        .map(str::to_owned)
     }
 
     const fn runtime_bounds() -> ProductionRuntimeBoundsV1 {

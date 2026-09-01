@@ -730,7 +730,10 @@ impl<L: BindingLog> DurableBinding<L> {
     /// reservation is consumed; (3) acceptance; (4) the `terms_hash`;
     /// (5) persistence — all committed as ONE frame. A crash leaves
     /// either no binding or the whole binding.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+    )]
     pub fn bind_selected(
         &mut self,
         rfq: &RfqV1,

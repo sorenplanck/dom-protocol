@@ -34,6 +34,10 @@ pub(crate) const MAX_SIGNET_CHALLENGE_BYTES: usize = 10_000;
 const PUBLIC_SIGNET_CHALLENGE_HEX: &str = "512103ad5e0edad18cb1f0fc0d28a3d4f1f3e445640337489abb10404f2d1e086be430210359ef5021964fe22d6f8e05b2463c9540ce96883fe3b278760f048f5189f2e6c452ae";
 const RPC_ID: &str = "dom-interop-f7";
 const SIGNET_CHALLENGE_DIGEST_DOMAIN: &[u8] = b"DOM-INTEROP/F7/BTC-LIVE/SIGNET-CHALLENGE/V1\0";
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Commits the exact public Signet challenge used by a live RPC authority.
 pub fn bitcoin_signet_challenge_digest_v1(challenge: &[u8]) -> Result<[u8; 32], LiveBitcoinError> {
@@ -109,6 +113,51 @@ pub struct BitcoinCoreRpcConfigV1 {
     pub expected_signet_challenge: Option<Vec<u8>>,
 }
 
+/// Validated connection and whole-request deadlines for the live Bitcoin
+/// Core authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BitcoinCoreRpcTimeoutsV1 {
+    connect: Duration,
+    request: Duration,
+}
+
+impl BitcoinCoreRpcTimeoutsV1 {
+    /// Validates non-zero bounded deadlines. The connection deadline may not
+    /// exceed the complete request budget.
+    pub fn new(connect: Duration, request: Duration) -> Result<Self, LiveBitcoinError> {
+        if connect.is_zero()
+            || request.is_zero()
+            || connect > MAX_CONNECT_TIMEOUT
+            || request > MAX_REQUEST_TIMEOUT
+            || connect > request
+        {
+            return Err(LiveBitcoinError::InvalidRequest);
+        }
+        Ok(Self { connect, request })
+    }
+
+    /// Existing production defaults used by [`BitcoinCoreRpcClientV1::connect`].
+    #[must_use]
+    pub const fn production_default() -> Self {
+        Self {
+            connect: DEFAULT_CONNECT_TIMEOUT,
+            request: DEFAULT_REQUEST_TIMEOUT,
+        }
+    }
+
+    /// Connection-establishment deadline.
+    #[must_use]
+    pub const fn connect(&self) -> Duration {
+        self.connect
+    }
+
+    /// Whole-request deadline, including bounded body reads.
+    #[must_use]
+    pub const fn request(&self) -> Duration {
+        self.request
+    }
+}
+
 /// Concrete Bitcoin Core client with an opaque credential authority.
 ///
 /// This type has no credential getter and its debug representation is
@@ -134,6 +183,15 @@ impl core::fmt::Debug for BitcoinCoreRpcClientV1 {
 impl BitcoinCoreRpcClientV1 {
     /// Connects to and authenticates the exact configured chain identity.
     pub fn connect(config: BitcoinCoreRpcConfigV1) -> Result<Self, LiveBitcoinError> {
+        Self::connect_with_timeouts(config, BitcoinCoreRpcTimeoutsV1::production_default())
+    }
+
+    /// Connects with explicit validated connection and whole-request
+    /// deadlines while preserving all endpoint, cookie and chain checks.
+    pub fn connect_with_timeouts(
+        config: BitcoinCoreRpcConfigV1,
+        timeouts: BitcoinCoreRpcTimeoutsV1,
+    ) -> Result<Self, LiveBitcoinError> {
         let node_endpoint = validate_endpoint(&config.endpoint)?;
         validate_wallet_name(&config.wallet_name)?;
         let cookie_file = validate_cookie_path(&config.cookie_file)?;
@@ -155,8 +213,8 @@ impl BitcoinCoreRpcClientV1 {
             segments.push(&config.wallet_name);
         }
         let client = Client::builder()
-            .connect_timeout(Duration::from_secs(3))
-            .timeout(Duration::from_secs(60))
+            .connect_timeout(timeouts.connect())
+            .timeout(timeouts.request())
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
             .build()
@@ -611,6 +669,25 @@ mod tests {
         assert!(expected_signet_challenge(BitcoinCoreNetworkV1::CustomSignet, None).is_err());
         assert!(
             expected_signet_challenge(BitcoinCoreNetworkV1::Regtest, Some(vec![0x51]),).is_err()
+        );
+    }
+
+    #[test]
+    fn timeout_policy_is_bounded_and_preserves_defaults() {
+        let defaults = BitcoinCoreRpcTimeoutsV1::production_default();
+        assert_eq!(defaults.connect(), Duration::from_secs(3));
+        assert_eq!(defaults.request(), Duration::from_secs(60));
+        assert!(BitcoinCoreRpcTimeoutsV1::new(Duration::ZERO, Duration::from_secs(1)).is_err());
+        assert!(
+            BitcoinCoreRpcTimeoutsV1::new(Duration::from_secs(2), Duration::from_secs(1),).is_err()
+        );
+        assert!(
+            BitcoinCoreRpcTimeoutsV1::new(Duration::from_secs(5), Duration::from_secs(301),)
+                .is_err()
+        );
+        assert!(
+            BitcoinCoreRpcTimeoutsV1::new(Duration::from_millis(250), Duration::from_secs(2),)
+                .is_ok()
         );
     }
 }

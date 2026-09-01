@@ -52,6 +52,17 @@ pub const GLOBAL_PAYLOAD_CAP_V1: usize = 1024 * 1024;
 /// Exact byte length of the typed V1 Abort payload.
 pub const ABORT_PAYLOAD_LEN_V1: usize = 32;
 
+/// Exact byte length of a typed EVM action request (`0x15`).
+pub const EVM_ACTION_REQUEST_PAYLOAD_LEN_V1: usize = 352;
+
+/// Maximum exact signed EIP-1559 transaction retained in an EVM action
+/// response (`0x16`).
+pub const EVM_SIGNED_ACTION_RAW_MAX_LEN_V1: usize = 8 * 1024;
+
+/// Fixed bytes before the variable signed transaction in an EVM action
+/// response (`0x16`).
+pub const EVM_SIGNED_ACTION_PAYLOAD_PREFIX_LEN_V1: usize = 452;
+
 /// Largest accepted canonical message.
 pub const MAX_MESSAGE_LEN_V1: usize = MESSAGE_FIXED_LEN_V1 + GLOBAL_PAYLOAD_CAP_V1;
 
@@ -110,6 +121,10 @@ pub enum MessageTypeV1 {
     Abort = 0x13,
     /// Idempotent acknowledgement.
     Ack = 0x14,
+    /// Public request for a role-scoped counterparty EVM signature.
+    EvmActionRequest = 0x15,
+    /// Exact role-scoped signed EVM transaction answering `0x15`.
+    EvmSignedAction = 0x16,
 }
 
 impl MessageTypeV1 {
@@ -135,6 +150,10 @@ impl MessageTypeV1 {
             | Self::AdaptorPreSignature => 8 * 1024,
             Self::BpFinal => 16 * 1024,
             Self::FinalRefund | Self::FinalClaim => 512 * 1024,
+            Self::EvmActionRequest => EVM_ACTION_REQUEST_PAYLOAD_LEN_V1,
+            Self::EvmSignedAction => {
+                EVM_SIGNED_ACTION_PAYLOAD_PREFIX_LEN_V1 + EVM_SIGNED_ACTION_RAW_MAX_LEN_V1
+            }
         }
     }
 
@@ -168,7 +187,444 @@ impl MessageTypeV1 {
             Self::FinalClaim => phase == SessionPhaseV1::ClaimBroadcast,
             Self::Abort => phase == SessionPhaseV1::Aborted,
             Self::Ack => true,
+            Self::EvmActionRequest | Self::EvmSignedAction => matches!(
+                phase,
+                SessionPhaseV1::RefundSigned
+                    | SessionPhaseV1::FundingAuthorized
+                    | SessionPhaseV1::FundingBroadcast
+                    | SessionPhaseV1::FundingConfirmed
+                    | SessionPhaseV1::ClaimBroadcast
+                    | SessionPhaseV1::RefundEligible
+                    | SessionPhaseV1::RefundBroadcast
+            ),
         }
+    }
+}
+
+/// Closed EVM action registry carried by DSC1 `0x15` and `0x16`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum EvmActionKindV1 {
+    /// Publish the exact frozen funding call.
+    Funding = 1,
+    /// Publish the exact frozen conditional claim call.
+    Claim = 2,
+    /// Publish the exact frozen timeout refund call.
+    Refund = 3,
+}
+
+impl TryFrom<u8> for EvmActionKindV1 {
+    type Error = TransportError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::Funding),
+            2 => Ok(Self::Claim),
+            3 => Ok(Self::Refund),
+            _ => Err(TransportError::InvalidTypedPayload),
+        }
+    }
+}
+
+/// Role whose independently retained EVM key may answer an action request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum EvmSignerRoleV1 {
+    /// Funder role, used only by funding and refund actions.
+    Funder = 1,
+    /// Beneficiary role, used only by claim actions.
+    Beneficiary = 2,
+}
+
+impl TryFrom<u8> for EvmSignerRoleV1 {
+    type Error = TransportError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::Funder),
+            2 => Ok(Self::Beneficiary),
+            _ => Err(TransportError::InvalidTypedPayload),
+        }
+    }
+}
+
+fn require_evm_action_role(
+    action: EvmActionKindV1,
+    role: EvmSignerRoleV1,
+) -> Result<(), TransportError> {
+    if matches!(
+        (action, role),
+        (
+            EvmActionKindV1::Funding | EvmActionKindV1::Refund,
+            EvmSignerRoleV1::Funder
+        ) | (EvmActionKindV1::Claim, EvmSignerRoleV1::Beneficiary)
+    ) {
+        Ok(())
+    } else {
+        Err(TransportError::InvalidTypedPayload)
+    }
+}
+
+/// Canonical public `0x15` request for one counterparty EVM signature.
+///
+/// This payload contains only public identifiers, accounts, and commitments.
+/// In particular it has no field capable of carrying an unsigned/raw
+/// transaction, adaptor scalar, wallet secret, or signing key. It is a
+/// request, not an execution authority; the remote role-scoped signer must
+/// independently reconstruct and authorize the committed plan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EvmActionRequestPayloadV1 {
+    action: EvmActionKindV1,
+    role: EvmSignerRoleV1,
+    owner_epoch: u64,
+    evm_chain_id: u64,
+    action_id: [u8; 32],
+    route_id: [u8; 32],
+    settlement_id: [u8; 32],
+    composition_binding_digest: [u8; 32],
+    execution_plan_digest: [u8; 32],
+    unsigned_call_digest: [u8; 32],
+    owner_id: [u8; 32],
+    requester_id: [u8; 32],
+    signer_id: [u8; 32],
+    contract: [u8; 20],
+    signer_account: [u8; 20],
+}
+
+impl EvmActionRequestPayloadV1 {
+    /// Construct an exact public request, rejecting empty bindings and a role
+    /// that cannot authorize the selected action.
+    pub fn new(input: EvmActionRequestInputV1) -> Result<Self, TransportError> {
+        require_evm_action_role(input.action, input.role)?;
+        if input.owner_epoch == 0
+            || input.evm_chain_id == 0
+            || input.action_id == [0; 32]
+            || input.route_id == [0; 32]
+            || input.settlement_id == [0; 32]
+            || input.composition_binding_digest == [0; 32]
+            || input.execution_plan_digest == [0; 32]
+            || input.unsigned_call_digest == [0; 32]
+            || input.owner_id == [0; 32]
+            || input.requester_id == [0; 32]
+            || input.signer_id == [0; 32]
+            || input.contract == [0; 20]
+            || input.signer_account == [0; 20]
+            || input.requester_id == input.signer_id
+        {
+            return Err(TransportError::InvalidTypedPayload);
+        }
+        Ok(Self {
+            action: input.action,
+            role: input.role,
+            owner_epoch: input.owner_epoch,
+            evm_chain_id: input.evm_chain_id,
+            action_id: input.action_id,
+            route_id: input.route_id,
+            settlement_id: input.settlement_id,
+            composition_binding_digest: input.composition_binding_digest,
+            execution_plan_digest: input.execution_plan_digest,
+            unsigned_call_digest: input.unsigned_call_digest,
+            owner_id: input.owner_id,
+            requester_id: input.requester_id,
+            signer_id: input.signer_id,
+            contract: input.contract,
+            signer_account: input.signer_account,
+        })
+    }
+
+    /// Decode the complete payload without accepting extensions.
+    pub fn decode_exact(bytes: &[u8]) -> Result<Self, TransportError> {
+        if bytes.len() != EVM_ACTION_REQUEST_PAYLOAD_LEN_V1 || &bytes[..4] != b"EVRQ" {
+            return Err(TransportError::NonCanonicalLength);
+        }
+        if read_u16(&bytes[4..6])? != 1 {
+            return Err(TransportError::UnsupportedVersion);
+        }
+        Self::new(EvmActionRequestInputV1 {
+            action: EvmActionKindV1::try_from(bytes[6])?,
+            role: EvmSignerRoleV1::try_from(bytes[7])?,
+            owner_epoch: read_u64(&bytes[8..16])?,
+            evm_chain_id: read_u64(&bytes[16..24])?,
+            action_id: array_32(&bytes[24..56])?,
+            route_id: array_32(&bytes[56..88])?,
+            settlement_id: array_32(&bytes[88..120])?,
+            composition_binding_digest: array_32(&bytes[120..152])?,
+            execution_plan_digest: array_32(&bytes[152..184])?,
+            unsigned_call_digest: array_32(&bytes[184..216])?,
+            owner_id: array_32(&bytes[216..248])?,
+            requester_id: array_32(&bytes[248..280])?,
+            signer_id: array_32(&bytes[280..312])?,
+            contract: bytes[312..332]
+                .try_into()
+                .map_err(|_| TransportError::NonCanonicalLength)?,
+            signer_account: bytes[332..352]
+                .try_into()
+                .map_err(|_| TransportError::NonCanonicalLength)?,
+        })
+    }
+
+    /// Encode the exact canonical wire payload.
+    #[must_use]
+    pub fn to_bytes(self) -> [u8; EVM_ACTION_REQUEST_PAYLOAD_LEN_V1] {
+        let mut bytes = [0; EVM_ACTION_REQUEST_PAYLOAD_LEN_V1];
+        bytes[..4].copy_from_slice(b"EVRQ");
+        bytes[4..6].copy_from_slice(&1_u16.to_le_bytes());
+        bytes[6] = self.action as u8;
+        bytes[7] = self.role as u8;
+        bytes[8..16].copy_from_slice(&self.owner_epoch.to_le_bytes());
+        bytes[16..24].copy_from_slice(&self.evm_chain_id.to_le_bytes());
+        for (range, value) in [
+            (24..56, self.action_id),
+            (56..88, self.route_id),
+            (88..120, self.settlement_id),
+            (120..152, self.composition_binding_digest),
+            (152..184, self.execution_plan_digest),
+            (184..216, self.unsigned_call_digest),
+            (216..248, self.owner_id),
+            (248..280, self.requester_id),
+            (280..312, self.signer_id),
+        ] {
+            bytes[range].copy_from_slice(&value);
+        }
+        bytes[312..332].copy_from_slice(&self.contract);
+        bytes[332..352].copy_from_slice(&self.signer_account);
+        bytes
+    }
+
+    /// Requested action.
+    pub const fn action(&self) -> EvmActionKindV1 {
+        self.action
+    }
+    /// Required signer role.
+    pub const fn role(&self) -> EvmSignerRoleV1 {
+        self.role
+    }
+    /// Durable owner epoch.
+    pub const fn owner_epoch(&self) -> u64 {
+        self.owner_epoch
+    }
+    /// EVM chain identifier.
+    pub const fn evm_chain_id(&self) -> u64 {
+        self.evm_chain_id
+    }
+    /// Stable action identifier.
+    pub const fn action_id(&self) -> &[u8; 32] {
+        &self.action_id
+    }
+    /// Route identifier.
+    pub const fn route_id(&self) -> &[u8; 32] {
+        &self.route_id
+    }
+    /// Settlement identifier.
+    pub const fn settlement_id(&self) -> &[u8; 32] {
+        &self.settlement_id
+    }
+    /// Composition binding.
+    pub const fn composition_binding_digest(&self) -> &[u8; 32] {
+        &self.composition_binding_digest
+    }
+    /// Frozen execution-plan commitment.
+    pub const fn execution_plan_digest(&self) -> &[u8; 32] {
+        &self.execution_plan_digest
+    }
+    /// Frozen unsigned-call commitment.
+    pub const fn unsigned_call_digest(&self) -> &[u8; 32] {
+        &self.unsigned_call_digest
+    }
+    /// Durable owner identifier.
+    pub const fn owner_id(&self) -> &[u8; 32] {
+        &self.owner_id
+    }
+    /// Requesting DSC1 participant.
+    pub const fn requester_id(&self) -> &[u8; 32] {
+        &self.requester_id
+    }
+    /// Requested signing participant.
+    pub const fn signer_id(&self) -> &[u8; 32] {
+        &self.signer_id
+    }
+    /// Frozen settlement contract.
+    pub const fn contract(&self) -> &[u8; 20] {
+        &self.contract
+    }
+    /// Frozen expected signer account.
+    pub const fn signer_account(&self) -> &[u8; 20] {
+        &self.signer_account
+    }
+}
+
+/// Inputs for one canonical EVM action request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EvmActionRequestInputV1 {
+    /// Requested action.
+    pub action: EvmActionKindV1,
+    /// Required signer role.
+    pub role: EvmSignerRoleV1,
+    /// Non-zero owner epoch.
+    pub owner_epoch: u64,
+    /// Non-zero EVM chain identifier.
+    pub evm_chain_id: u64,
+    /// Stable action identifier.
+    pub action_id: [u8; 32],
+    /// Route identifier.
+    pub route_id: [u8; 32],
+    /// Settlement identifier.
+    pub settlement_id: [u8; 32],
+    /// Composition binding.
+    pub composition_binding_digest: [u8; 32],
+    /// Frozen execution-plan commitment.
+    pub execution_plan_digest: [u8; 32],
+    /// Frozen unsigned-call commitment.
+    pub unsigned_call_digest: [u8; 32],
+    /// Durable owner identifier.
+    pub owner_id: [u8; 32],
+    /// Requesting DSC1 participant.
+    pub requester_id: [u8; 32],
+    /// Requested signing participant.
+    pub signer_id: [u8; 32],
+    /// Frozen settlement contract.
+    pub contract: [u8; 20],
+    /// Frozen expected signer account.
+    pub signer_account: [u8; 20],
+}
+
+/// Canonical public `0x16` answer containing one exact signed EVM
+/// transaction.
+///
+/// The response repeats every request binding, including owner epoch and both
+/// participants, and additionally binds the exact DSC1 digest of `0x15`.
+/// Therefore signed bytes cannot be transplanted to another request, route,
+/// settlement, owner epoch, role, account, or execution plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvmSignedActionPayloadV1 {
+    request: EvmActionRequestPayloadV1,
+    request_message_digest: [u8; 32],
+    signed_raw_digest: [u8; 32],
+    transaction_hash: [u8; 32],
+    signed_raw_transaction: Vec<u8>,
+}
+
+impl EvmSignedActionPayloadV1 {
+    /// Bind exact signed transaction bytes to one accepted request.
+    pub fn new(
+        request: EvmActionRequestPayloadV1,
+        request_message_digest: [u8; 32],
+        transaction_hash: [u8; 32],
+        signed_raw_transaction: Vec<u8>,
+    ) -> Result<Self, TransportError> {
+        if request_message_digest == [0; 32]
+            || transaction_hash == [0; 32]
+            || signed_raw_transaction.is_empty()
+            || signed_raw_transaction.len() > EVM_SIGNED_ACTION_RAW_MAX_LEN_V1
+        {
+            return Err(TransportError::InvalidTypedPayload);
+        }
+        let signed_raw_digest =
+            *blake2b_256_tagged("DOM:evm-signed-action-raw:v1", &signed_raw_transaction).as_bytes();
+        Ok(Self {
+            request,
+            request_message_digest,
+            signed_raw_digest,
+            transaction_hash,
+            signed_raw_transaction,
+        })
+    }
+
+    /// Decode the complete payload, recomputing the exact raw-byte digest.
+    pub fn decode_exact(bytes: &[u8]) -> Result<Self, TransportError> {
+        if bytes.len() < EVM_SIGNED_ACTION_PAYLOAD_PREFIX_LEN_V1
+            || bytes.len()
+                > EVM_SIGNED_ACTION_PAYLOAD_PREFIX_LEN_V1 + EVM_SIGNED_ACTION_RAW_MAX_LEN_V1
+            || &bytes[..4] != b"EVRS"
+        {
+            return Err(TransportError::NonCanonicalLength);
+        }
+        if read_u16(&bytes[4..6])? != 1 {
+            return Err(TransportError::UnsupportedVersion);
+        }
+        let request = EvmActionRequestPayloadV1::new(EvmActionRequestInputV1 {
+            action: EvmActionKindV1::try_from(bytes[6])?,
+            role: EvmSignerRoleV1::try_from(bytes[7])?,
+            owner_epoch: read_u64(&bytes[8..16])?,
+            evm_chain_id: read_u64(&bytes[16..24])?,
+            action_id: array_32(&bytes[24..56])?,
+            route_id: array_32(&bytes[56..88])?,
+            settlement_id: array_32(&bytes[88..120])?,
+            composition_binding_digest: array_32(&bytes[120..152])?,
+            execution_plan_digest: array_32(&bytes[152..184])?,
+            unsigned_call_digest: array_32(&bytes[184..216])?,
+            owner_id: array_32(&bytes[216..248])?,
+            requester_id: array_32(&bytes[248..280])?,
+            signer_id: array_32(&bytes[280..312])?,
+            contract: bytes[312..332]
+                .try_into()
+                .map_err(|_| TransportError::NonCanonicalLength)?,
+            signer_account: bytes[332..352]
+                .try_into()
+                .map_err(|_| TransportError::NonCanonicalLength)?,
+        })?;
+        let request_message_digest = array_32(&bytes[352..384])?;
+        let retained_raw_digest = array_32(&bytes[384..416])?;
+        let transaction_hash = array_32(&bytes[416..448])?;
+        let raw_len = usize::try_from(read_u32(&bytes[448..452])?)
+            .map_err(|_| TransportError::LengthOverflow)?;
+        let expected = EVM_SIGNED_ACTION_PAYLOAD_PREFIX_LEN_V1
+            .checked_add(raw_len)
+            .ok_or(TransportError::LengthOverflow)?;
+        if expected != bytes.len() {
+            return Err(TransportError::NonCanonicalLength);
+        }
+        let response = Self::new(
+            request,
+            request_message_digest,
+            transaction_hash,
+            bytes[EVM_SIGNED_ACTION_PAYLOAD_PREFIX_LEN_V1..].to_vec(),
+        )?;
+        if response.signed_raw_digest != retained_raw_digest {
+            return Err(TransportError::InvalidTypedPayload);
+        }
+        Ok(response)
+    }
+
+    /// Encode exact canonical bytes.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, TransportError> {
+        let raw_len = u32::try_from(self.signed_raw_transaction.len())
+            .map_err(|_| TransportError::LengthOverflow)?;
+        let total = EVM_SIGNED_ACTION_PAYLOAD_PREFIX_LEN_V1
+            .checked_add(self.signed_raw_transaction.len())
+            .ok_or(TransportError::LengthOverflow)?;
+        let mut bytes = vec![0; total];
+        bytes[..4].copy_from_slice(b"EVRS");
+        bytes[4..6].copy_from_slice(&1_u16.to_le_bytes());
+        let request_bytes = self.request.to_bytes();
+        bytes[6..352].copy_from_slice(&request_bytes[6..]);
+        bytes[352..384].copy_from_slice(&self.request_message_digest);
+        bytes[384..416].copy_from_slice(&self.signed_raw_digest);
+        bytes[416..448].copy_from_slice(&self.transaction_hash);
+        bytes[448..452].copy_from_slice(&raw_len.to_le_bytes());
+        bytes[452..].copy_from_slice(&self.signed_raw_transaction);
+        Ok(bytes)
+    }
+
+    /// Request this response answers exactly.
+    pub const fn request(&self) -> &EvmActionRequestPayloadV1 {
+        &self.request
+    }
+    /// Exact DSC1 digest of the accepted request.
+    pub const fn request_message_digest(&self) -> &[u8; 32] {
+        &self.request_message_digest
+    }
+    /// Digest of the exact signed raw transaction.
+    pub const fn signed_raw_digest(&self) -> &[u8; 32] {
+        &self.signed_raw_digest
+    }
+    /// Signed EVM transaction hash asserted by the responder.
+    pub const fn transaction_hash(&self) -> &[u8; 32] {
+        &self.transaction_hash
+    }
+    /// Exact signed EVM transaction bytes.
+    pub fn signed_raw_transaction(&self) -> &[u8] {
+        &self.signed_raw_transaction
     }
 }
 
@@ -241,6 +697,8 @@ impl TryFrom<u8> for MessageTypeV1 {
             0x12 => Self::FinalClaim,
             0x13 => Self::Abort,
             0x14 => Self::Ack,
+            0x15 => Self::EvmActionRequest,
+            0x16 => Self::EvmSignedAction,
             _ => return Err(TransportError::UnknownMessageType),
         })
     }
@@ -270,6 +728,9 @@ pub enum TransportError {
     ZeroIdentifier,
     /// A required type-owned payload commitment was all zero.
     ZeroPayloadCommitment,
+    /// A typed payload contains an invalid discriminator, empty binding, or
+    /// inconsistent exact-byte commitment.
+    InvalidTypedPayload,
     /// Chain or session context differs from the receiver.
     ContextMismatch,
     /// Sender is not in the frozen two-party roster.
@@ -313,6 +774,7 @@ impl fmt::Display for TransportError {
             Self::NonCanonicalLength => "message length is not canonical",
             Self::ZeroIdentifier => "a required identifier is zero",
             Self::ZeroPayloadCommitment => "a required payload commitment is zero",
+            Self::InvalidTypedPayload => "a typed payload is not canonical",
             Self::ContextMismatch => "message chain or session context differs",
             Self::UnknownSender => "message sender is not in the session roster",
             Self::AuthenticationFailed => "message authentication failed",
@@ -391,6 +853,46 @@ impl UnsignedMessageV1 {
             sequence,
             previous_transcript_hash,
             payload.into_bytes().to_vec(),
+        )
+    }
+
+    /// Construct a typed EVM action-request envelope.
+    pub fn new_evm_action_request(
+        chain_id: [u8; 32],
+        session_id: [u8; 32],
+        sender_id: [u8; 32],
+        sequence: u64,
+        previous_transcript_hash: [u8; 32],
+        payload: EvmActionRequestPayloadV1,
+    ) -> Result<Self, TransportError> {
+        Self::new(
+            MessageTypeV1::EvmActionRequest,
+            chain_id,
+            session_id,
+            sender_id,
+            sequence,
+            previous_transcript_hash,
+            payload.to_bytes().to_vec(),
+        )
+    }
+
+    /// Construct a typed EVM signed-action response envelope.
+    pub fn new_evm_signed_action(
+        chain_id: [u8; 32],
+        session_id: [u8; 32],
+        sender_id: [u8; 32],
+        sequence: u64,
+        previous_transcript_hash: [u8; 32],
+        payload: &EvmSignedActionPayloadV1,
+    ) -> Result<Self, TransportError> {
+        Self::new(
+            MessageTypeV1::EvmSignedAction,
+            chain_id,
+            session_id,
+            sender_id,
+            sequence,
+            previous_transcript_hash,
+            payload.to_bytes()?,
         )
     }
 
@@ -810,6 +1312,12 @@ fn valid_phase_movement(
     if kind == MessageTypeV1::Ack {
         return next == current;
     }
+    if matches!(
+        kind,
+        MessageTypeV1::EvmActionRequest | MessageTypeV1::EvmSignedAction
+    ) {
+        return next == current;
+    }
     if kind == MessageTypeV1::Abort {
         return abort_is_strictly_pre_funding(current) && next == SessionPhaseV1::Aborted;
     }
@@ -842,8 +1350,17 @@ fn message_digest(unsigned: &[u8]) -> [u8; 32] {
 }
 
 fn validate_registered_payload(kind: MessageTypeV1, payload: &[u8]) -> Result<(), TransportError> {
-    if kind == MessageTypeV1::Abort {
-        AbortPayloadV1::decode_exact(payload)?;
+    match kind {
+        MessageTypeV1::Abort => {
+            AbortPayloadV1::decode_exact(payload)?;
+        }
+        MessageTypeV1::EvmActionRequest => {
+            EvmActionRequestPayloadV1::decode_exact(payload)?;
+        }
+        MessageTypeV1::EvmSignedAction => {
+            EvmSignedActionPayloadV1::decode_exact(payload)?;
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -1255,6 +1772,140 @@ mod tests {
         bytes.extend_from_slice(payload);
         bytes.extend_from_slice(&message.as_bytes()[signature_offset..]);
         bytes
+    }
+
+    fn evm_request() -> Result<EvmActionRequestPayloadV1, TransportError> {
+        EvmActionRequestPayloadV1::new(EvmActionRequestInputV1 {
+            action: EvmActionKindV1::Funding,
+            role: EvmSignerRoleV1::Funder,
+            owner_epoch: 7,
+            evm_chain_id: 11_155_111,
+            action_id: [0x31; 32],
+            route_id: [0x32; 32],
+            settlement_id: [0x33; 32],
+            composition_binding_digest: [0x34; 32],
+            execution_plan_digest: [0x35; 32],
+            unsigned_call_digest: [0x36; 32],
+            owner_id: [0x37; 32],
+            requester_id: [0xa5; 32],
+            signer_id: [0xb6; 32],
+            contract: [0x38; 20],
+            signer_account: [0x39; 20],
+        })
+    }
+
+    #[test]
+    fn evm_action_payloads_are_exact_bounded_and_secret_free() -> Result<(), Box<dyn Error>> {
+        let request = evm_request()?;
+        let request_bytes = request.to_bytes();
+        assert_eq!(request_bytes.len(), EVM_ACTION_REQUEST_PAYLOAD_LEN_V1);
+        assert_eq!(
+            EvmActionRequestPayloadV1::decode_exact(&request_bytes)?,
+            request
+        );
+        assert_eq!(MessageTypeV1::EvmActionRequest as u8, 0x15);
+        assert_eq!(MessageTypeV1::EvmSignedAction as u8, 0x16);
+
+        let response =
+            EvmSignedActionPayloadV1::new(request, [0x41; 32], [0x42; 32], vec![0x02, 0x01, 0x03])?;
+        let response_bytes = response.to_bytes()?;
+        assert_eq!(
+            EvmSignedActionPayloadV1::decode_exact(&response_bytes)?,
+            response
+        );
+        assert_eq!(response.signed_raw_transaction(), [0x02, 0x01, 0x03]);
+
+        let oversized = vec![0x02; EVM_SIGNED_ACTION_RAW_MAX_LEN_V1 + 1];
+        assert_eq!(
+            EvmSignedActionPayloadV1::new(request, [0x41; 32], [0x42; 32], oversized),
+            Err(TransportError::InvalidTypedPayload)
+        );
+        let mut corrupt = response_bytes;
+        *corrupt.last_mut().ok_or(TransportError::UnexpectedEof)? ^= 1;
+        assert_eq!(
+            EvmSignedActionPayloadV1::decode_exact(&corrupt),
+            Err(TransportError::InvalidTypedPayload)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn evm_action_exchange_advances_transcript_and_rejects_transplant() -> Result<(), Box<dyn Error>>
+    {
+        let alice_key = identity(21)?;
+        let bob_key = identity(22)?;
+        let alice_id = [0xa5; 32];
+        let bob_id = [0xb6; 32];
+        let initial = [0x43; 32];
+        let mut receiver = SessionReceiverV1::new(
+            [0x11; 32],
+            [0x22; 32],
+            [
+                TransportParticipantV1::new(
+                    alice_id,
+                    alice_key.public_key(),
+                    DirectionV1::Initiator,
+                )?,
+                TransportParticipantV1::new(bob_id, bob_key.public_key(), DirectionV1::Responder)?,
+            ],
+            SessionPhaseV1::RefundSigned,
+            initial,
+        )?;
+        let request_payload = evm_request()?;
+        let request = SignedMessageV1::sign(
+            UnsignedMessageV1::new_evm_action_request(
+                [0x11; 32],
+                [0x22; 32],
+                alice_id,
+                0,
+                initial,
+                request_payload,
+            )?,
+            &alice_key,
+        )?;
+        let accepted = receiver.accept(request.as_bytes(), SessionPhaseV1::RefundSigned)?;
+        assert_ne!(accepted.transcript_hash, initial);
+        assert!(
+            receiver
+                .accept(request.as_bytes(), SessionPhaseV1::RefundSigned)?
+                .duplicate
+        );
+
+        let response_payload = EvmSignedActionPayloadV1::new(
+            request_payload,
+            accepted.message_digest,
+            [0x44; 32],
+            vec![0x02, 0x45],
+        )?;
+        let response = SignedMessageV1::sign(
+            UnsignedMessageV1::new_evm_signed_action(
+                [0x11; 32],
+                [0x22; 32],
+                bob_id,
+                0,
+                accepted.transcript_hash,
+                &response_payload,
+            )?,
+            &bob_key,
+        )?;
+        receiver.accept(response.as_bytes(), SessionPhaseV1::RefundSigned)?;
+
+        let transplanted = SignedMessageV1::sign(
+            UnsignedMessageV1::new_evm_signed_action(
+                [0x11; 32],
+                [0x22; 32],
+                bob_id,
+                1,
+                accepted.transcript_hash,
+                &response_payload,
+            )?,
+            &bob_key,
+        )?;
+        assert_eq!(
+            receiver.accept(transplanted.as_bytes(), SessionPhaseV1::RefundSigned),
+            Err(TransportError::ForkedTranscript)
+        );
+        Ok(())
     }
 
     #[test]

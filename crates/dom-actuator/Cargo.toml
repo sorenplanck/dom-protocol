@@ -29,6 +29,7 @@ dom-scriptless-chain-adapter.workspace = true
 dom-scriptless-store.workspace = true
 dom-slate.workspace = true
 dom-wallet2.workspace = true
+getrandom = "=0.2.16"
 kaystra-core = { path = "../kaystra-core" }
 rusqlite.workspace = true
 thiserror.workspace = true

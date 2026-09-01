@@ -160,7 +160,9 @@ proptest! {
         let before_len = store.len();
         let local_rank = local.merge_rank();
 
-        store.merge_backup(vec![output_at(1, 777, incoming)]);
+        store
+            .merge_backup(vec![output_at(1, 777, incoming)])
+            .unwrap();
 
         prop_assert_eq!(store.len(), before_len, "merge_backup changed cardinality");
         let after = store.get(&key(1)).unwrap();

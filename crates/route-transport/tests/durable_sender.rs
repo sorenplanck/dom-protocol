@@ -110,7 +110,10 @@ impl RelayQueueV1 for RecordingQueue {
         }
     }
 
-    fn queue_deliver(&self, recipient: &ParticipantId) -> Result<Vec<Vec<u8>>, BridgeRefusal> {
+    fn queue_deliver_ephemeral_v1(
+        &self,
+        recipient: &ParticipantId,
+    ) -> Result<Vec<Vec<u8>>, BridgeRefusal> {
         Ok(self.relay.deliver(recipient))
     }
 }

@@ -15,13 +15,15 @@
 //! # Supervisor contract
 //!
 //! The supervisor creates a pipe, makes its read end the daemon's standard
-//! input, writes the exact eight-field credential stream described below and
+//! input, writes the exact versioned credential stream described below and
 //! then closes its write end. Closing that end is what produces the end of
 //! input this boundary requires. The daemon reads exactly once.
 //!
-//! What is written must contain exactly the eight credentials and seven field
-//! separators: no trailing newline and no other line terminator. A shell
-//! `echo` appends one and is refused by name; `printf` does not.
+//! V1 contains exactly eight credentials and seven field separators. V2 adds
+//! exactly one local EVM signing key and one separator. The strict live-run V3
+//! adds a literal version header plus nonzero bounded upstream/downstream F6
+//! HSM credential groups. No family permits a trailing newline. A shell `echo`
+//! appends one and is refused by name; `printf` does not.
 //!
 //! Standard input must never be a terminal, which is the one shape refused by
 //! name. A regular file is accepted, but only when it is delivered by
@@ -528,6 +530,27 @@ const MAX_PRODUCTION_SECRET_STREAM_BYTES_V1: usize = MAX_DOM_NODE_BEARER_BYTES_V
     + 1
     + REFUND_ARMING_CREDENTIAL_HEX_BYTES_V1;
 
+/// V2 adds one independent local EVM key and one separator. The V1 bound and
+/// parser remain unchanged, so an eight-field stream is never reinterpreted.
+const MAX_PRODUCTION_SECRET_STREAM_BYTES_V2: usize =
+    MAX_PRODUCTION_SECRET_STREAM_BYTES_V1 + 1 + RELAY_SIGNING_SECRET_HEX_BYTES_V1;
+const PRODUCTION_SECRET_STREAM_HEADER_V3: &[u8] = b"DOM-INTEROPD-SECRETS-V3";
+const UPSTREAM_F6_HSM_COUNT_PREFIX_V3: &[u8] = b"upstream_f6_hsm_credentials=";
+const DOWNSTREAM_F6_HSM_COUNT_PREFIX_V3: &[u8] = b"downstream_f6_hsm_credentials=";
+/// Must stay equal to the strict signer-descriptor bound in the F6 V7 bundle.
+pub const MAX_PRODUCTION_F6_HSM_CREDENTIALS_PER_LEG_V3: usize = 16;
+const MAX_PRODUCTION_SECRET_STREAM_BYTES_V3: usize = PRODUCTION_SECRET_STREAM_HEADER_V3.len()
+    + 1
+    + MAX_PRODUCTION_SECRET_STREAM_BYTES_V2
+    + 1
+    + UPSTREAM_F6_HSM_COUNT_PREFIX_V3.len()
+    + 2
+    + MAX_PRODUCTION_F6_HSM_CREDENTIALS_PER_LEG_V3 * (1 + RELAY_SIGNING_SECRET_HEX_BYTES_V1)
+    + 1
+    + DOWNSTREAM_F6_HSM_COUNT_PREFIX_V3.len()
+    + 2
+    + MAX_PRODUCTION_F6_HSM_CREDENTIALS_PER_LEG_V3 * (1 + RELAY_SIGNING_SECRET_HEX_BYTES_V1);
+
 /// The eight out-of-band secrets, still as bytes.
 ///
 /// Separate from the credential type on purpose: this half compiles without
@@ -542,6 +565,28 @@ struct ProductionSecretFieldsV1 {
     bitcoin_participant_secret: Zeroizing<[u8; 32]>,
     route_secret_seal_key: Zeroizing<[u8; 32]>,
     refund_arming_credential: Zeroizing<[u8; 32]>,
+}
+
+struct ProductionSecretFieldsV2 {
+    common: ProductionSecretFieldsV1,
+    evm_signing_secret: Zeroizing<[u8; 32]>,
+}
+
+struct ProductionSecretFieldsV3 {
+    common: ProductionSecretFieldsV2,
+    upstream_f6_hsm_credentials: Vec<Zeroizing<[u8; 32]>>,
+    downstream_f6_hsm_credentials: Vec<Zeroizing<[u8; 32]>>,
+}
+
+struct ProductionSecretFieldSlicesV1<'a> {
+    bearer: &'a [u8],
+    upstream_relay_secret: &'a [u8],
+    downstream_relay_secret: &'a [u8],
+    identity_passphrase: &'a [u8],
+    dom_wallet_passphrase: &'a [u8],
+    bitcoin_participant_secret: &'a [u8],
+    seal_key: &'a [u8],
+    refund_credential: &'a [u8],
 }
 
 /// Reads the eight out-of-band secrets from one already-opened stream.
@@ -636,6 +681,31 @@ fn parse_production_secret_fields(
     if fields.next().is_some() {
         return Err(ProductionConfigErrorV1::SecretStreamFieldCount);
     }
+    parse_production_secret_field_slices(ProductionSecretFieldSlicesV1 {
+        bearer,
+        upstream_relay_secret,
+        downstream_relay_secret,
+        identity_passphrase,
+        dom_wallet_passphrase,
+        bitcoin_participant_secret,
+        seal_key,
+        refund_credential,
+    })
+}
+
+fn parse_production_secret_field_slices(
+    fields: ProductionSecretFieldSlicesV1<'_>,
+) -> Result<ProductionSecretFieldsV1, ProductionConfigErrorV1> {
+    let ProductionSecretFieldSlicesV1 {
+        bearer,
+        upstream_relay_secret,
+        downstream_relay_secret,
+        identity_passphrase,
+        dom_wallet_passphrase,
+        bitcoin_participant_secret,
+        seal_key,
+        refund_credential,
+    } = fields;
     require_secret_field(
         bearer,
         MAX_DOM_NODE_BEARER_BYTES_V1,
@@ -717,6 +787,294 @@ fn parse_production_secret_fields(
     })
 }
 
+fn read_production_secret_fields_v2(
+    mut reader: impl std::io::Read,
+) -> Result<ProductionSecretFieldsV2, ProductionSecretsV2ErrorV1> {
+    use std::io::Read as _;
+    use zeroize::Zeroize as _;
+
+    let mut stream = Vec::with_capacity(MAX_PRODUCTION_SECRET_STREAM_BYTES_V2 + 1);
+    let read = match (&mut reader)
+        .take(MAX_PRODUCTION_SECRET_STREAM_BYTES_V2 as u64 + 1)
+        .read_to_end(&mut stream)
+    {
+        Ok(read) => read,
+        Err(_) => {
+            stream.zeroize();
+            return Err(ProductionSecretsV2ErrorV1::Common(
+                ProductionConfigErrorV1::SecretStreamUnavailable,
+            ));
+        }
+    };
+    if read > MAX_PRODUCTION_SECRET_STREAM_BYTES_V2 {
+        stream.zeroize();
+        return Err(ProductionSecretsV2ErrorV1::Common(
+            ProductionConfigErrorV1::SecretStreamOversized,
+        ));
+    }
+    let parsed = parse_production_secret_fields_v2(&stream);
+    stream.zeroize();
+    parsed
+}
+
+fn parse_production_secret_fields_v2(
+    stream: &[u8],
+) -> Result<ProductionSecretFieldsV2, ProductionSecretsV2ErrorV1> {
+    if stream.is_empty() {
+        return Err(ProductionSecretsV2ErrorV1::Common(
+            ProductionConfigErrorV1::SecretStreamUnavailable,
+        ));
+    }
+    let mut fields = stream.split(|byte| *byte == b'\n');
+    let (
+        Some(bearer),
+        Some(upstream_relay_secret),
+        Some(downstream_relay_secret),
+        Some(identity_passphrase),
+        Some(dom_wallet_passphrase),
+        Some(bitcoin_participant_secret),
+        Some(seal_key),
+        Some(refund_credential),
+        Some(evm_signing_secret),
+    ) = (
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+    )
+    else {
+        return Err(ProductionSecretsV2ErrorV1::Common(
+            ProductionConfigErrorV1::SecretStreamFieldCount,
+        ));
+    };
+    if fields.next().is_some() {
+        return Err(ProductionSecretsV2ErrorV1::Common(
+            ProductionConfigErrorV1::SecretStreamFieldCount,
+        ));
+    }
+    parse_production_secret_field_slices_v2(
+        ProductionSecretFieldSlicesV1 {
+            bearer,
+            upstream_relay_secret,
+            downstream_relay_secret,
+            identity_passphrase,
+            dom_wallet_passphrase,
+            bitcoin_participant_secret,
+            seal_key,
+            refund_credential,
+        },
+        evm_signing_secret,
+    )
+}
+
+fn parse_production_secret_field_slices_v2(
+    fields: ProductionSecretFieldSlicesV1<'_>,
+    evm_signing_secret: &[u8],
+) -> Result<ProductionSecretFieldsV2, ProductionSecretsV2ErrorV1> {
+    let common =
+        parse_production_secret_field_slices(fields).map_err(ProductionSecretsV2ErrorV1::Common)?;
+    let evm_signing_secret = decode_exact_secret_v1(
+        evm_signing_secret,
+        ProductionConfigErrorV1::RelaySigningSecretMalformed,
+        true,
+    )
+    .map_err(|_| ProductionSecretsV2ErrorV1::EvmSigningSecretMalformed)?;
+    let reserved = [
+        common.upstream_relay_signing_secret.as_slice(),
+        common.downstream_relay_signing_secret.as_slice(),
+        common.bitcoin_participant_secret.as_slice(),
+        common.route_secret_seal_key.as_slice(),
+        common.refund_arming_credential.as_slice(),
+    ];
+    if reserved
+        .iter()
+        .any(|candidate| *candidate == evm_signing_secret.as_slice())
+    {
+        return Err(ProductionSecretsV2ErrorV1::EvmSigningSecretMalformed);
+    }
+    Ok(ProductionSecretFieldsV2 {
+        common,
+        evm_signing_secret,
+    })
+}
+
+fn read_production_secret_fields_v3(
+    mut reader: impl std::io::Read,
+) -> Result<ProductionSecretFieldsV3, ProductionSecretsV3ErrorV1> {
+    use std::io::Read as _;
+    use zeroize::Zeroize as _;
+
+    let mut stream = Vec::with_capacity(MAX_PRODUCTION_SECRET_STREAM_BYTES_V3 + 1);
+    let read = match (&mut reader)
+        .take(MAX_PRODUCTION_SECRET_STREAM_BYTES_V3 as u64 + 1)
+        .read_to_end(&mut stream)
+    {
+        Ok(read) => read,
+        Err(_) => {
+            stream.zeroize();
+            return Err(ProductionSecretsV3ErrorV1::Common(
+                ProductionSecretsV2ErrorV1::Common(
+                    ProductionConfigErrorV1::SecretStreamUnavailable,
+                ),
+            ));
+        }
+    };
+    if read > MAX_PRODUCTION_SECRET_STREAM_BYTES_V3 {
+        stream.zeroize();
+        return Err(ProductionSecretsV3ErrorV1::Common(
+            ProductionSecretsV2ErrorV1::Common(ProductionConfigErrorV1::SecretStreamOversized),
+        ));
+    }
+    let parsed = parse_production_secret_fields_v3(&stream);
+    stream.zeroize();
+    parsed
+}
+
+fn parse_production_secret_fields_v3(
+    stream: &[u8],
+) -> Result<ProductionSecretFieldsV3, ProductionSecretsV3ErrorV1> {
+    if stream.is_empty() {
+        return Err(ProductionSecretsV3ErrorV1::Common(
+            ProductionSecretsV2ErrorV1::Common(ProductionConfigErrorV1::SecretStreamUnavailable),
+        ));
+    }
+    let mut fields = stream.split(|byte| *byte == b'\n');
+    if fields.next() != Some(PRODUCTION_SECRET_STREAM_HEADER_V3) {
+        return Err(ProductionSecretsV3ErrorV1::WrongVersion);
+    }
+    let common_slices = ProductionSecretFieldSlicesV1 {
+        bearer: take_secret_stream_field_v3(&mut fields)?,
+        upstream_relay_secret: take_secret_stream_field_v3(&mut fields)?,
+        downstream_relay_secret: take_secret_stream_field_v3(&mut fields)?,
+        identity_passphrase: take_secret_stream_field_v3(&mut fields)?,
+        dom_wallet_passphrase: take_secret_stream_field_v3(&mut fields)?,
+        bitcoin_participant_secret: take_secret_stream_field_v3(&mut fields)?,
+        seal_key: take_secret_stream_field_v3(&mut fields)?,
+        refund_credential: take_secret_stream_field_v3(&mut fields)?,
+    };
+    let evm_signing_secret = take_secret_stream_field_v3(&mut fields)?;
+    let common = parse_production_secret_field_slices_v2(common_slices, evm_signing_secret)
+        .map_err(ProductionSecretsV3ErrorV1::Common)?;
+    let upstream_count = parse_hsm_count_v3(
+        take_secret_stream_field_v3(&mut fields)?,
+        UPSTREAM_F6_HSM_COUNT_PREFIX_V3,
+    )?;
+    let upstream_f6_hsm_credentials = decode_hsm_credentials_v3(&mut fields, upstream_count)?;
+    let downstream_count = parse_hsm_count_v3(
+        take_secret_stream_field_v3(&mut fields)?,
+        DOWNSTREAM_F6_HSM_COUNT_PREFIX_V3,
+    )?;
+    let downstream_f6_hsm_credentials = decode_hsm_credentials_v3(&mut fields, downstream_count)?;
+    if fields.next().is_some() {
+        return Err(ProductionSecretsV3ErrorV1::FieldCount);
+    }
+    validate_hsm_credential_independence_v3(
+        &common,
+        &upstream_f6_hsm_credentials,
+        &downstream_f6_hsm_credentials,
+    )?;
+    Ok(ProductionSecretFieldsV3 {
+        common,
+        upstream_f6_hsm_credentials,
+        downstream_f6_hsm_credentials,
+    })
+}
+
+fn take_secret_stream_field_v3<'a, I>(
+    fields: &mut I,
+) -> Result<&'a [u8], ProductionSecretsV3ErrorV1>
+where
+    I: Iterator<Item = &'a [u8]>,
+{
+    fields.next().ok_or(ProductionSecretsV3ErrorV1::FieldCount)
+}
+
+fn parse_hsm_count_v3(field: &[u8], prefix: &[u8]) -> Result<usize, ProductionSecretsV3ErrorV1> {
+    let digits = field
+        .strip_prefix(prefix)
+        .ok_or(ProductionSecretsV3ErrorV1::HsmCredentialCount)?;
+    if digits.is_empty()
+        || digits.len() > 2
+        || (digits.len() > 1 && digits[0] == b'0')
+        || !digits.iter().all(u8::is_ascii_digit)
+    {
+        return Err(ProductionSecretsV3ErrorV1::HsmCredentialCount);
+    }
+    let mut value = 0_usize;
+    for digit in digits {
+        value = value
+            .checked_mul(10)
+            .and_then(|current| current.checked_add(usize::from(*digit - b'0')))
+            .ok_or(ProductionSecretsV3ErrorV1::HsmCredentialCount)?;
+    }
+    if !(1..=MAX_PRODUCTION_F6_HSM_CREDENTIALS_PER_LEG_V3).contains(&value) {
+        return Err(ProductionSecretsV3ErrorV1::HsmCredentialCount);
+    }
+    Ok(value)
+}
+
+fn decode_hsm_credentials_v3<'a, I>(
+    fields: &mut I,
+    count: usize,
+) -> Result<Vec<Zeroizing<[u8; 32]>>, ProductionSecretsV3ErrorV1>
+where
+    I: Iterator<Item = &'a [u8]>,
+{
+    let mut credentials = Vec::with_capacity(count);
+    for _ in 0..count {
+        let encoded = take_secret_stream_field_v3(fields)?;
+        credentials.push(
+            decode_exact_secret_v1(
+                encoded,
+                ProductionConfigErrorV1::RelaySigningSecretMalformed,
+                true,
+            )
+            .map_err(|_| ProductionSecretsV3ErrorV1::HsmCredentialMalformed)?,
+        );
+    }
+    Ok(credentials)
+}
+
+fn validate_hsm_credential_independence_v3(
+    common: &ProductionSecretFieldsV2,
+    upstream: &[Zeroizing<[u8; 32]>],
+    downstream: &[Zeroizing<[u8; 32]>],
+) -> Result<(), ProductionSecretsV3ErrorV1> {
+    let reserved = [
+        common.common.upstream_relay_signing_secret.as_slice(),
+        common.common.downstream_relay_signing_secret.as_slice(),
+        common.common.bitcoin_participant_secret.as_slice(),
+        common.common.route_secret_seal_key.as_slice(),
+        common.common.refund_arming_credential.as_slice(),
+        common.evm_signing_secret.as_slice(),
+    ];
+    let variable_authorities = [
+        common.common.bearer.as_slice(),
+        common.common.identity_passphrase.as_slice(),
+        common.common.dom_wallet_passphrase.as_slice(),
+    ];
+    let credentials: Vec<&[u8]> = upstream
+        .iter()
+        .chain(downstream)
+        .map(|credential| credential.as_slice())
+        .collect();
+    if credentials.iter().enumerate().any(|(index, credential)| {
+        reserved.iter().any(|value| value == credential)
+            || variable_authorities.contains(credential)
+            || credentials[..index]
+                .iter()
+                .any(|previous| previous == credential)
+    }) {
+        return Err(ProductionSecretsV3ErrorV1::HsmCredentialReused);
+    }
+    Ok(())
+}
+
 /// One field is non-empty, within **its own** bound, and free of every ASCII
 /// control byte. The bound belongs to the field and never to the stream.
 fn require_secret_field(
@@ -785,10 +1143,47 @@ use std::time::Duration;
 use dom_scriptless_chain_adapter::{BearerTokenV1, DomHttpChainAdapterV1, ExpectedDomIdentityV1};
 
 #[cfg(feature = "production")]
+use deployment_registry::DomDeploymentV1;
+
+#[cfg(feature = "production")]
 use route_secret_vault::RouteSecretSealKeyV1;
 
 #[cfg(feature = "production")]
 use crate::production_refund_arming::ProductionRefundArmingCredentialV1;
+
+/// Redacted refusal from the explicitly nine-field V2 secret stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ProductionSecretsV2ErrorV1 {
+    /// One of the eight V1 authorities or the stream envelope was refused.
+    #[error("production secret stream V2 common authority refused")]
+    Common(ProductionConfigErrorV1),
+    /// The ninth field was not one independent nonzero lowercase-hex key.
+    #[error("production EVM signing credential is malformed")]
+    EvmSigningSecretMalformed,
+}
+
+/// Redacted refusal from the explicitly versioned F6/HSM secret stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ProductionSecretsV3ErrorV1 {
+    /// A V1/V2 common authority was refused.
+    #[error("production secret stream V3 common authority refused")]
+    Common(ProductionSecretsV2ErrorV1),
+    /// The literal V3 header was absent or belonged to another family.
+    #[error("production secret stream V3 version is invalid")]
+    WrongVersion,
+    /// The stream ended early or carried trailing fields/newline.
+    #[error("production secret stream V3 field count is invalid")]
+    FieldCount,
+    /// A per-leg credential count was zero, non-canonical or out of bounds.
+    #[error("production F6 HSM credential count is invalid")]
+    HsmCredentialCount,
+    /// One credential was not one nonzero fixed-size lowercase-hex value.
+    #[error("production F6 HSM credential is malformed")]
+    HsmCredentialMalformed,
+    /// A credential was reused across a signer, leg or unrelated authority.
+    #[error("production F6 HSM credential was reused")]
+    HsmCredentialReused,
+}
 
 /// The eight out-of-band production secrets, each in its own owner.
 ///
@@ -807,6 +1202,25 @@ pub struct ProductionSecretsV1 {
     refund_arming_credential: ProductionRefundArmingCredentialV1,
 }
 
+/// The V1 owners plus exactly one local, role-scoped EVM credential.
+///
+/// This is a distinct type and parser: V1 is never widened to accept a ninth
+/// field, while V2 never accepts the old eight-field stream.
+#[cfg(feature = "production")]
+pub struct ProductionSecretsV2 {
+    common: ProductionSecretsV1,
+    evm_signing_secret: Zeroizing<[u8; 32]>,
+}
+
+/// V3 live-run secrets, including one independent credential per signed F6
+/// HSM descriptor. Deliberately has no `Debug`, codec, clone or copy surface.
+#[cfg(feature = "production")]
+pub struct ProductionSecretsV3 {
+    common: ProductionSecretsV2,
+    upstream_f6_hsm_credentials: Vec<Zeroizing<[u8; 32]>>,
+    downstream_f6_hsm_credentials: Vec<Zeroizing<[u8; 32]>>,
+}
+
 /// Single-use handoff from the secret reader into the production composition
 /// root. Fields remain crate-private so no external caller can selectively
 /// extract or duplicate one authority.
@@ -822,10 +1236,32 @@ pub(crate) struct ProductionSecretPartsV1 {
     pub(crate) refund_arming_credential: ProductionRefundArmingCredentialV1,
 }
 
+/// Single-use nine-authority handoff into the composition root.
+#[cfg(feature = "production")]
+pub(crate) struct ProductionSecretPartsV2 {
+    pub(crate) common: ProductionSecretPartsV1,
+    pub(crate) evm_signing_secret: Zeroizing<[u8; 32]>,
+}
+
+/// Single-use V3 handoff. Credential vectors retain zeroizing element owners.
+#[cfg(feature = "production")]
+pub(crate) struct ProductionSecretPartsV3 {
+    pub(crate) common: ProductionSecretPartsV2,
+    pub(crate) upstream_f6_hsm_credentials: Vec<Zeroizing<[u8; 32]>>,
+    pub(crate) downstream_f6_hsm_credentials: Vec<Zeroizing<[u8; 32]>>,
+}
+
 #[cfg(feature = "production")]
 impl core::fmt::Debug for ProductionSecretsV1 {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter.write_str("ProductionSecretsV1([redacted])")
+    }
+}
+
+#[cfg(feature = "production")]
+impl core::fmt::Debug for ProductionSecretsV2 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("ProductionSecretsV2([redacted])")
     }
 }
 
@@ -844,6 +1280,32 @@ impl ProductionSecretsV1 {
             bitcoin_participant_secret: self.bitcoin_participant_secret,
             route_secret_seal_key: self.route_secret_seal_key,
             refund_arming_credential: self.refund_arming_credential,
+        }
+    }
+}
+
+#[cfg(feature = "production")]
+impl ProductionSecretsV2 {
+    /// Hands all nine owners to the sole composition root without copying a
+    /// credential or exposing a selective getter.
+    #[must_use]
+    pub(crate) fn into_parts(self) -> ProductionSecretPartsV2 {
+        ProductionSecretPartsV2 {
+            common: self.common.into_parts(),
+            evm_signing_secret: self.evm_signing_secret,
+        }
+    }
+}
+
+#[cfg(feature = "production")]
+impl ProductionSecretsV3 {
+    /// Moves every credential into the sole composition root exactly once.
+    #[must_use]
+    pub(crate) fn into_parts(self) -> ProductionSecretPartsV3 {
+        ProductionSecretPartsV3 {
+            common: self.common.into_parts(),
+            upstream_f6_hsm_credentials: self.upstream_f6_hsm_credentials,
+            downstream_f6_hsm_credentials: self.downstream_f6_hsm_credentials,
         }
     }
 }
@@ -872,6 +1334,68 @@ pub fn read_production_secrets_from_stdin() -> Result<ProductionSecretsV1, Produ
         return Err(ProductionConfigErrorV1::SecretStreamIsTerminal);
     }
     let fields = read_production_secret_fields(stdin.lock())?;
+    production_secrets_from_fields(fields)
+}
+
+/// Reads exactly nine out-of-band credentials from standard input.
+///
+/// The first eight fields have byte-for-byte V1 semantics; field nine is one
+/// independent lowercase-hex EVM key. There is no version sniffing or fallback
+/// between the two formats.
+#[cfg(feature = "production")]
+pub fn read_production_secrets_v2_from_stdin(
+) -> Result<ProductionSecretsV2, ProductionSecretsV2ErrorV1> {
+    use std::io::IsTerminal as _;
+
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return Err(ProductionSecretsV2ErrorV1::Common(
+            ProductionConfigErrorV1::SecretStreamIsTerminal,
+        ));
+    }
+    let fields = read_production_secret_fields_v2(stdin.lock())?;
+    let common = production_secrets_from_fields(fields.common)
+        .map_err(ProductionSecretsV2ErrorV1::Common)?;
+    Ok(ProductionSecretsV2 {
+        common,
+        evm_signing_secret: fields.evm_signing_secret,
+    })
+}
+
+/// Reads the only secret-stream family accepted by the strict V8 live run.
+///
+/// The literal V3 header, two nonzero bounded counts, every fixed-size
+/// credential and end-of-input are mandatory. V1/V2 are never sniffed or used
+/// as fallback.
+#[cfg(feature = "production")]
+pub fn read_production_secrets_v3_from_stdin(
+) -> Result<ProductionSecretsV3, ProductionSecretsV3ErrorV1> {
+    use std::io::IsTerminal as _;
+
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return Err(ProductionSecretsV3ErrorV1::Common(
+            ProductionSecretsV2ErrorV1::Common(ProductionConfigErrorV1::SecretStreamIsTerminal),
+        ));
+    }
+    let fields = read_production_secret_fields_v3(stdin.lock())?;
+    let common = production_secrets_from_fields(fields.common.common)
+        .map_err(ProductionSecretsV2ErrorV1::Common)
+        .map_err(ProductionSecretsV3ErrorV1::Common)?;
+    Ok(ProductionSecretsV3 {
+        common: ProductionSecretsV2 {
+            common,
+            evm_signing_secret: fields.common.evm_signing_secret,
+        },
+        upstream_f6_hsm_credentials: fields.upstream_f6_hsm_credentials,
+        downstream_f6_hsm_credentials: fields.downstream_f6_hsm_credentials,
+    })
+}
+
+#[cfg(feature = "production")]
+fn production_secrets_from_fields(
+    fields: ProductionSecretFieldsV1,
+) -> Result<ProductionSecretsV1, ProductionConfigErrorV1> {
     // `String::from_utf8` takes the vector by value, so a rejected token is
     // wiped by the error path here and an accepted one is wiped by
     // `BearerTokenV1`, which moves it into its zeroizing wrapper before it
@@ -935,13 +1459,35 @@ impl ProductionNodeConfigV1 {
     /// Builds the single authenticated client for this node.
     ///
     /// The credential is passed in because it is read once, out of band, by the
-    /// composition root; this boundary never reaches for it. The identity is
-    /// revalidated before the client is built, and no network call happens here.
-    pub fn into_dom_chain_adapter(
+    /// composition root; this boundary never reaches for it. The local identity
+    /// must exactly equal the threshold-authenticated registry deployment and
+    /// is revalidated before the client is built; no network call happens here.
+    /// Both client deadlines must fit inside the exact runtime external-call
+    /// authority supplied by the composition root.
+    pub(crate) fn into_dom_chain_adapter(
         self,
         bearer: BearerTokenV1,
+        deployment: DomDeploymentV1,
+        external_call_timeout_ms: u64,
     ) -> Result<DomHttpChainAdapterV1, ProductionConfigErrorV1> {
-        let expected = self.expected_identity();
+        if external_call_timeout_ms == 0
+            || self.connect_timeout_ms > external_call_timeout_ms
+            || self.request_timeout_ms > external_call_timeout_ms
+        {
+            return Err(ProductionConfigErrorV1::InvalidNodeBounds);
+        }
+        let runtime = deployment.runtime_identity;
+        let expected = ExpectedDomIdentityV1 {
+            network: runtime.network.label().to_owned(),
+            network_magic: runtime.network_magic,
+            chain_id: deployment.chain_id.0,
+            genesis_hash: deployment.genesis_hash,
+            protocol_version: runtime.protocol_version,
+            range_proof_serialization_version: runtime.range_proof_serialization_version,
+        };
+        if self.expected_identity() != expected {
+            return Err(ProductionConfigErrorV1::InvalidNodeIdentity);
+        }
         expected
             .validate()
             .map_err(|_| ProductionConfigErrorV1::InvalidNodeIdentity)?;
@@ -1108,6 +1654,83 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "production")]
+    fn registry_bound_node_fixture() -> (ProductionNodeConfigV1, DomDeploymentV1) {
+        let network = deployment_registry::DomNetworkV1::Regtest;
+        let network_magic = network.canonical_magic();
+        let genesis = dom_core::configured_genesis_hash_for_network_magic(network_magic)
+            .expect("the regtest genesis is configured");
+        let chain_id = kaystra_core::types::ChainId(
+            *dom_consensus::derive_chain_id(network_magic, &genesis).as_bytes(),
+        );
+        let runtime_identity = deployment_registry::DomRuntimeIdentityV1::pinned(network);
+        let deployment = DomDeploymentV1 {
+            chain_id,
+            genesis_hash: *genesis.as_bytes(),
+            runtime_identity,
+            consensus_rules_digest: [0x71; 32],
+            scriptless_api_version: 1,
+            timing: adapter_btc::timelock::ChainTimingBoundsV1 {
+                min_block_seconds: 1,
+                max_block_seconds: 2,
+                max_reorg_seconds: 20,
+                observation_seconds: 2,
+                broadcast_seconds: 2,
+            },
+            finality: kaystra_core::types::FinalityPolicyV1 {
+                min_confirmations: 2,
+                max_reorg_depth: 3,
+            },
+            native_asset: kaystra_core::types::AssetId([0x72; 32]),
+        };
+        let config = ProductionNodeConfigV1::from_parts(
+            DomNodeEndpointV1::new(ENDPOINT).expect("the fixture endpoint is canonical"),
+            ProductionNodeIdentityV1 {
+                network: network.label().to_owned(),
+                network_magic,
+                chain_id: chain_id.0,
+                genesis_hash: *genesis.as_bytes(),
+                protocol_version: runtime_identity.protocol_version,
+                range_proof_serialization_version: runtime_identity
+                    .range_proof_serialization_version,
+            },
+            bounds(),
+        )
+        .expect("the registry-bound node configuration is canonical");
+        (config, deployment)
+    }
+
+    #[test]
+    #[cfg(feature = "production")]
+    fn dom_client_deadlines_cannot_outlive_the_runtime_authority() {
+        let (config, deployment) = registry_bound_node_fixture();
+        let token = BearerTokenV1::new("bounded-dom-token".to_owned())
+            .expect("the fixture bearer is canonical");
+        assert_eq!(
+            config
+                .into_dom_chain_adapter(token, deployment, 29_999)
+                .err(),
+            Some(ProductionConfigErrorV1::InvalidNodeBounds)
+        );
+        let (config, deployment) = registry_bound_node_fixture();
+        let token = BearerTokenV1::new("bounded-dom-token".to_owned())
+            .expect("the fixture bearer is canonical");
+        assert!(config
+            .into_dom_chain_adapter(token, deployment, 30_000)
+            .is_ok());
+
+        let (config, mut deployment) = registry_bound_node_fixture();
+        deployment.genesis_hash = [0x73; 32];
+        let token = BearerTokenV1::new("bounded-dom-token".to_owned())
+            .expect("the fixture bearer is canonical");
+        assert_eq!(
+            config
+                .into_dom_chain_adapter(token, deployment, 30_000)
+                .err(),
+            Some(ProductionConfigErrorV1::InvalidNodeIdentity)
+        );
+    }
+
     fn canonical_secret_stream() -> Vec<u8> {
         let mut stream = Vec::new();
         stream.extend_from_slice(b"dom-node-token\n");
@@ -1123,6 +1746,202 @@ mod tests {
         stream.push(b'\n');
         stream.extend_from_slice(&[b'c'; REFUND_ARMING_CREDENTIAL_HEX_BYTES_V1]);
         stream
+    }
+
+    fn canonical_secret_stream_v2_with(evm_hex: u8) -> Vec<u8> {
+        let mut stream = canonical_secret_stream();
+        stream.push(b'\n');
+        stream.extend_from_slice(&[evm_hex; RELAY_SIGNING_SECRET_HEX_BYTES_V1]);
+        stream
+    }
+
+    fn canonical_secret_stream_v3(upstream: &[u8], downstream: &[u8]) -> Vec<u8> {
+        let mut stream = PRODUCTION_SECRET_STREAM_HEADER_V3.to_vec();
+        stream.push(b'\n');
+        stream.extend_from_slice(&canonical_secret_stream_v2_with(b'f'));
+        stream.extend_from_slice(b"\nupstream_f6_hsm_credentials=");
+        stream.extend_from_slice(upstream.len().to_string().as_bytes());
+        for credential in upstream {
+            stream.push(b'\n');
+            stream.extend_from_slice(&[*credential; RELAY_SIGNING_SECRET_HEX_BYTES_V1]);
+        }
+        stream.extend_from_slice(b"\ndownstream_f6_hsm_credentials=");
+        stream.extend_from_slice(downstream.len().to_string().as_bytes());
+        for credential in downstream {
+            stream.push(b'\n');
+            stream.extend_from_slice(&[*credential; RELAY_SIGNING_SECRET_HEX_BYTES_V1]);
+        }
+        stream
+    }
+
+    #[test]
+    fn secret_stream_versions_are_exact_and_v2_adds_one_independent_owner() {
+        let v1 = canonical_secret_stream();
+        let v2 = canonical_secret_stream_v2_with(b'f');
+
+        let Err(v1_refusal) = read_production_secret_fields(v2.as_slice()) else {
+            panic!("V1 must never reinterpret a V2 stream");
+        };
+        assert_eq!(v1_refusal, ProductionConfigErrorV1::SecretStreamFieldCount);
+        let Err(v2_refusal) = read_production_secret_fields_v2(v1.as_slice()) else {
+            panic!("V2 must never fall back to a V1 stream");
+        };
+        assert_eq!(
+            v2_refusal,
+            ProductionSecretsV2ErrorV1::Common(ProductionConfigErrorV1::SecretStreamFieldCount)
+        );
+        let Ok(fields) = read_production_secret_fields_v2(v2.as_slice()) else {
+            panic!("the exact nine-field V2 stream must be accepted");
+        };
+        assert_eq!(*fields.evm_signing_secret, [0xff; 32]);
+        assert_eq!(fields.common.bearer.as_slice(), b"dom-node-token");
+    }
+
+    #[test]
+    fn v2_evm_key_refuses_malformed_reused_and_oversized_material() {
+        for &evm_hex in b"aedbc" {
+            let stream = canonical_secret_stream_v2_with(evm_hex);
+            let Err(refusal) = read_production_secret_fields_v2(stream.as_slice()) else {
+                panic!("cross-role EVM key reuse must be refused");
+            };
+            assert_eq!(
+                refusal,
+                ProductionSecretsV2ErrorV1::EvmSigningSecretMalformed
+            );
+        }
+
+        let mut trailing = canonical_secret_stream_v2_with(b'f');
+        trailing.push(b'\n');
+        let Err(refusal) = read_production_secret_fields_v2(trailing.as_slice()) else {
+            panic!("a trailing field must be refused");
+        };
+        assert_eq!(
+            refusal,
+            ProductionSecretsV2ErrorV1::Common(ProductionConfigErrorV1::SecretStreamFieldCount)
+        );
+
+        for replacement in [vec![b'0'; 64], vec![b'F'; 64], vec![b'f'; 63]] {
+            let mut malformed = canonical_secret_stream();
+            malformed.push(b'\n');
+            malformed.extend_from_slice(&replacement);
+            let Err(refusal) = read_production_secret_fields_v2(malformed.as_slice()) else {
+                panic!("malformed EVM material must be refused");
+            };
+            assert_eq!(
+                refusal,
+                ProductionSecretsV2ErrorV1::EvmSigningSecretMalformed
+            );
+        }
+
+        let oversized = vec![b'a'; MAX_PRODUCTION_SECRET_STREAM_BYTES_V2 + 1];
+        let Err(refusal) = read_production_secret_fields_v2(oversized.as_slice()) else {
+            panic!("an oversized V2 stream must be refused before parsing");
+        };
+        assert_eq!(
+            refusal,
+            ProductionSecretsV2ErrorV1::Common(ProductionConfigErrorV1::SecretStreamOversized)
+        );
+    }
+
+    #[test]
+    fn v3_hsm_stream_is_versioned_nonempty_fixed_bounded_and_exact() {
+        let canonical = canonical_secret_stream_v3(b"12", b"34");
+        let Ok(fields) = read_production_secret_fields_v3(canonical.as_slice()) else {
+            panic!("the exact V3 HSM stream must be accepted");
+        };
+        assert_eq!(fields.upstream_f6_hsm_credentials.len(), 2);
+        assert_eq!(fields.downstream_f6_hsm_credentials.len(), 2);
+        assert_eq!(*fields.upstream_f6_hsm_credentials[0], [0x11; 32]);
+        assert_eq!(*fields.downstream_f6_hsm_credentials[1], [0x44; 32]);
+
+        let Err(old_family) =
+            read_production_secret_fields_v3(canonical_secret_stream_v2_with(b'f').as_slice())
+        else {
+            panic!("V3 must not fall back to V2");
+        };
+        assert_eq!(old_family, ProductionSecretsV3ErrorV1::WrongVersion);
+
+        let mut wrong_version = canonical.clone();
+        wrong_version[PRODUCTION_SECRET_STREAM_HEADER_V3.len() - 1] = b'2';
+        let Err(version_refusal) = read_production_secret_fields_v3(wrong_version.as_slice())
+        else {
+            panic!("a different literal version must be refused");
+        };
+        assert_eq!(version_refusal, ProductionSecretsV3ErrorV1::WrongVersion);
+
+        let mut trailing = canonical.clone();
+        trailing.push(b'\n');
+        let Err(trailing_refusal) = read_production_secret_fields_v3(trailing.as_slice()) else {
+            panic!("trailing bytes must be refused");
+        };
+        assert_eq!(trailing_refusal, ProductionSecretsV3ErrorV1::FieldCount);
+
+        let missing = &canonical[..canonical.len() - RELAY_SIGNING_SECRET_HEX_BYTES_V1];
+        let Err(missing_refusal) = read_production_secret_fields_v3(missing) else {
+            panic!("a missing fixed credential must be refused");
+        };
+        assert!(matches!(
+            missing_refusal,
+            ProductionSecretsV3ErrorV1::FieldCount
+                | ProductionSecretsV3ErrorV1::HsmCredentialMalformed
+        ));
+
+        let oversized = vec![b'x'; MAX_PRODUCTION_SECRET_STREAM_BYTES_V3 + 1];
+        let Err(oversized_refusal) = read_production_secret_fields_v3(oversized.as_slice()) else {
+            panic!("an oversized V3 stream must be refused before parsing");
+        };
+        assert_eq!(
+            oversized_refusal,
+            ProductionSecretsV3ErrorV1::Common(ProductionSecretsV2ErrorV1::Common(
+                ProductionConfigErrorV1::SecretStreamOversized
+            ))
+        );
+    }
+
+    #[test]
+    fn v3_hsm_counts_and_cross_authority_credential_reuse_are_refused() {
+        for malformed in ["0", "00", "01", "17", "x"] {
+            let canonical = canonical_secret_stream_v3(b"12", b"34");
+            let text = String::from_utf8(canonical).expect("fixture is ASCII");
+            let mutated = text.replacen(
+                "upstream_f6_hsm_credentials=2",
+                &format!("upstream_f6_hsm_credentials={malformed}"),
+                1,
+            );
+            let Err(refusal) = read_production_secret_fields_v3(mutated.as_bytes()) else {
+                panic!("a zero, non-canonical or out-of-bound count must be refused");
+            };
+            assert_eq!(refusal, ProductionSecretsV3ErrorV1::HsmCredentialCount);
+        }
+
+        for (upstream, downstream) in [
+            (&b"11"[..], &b"34"[..]),
+            (&b"12"[..], &b"23"[..]),
+            (&b"a2"[..], &b"34"[..]),
+            (&b"12"[..], &b"f4"[..]),
+        ] {
+            let stream = canonical_secret_stream_v3(upstream, downstream);
+            let Err(refusal) = read_production_secret_fields_v3(stream.as_slice()) else {
+                panic!("credential reuse across signer, leg or authority must be refused");
+            };
+            assert_eq!(refusal, ProductionSecretsV3ErrorV1::HsmCredentialReused);
+        }
+
+        let text =
+            String::from_utf8(canonical_secret_stream_v3(b"12", b"34")).expect("fixture is ASCII");
+        let passphrase_reuse = text
+            .replacen("contracts-passphrase", &"z".repeat(32), 1)
+            .replacen(&"1".repeat(64), &"7a".repeat(32), 1);
+        let Err(refusal) = read_production_secret_fields_v3(passphrase_reuse.as_bytes()) else {
+            panic!("HSM reuse of a variable-length authority must be refused");
+        };
+        assert_eq!(refusal, ProductionSecretsV3ErrorV1::HsmCredentialReused);
+
+        let malformed = canonical_secret_stream_v3(b"Z2", b"34");
+        let Err(refusal) = read_production_secret_fields_v3(malformed.as_slice()) else {
+            panic!("non-lowercase-hex credential must be refused");
+        };
+        assert_eq!(refusal, ProductionSecretsV3ErrorV1::HsmCredentialMalformed);
     }
 
     #[test]
@@ -1555,6 +2374,17 @@ mod tests {
             Clone,
             Copy
         );
+        static_assertions::assert_not_impl_any!(
+            ProductionSecretFieldsV2: core::fmt::Debug,
+            Clone,
+            Copy
+        );
+        static_assertions::assert_not_impl_any!(
+            ProductionSecretFieldsV3: core::fmt::Debug,
+            Clone,
+            Copy,
+            serde::Serialize
+        );
         #[cfg(feature = "production")]
         static_assertions::assert_not_impl_any!(
             ProductionRefundArmingCredentialV1: core::fmt::Debug,
@@ -1566,6 +2396,26 @@ mod tests {
             ProductionSecretPartsV1: core::fmt::Debug,
             Clone,
             Copy
+        );
+        #[cfg(feature = "production")]
+        static_assertions::assert_not_impl_any!(
+            ProductionSecretPartsV2: core::fmt::Debug,
+            Clone,
+            Copy
+        );
+        #[cfg(feature = "production")]
+        static_assertions::assert_not_impl_any!(
+            ProductionSecretsV3: core::fmt::Debug,
+            Clone,
+            Copy,
+            serde::Serialize
+        );
+        #[cfg(feature = "production")]
+        static_assertions::assert_not_impl_any!(
+            ProductionSecretPartsV3: core::fmt::Debug,
+            Clone,
+            Copy,
+            serde::Serialize
         );
     }
 

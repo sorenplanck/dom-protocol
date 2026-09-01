@@ -1078,6 +1078,41 @@ impl DurableRouteStoreV1 {
         Ok(snapshot)
     }
 
+    /// Authenticates the complete route history and proves that every action
+    /// uses the external-custody dispatch class.
+    ///
+    /// The production compositor never installs a generic runner.  Checking
+    /// only the current outbox would be insufficient because a completed or
+    /// superseded runner effect may no longer be pending there.  This audit
+    /// therefore replays the journal first and then inspects every historical
+    /// action-bearing event, including takeover reauthorizations.  A legacy or
+    /// transplanted runner payload is treated as corrupt production state.
+    pub fn audit_external_custody_only_v1(
+        &self,
+        route_id: RouteIdV1,
+    ) -> Result<RouteSnapshotV1, RouteStoreErrorV1> {
+        let snapshot = self.verify_replay(route_id)?;
+        for entry in self.journal(route_id)? {
+            let intent = match &entry.event {
+                RouteEventV1::CommitAction(intent)
+                | RouteEventV1::ReauthorizeCommittedAction { intent, .. }
+                | RouteEventV1::ReauthorizePartiallyExternalizedCustody { intent, .. } => {
+                    Some(intent)
+                }
+                _ => None,
+            };
+            if intent.is_some_and(|intent| {
+                matches!(
+                    &intent.dispatch,
+                    crate::model::EffectDispatchV1::RunnerPayload { .. }
+                )
+            }) {
+                return Err(RouteStoreErrorV1::CorruptState);
+            }
+        }
+        Ok(snapshot)
+    }
+
     /// Replays and authenticates the complete route journal, then returns the
     /// exact production V2 admission checkpoint carried by its sole logical
     /// terms-freeze event.

@@ -131,7 +131,10 @@ pub(super) struct ExistingDeviceRestorePreparationV1 {
 
 #[cfg(any(test, feature = "evidence-only"))]
 impl ExistingDeviceRestorePreparationV1 {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+    )]
     pub(super) fn new(
         source: SelectedBackupMaterialV1,
         target_root_identity: &StoreRootIdentityV1,
@@ -283,7 +286,10 @@ pub(super) struct PreparedExistingRestorePublicationV1 {
 
 #[cfg(any(test, feature = "evidence-only"))]
 impl PreparedExistingRestorePublicationV1 {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+    )]
     pub(super) fn new(
         preparation: ExistingDeviceRestorePreparationV1,
         target_unlock_passphrase: Passphrase,
@@ -2445,7 +2451,10 @@ fn authenticate_predecessor_from_disk(
 /// The caller retains the exclusive Store lock for this entire call. Every
 /// post-rename verifier reopens the canonical location from the retained root;
 /// Staging handles that went out of date never grant authority after a move.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+)]
 #[cfg(any(test, feature = "evidence-only"))]
 pub(super) fn publish_staged_existing_device_restore(
     target_root: &RetainedDirectory,

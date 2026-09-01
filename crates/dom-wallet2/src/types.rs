@@ -12,6 +12,7 @@
 //! persistence (3C) and reconciliation (3B) live in later sub-steps.
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use zeroize::Zeroizing;
 
 /// Custom serde for the 33-byte compressed Pedersen commitment.
@@ -48,7 +49,7 @@ mod serde_commitment {
 /// drop). Ported verbatim from v1 (`dom-wallet/src/types.rs`).
 // `pub(crate)` so the slate-secret fields (`pending.rs`) reuse the same codec.
 pub(crate) mod serde_blinding {
-    use serde::{Deserializer, Serializer};
+    use serde::{Deserialize, Deserializer, Serializer};
     use zeroize::Zeroizing;
 
     pub fn serialize<S>(bytes: &Zeroizing<[u8; 32]>, serializer: S) -> Result<S::Ok, S::Error>
@@ -62,13 +63,13 @@ pub(crate) mod serde_blinding {
     where
         D: Deserializer<'de>,
     {
-        let bytes: Vec<u8> = serde::de::Deserialize::deserialize(deserializer)?;
+        let bytes = Zeroizing::new(Vec::<u8>::deserialize(deserializer)?);
         if bytes.len() != 32 {
             return Err(serde::de::Error::custom("blinding factor must be 32 bytes"));
         }
-        let mut array = [0u8; 32];
+        let mut array = Zeroizing::new([0u8; 32]);
         array.copy_from_slice(&bytes);
-        Ok(Zeroizing::new(array))
+        Ok(array)
     }
 }
 
@@ -128,6 +129,75 @@ pub enum DerivIndex {
     ReceiveRequest(u32),
 }
 
+/// Durable, one-shot binding between an owned output and a prepared payout
+/// record held by the production actuator store.
+///
+/// The digest is minted by that store from its authenticated preparation
+/// record.  Wallet code may persist it once, or accept the exact same value on
+/// recovery, but it never clears or replaces it.  Keeping this marker separate
+/// from `reserved_for` is essential: `reserved_for` protects ordinary wallet
+/// inputs, while this marker prevents one payout output from being promised to
+/// two route sessions.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "PayoutForSerdeV1")]
+pub struct PayoutForV1 {
+    prepare_digest: [u8; 32],
+}
+
+#[derive(Deserialize)]
+struct PayoutForSerdeV1 {
+    prepare_digest: [u8; 32],
+}
+
+impl TryFrom<PayoutForSerdeV1> for PayoutForV1 {
+    type Error = PayoutPinError;
+
+    fn try_from(value: PayoutForSerdeV1) -> Result<Self, Self::Error> {
+        Self::new(value.prepare_digest)
+    }
+}
+
+impl PayoutForV1 {
+    /// Construct a pin from a nonzero, authority-minted preparation digest.
+    pub fn new(prepare_digest: [u8; 32]) -> Result<Self, PayoutPinError> {
+        if prepare_digest == [0; 32] {
+            return Err(PayoutPinError::ZeroPrepareDigest);
+        }
+        Ok(Self { prepare_digest })
+    }
+
+    /// Exact preparation digest persisted by the wallet.
+    pub const fn prepare_digest(self) -> [u8; 32] {
+        self.prepare_digest
+    }
+}
+
+impl core::fmt::Debug for PayoutForV1 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("PayoutForV1(<pinned>)")
+    }
+}
+
+/// Errors from the immutable payout pin on one wallet output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum PayoutPinError {
+    /// Zero cannot identify an authenticated preparation record.
+    #[error("payout preparation digest must be nonzero")]
+    ZeroPrepareDigest,
+    /// The output is already pinned to a different preparation record.
+    #[error("output is already pinned to a different payout preparation")]
+    Conflict,
+}
+
+/// Result of applying an exact payout pin to a wallet output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayoutPinDisposition {
+    /// The output was unpinned and now durably needs persistence.
+    Pinned,
+    /// The same pin was already present; no wallet mutation occurred.
+    Idempotent,
+}
+
 /// The central persisted record: one per wallet-owned output (design §2.4).
 ///
 /// `commitment` is the primary key. `blinding` is **always** persisted (the
@@ -158,6 +228,10 @@ pub struct StoredOutput {
     pub derivable: Option<DerivIndex>,
     /// Slate hash that reserved this output as an input. Orthogonal to `status`.
     pub reserved_for: Option<[u8; 32]>,
+    /// Immutable payout preparation bound to this output, independent of input
+    /// reservation and lifecycle status. Missing in legacy schema V2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    payout_for: Option<PayoutForV1>,
     /// Unix ts of local creation.
     pub created_at: u64,
     /// Unix ts of the last transition.
@@ -179,16 +253,40 @@ impl StoredOutput {
         derivable: Option<DerivIndex>,
         now: u64,
     ) -> Self {
+        Self::new_unconfirmed_with_blinding(
+            commitment,
+            value,
+            Zeroizing::new(blinding),
+            origin,
+            is_coinbase,
+            derivable,
+            now,
+        )
+    }
+
+    /// Create an unconfirmed output by moving an already protected blinding
+    /// owner into durable wallet state.  Slate/payment code uses this path so
+    /// it never unwraps a `Zeroizing` transient into an unprotected array.
+    pub(crate) fn new_unconfirmed_with_blinding(
+        commitment: [u8; 33],
+        value: u64,
+        blinding: Zeroizing<[u8; 32]>,
+        origin: OutputOrigin,
+        is_coinbase: bool,
+        derivable: Option<DerivIndex>,
+        now: u64,
+    ) -> Self {
         Self {
             commitment,
             value,
-            blinding: Zeroizing::new(blinding),
+            blinding,
             origin,
             status: OutputStatus::Unconfirmed,
             origin_block: None,
             is_coinbase,
             derivable,
             reserved_for: None,
+            payout_for: None,
             created_at: now,
             updated_at: now,
         }
@@ -197,6 +295,33 @@ impl StoredOutput {
     /// Whether this output is currently reserved as a slate input.
     pub fn is_reserved(&self) -> bool {
         self.reserved_for.is_some()
+    }
+
+    /// The immutable payout preparation currently bound to this output.
+    pub const fn payout_for(&self) -> Option<PayoutForV1> {
+        self.payout_for
+    }
+
+    /// Pin this output exactly once for a prepared payout operation.
+    ///
+    /// An exact retry is idempotent. A different preparation is refused and
+    /// leaves the output unchanged. There is deliberately no corresponding
+    /// clear method: the historical binding survives confirmation, spending,
+    /// reorg, backup and restore.
+    pub(crate) fn pin_payout(
+        &mut self,
+        payout_for: PayoutForV1,
+        now: u64,
+    ) -> Result<PayoutPinDisposition, PayoutPinError> {
+        match self.payout_for {
+            None => {
+                self.payout_for = Some(payout_for);
+                self.updated_at = now;
+                Ok(PayoutPinDisposition::Pinned)
+            }
+            Some(existing) if existing == payout_for => Ok(PayoutPinDisposition::Idempotent),
+            Some(_) => Err(PayoutPinError::Conflict),
+        }
     }
 }
 
@@ -214,6 +339,7 @@ impl std::fmt::Debug for StoredOutput {
             .field("is_coinbase", &self.is_coinbase)
             .field("derivable", &self.derivable)
             .field("reserved_for", &self.reserved_for)
+            .field("payout_for", &self.payout_for.map(|_| "<pinned>"))
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
             .finish()
@@ -243,16 +369,17 @@ mod serde_seed64_opt {
     where
         D: Deserializer<'de>,
     {
-        let opt: Option<Vec<u8>> = Option::deserialize(d)?;
+        let opt = Option::<Vec<u8>>::deserialize(d)?;
         match opt {
             None => Ok(None),
             Some(v) => {
+                let v = Zeroizing::new(v);
                 if v.len() != 64 {
                     return Err(serde::de::Error::custom("seed must be 64 bytes"));
                 }
-                let mut a = [0u8; 64];
+                let mut a = Zeroizing::new([0u8; 64]);
                 a.copy_from_slice(&v);
-                Ok(Some(Zeroizing::new(a)))
+                Ok(Some(a))
             }
         }
     }
@@ -344,4 +471,62 @@ pub struct StoreMeta {
     /// Hash of the block at `last_reconciled_tip`, when known.
     #[serde(default)]
     pub last_reconciled_hash: Option<[u8; 32]>,
+}
+
+#[cfg(test)]
+mod payout_pin_tests {
+    use super::*;
+
+    fn output() -> StoredOutput {
+        StoredOutput::new_unconfirmed(
+            [2; 33],
+            50,
+            [3; 32],
+            OutputOrigin::ReceiveSlate,
+            false,
+            None,
+            10,
+        )
+    }
+
+    #[test]
+    fn payout_pin_is_one_shot_and_independent_from_input_reservation() {
+        let mut output = output();
+        output.reserved_for = Some([4; 32]);
+        let first = PayoutForV1::new([5; 32]).unwrap();
+        assert_eq!(
+            output.pin_payout(first, 11).unwrap(),
+            PayoutPinDisposition::Pinned
+        );
+        assert_eq!(output.reserved_for, Some([4; 32]));
+        assert_eq!(output.payout_for(), Some(first));
+        assert_eq!(
+            output.pin_payout(first, 12).unwrap(),
+            PayoutPinDisposition::Idempotent
+        );
+        assert_eq!(output.updated_at, 11, "exact retry must not mutate");
+        assert_eq!(
+            output
+                .pin_payout(PayoutForV1::new([6; 32]).unwrap(), 13)
+                .unwrap_err(),
+            PayoutPinError::Conflict
+        );
+        assert_eq!(output.payout_for(), Some(first));
+    }
+
+    #[test]
+    fn payout_pin_rejects_zero_and_redacts_debug() {
+        assert_eq!(
+            PayoutForV1::new([0; 32]).unwrap_err(),
+            PayoutPinError::ZeroPrepareDigest
+        );
+        let mut output = output();
+        output
+            .pin_payout(PayoutForV1::new([0xAB; 32]).unwrap(), 11)
+            .unwrap();
+        let debug = format!("{output:?}");
+        assert!(debug.contains("<pinned>"));
+        assert!(!debug.contains("171, 171"));
+        assert!(!debug.contains("ab, ab"));
+    }
 }

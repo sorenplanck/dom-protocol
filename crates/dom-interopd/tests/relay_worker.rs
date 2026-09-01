@@ -2,6 +2,7 @@
 
 #![cfg(all(feature = "production", target_os = "linux"))]
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::fs::{self, File};
@@ -55,7 +56,7 @@ use route_transport::{
     BridgeRefusal, DurableFrameReassemblerConfigV2, DurableFrameReassemblerV2,
     DurableInboxConfigV1, DurablePayloadCommitV1, DurablePayloadDispositionV1, DurableRelayInboxV1,
     DurableRelaySenderConfigV1, DurableRelaySenderErrorV1, DurableRelaySenderV1,
-    F6PayloadDeliveryV1, F6TransportPortV1, FramedContractsTransportErrorV2, RelayQueueV1,
+    F6PayloadDeliveryV1, F6TransportPortV1, FramedContractsTransportErrorV2, RelaySubmitQueueV1,
     RouteApplicationDispositionV2, RouteDispatchErrorV1, RouteWireContextV1,
     MAX_ROUTE_TRANSPORT_PAYLOAD_BYTES,
 };
@@ -179,7 +180,7 @@ fn worker_config_for(
         participants.responder
     };
     let sender = sender_config_for(local_initiator, participants);
-    let inbox = DurableInboxConfigV1::new([discriminator + 2; 32], wire(), local, 128)
+    let inbox = DurableInboxConfigV1::new([discriminator + 2; 32], [0xd1; 32], wire(), local, 128)
         .expect("valid inbox config");
     let frames = DurableFrameReassemblerConfigV2::new(
         [discriminator + 3; 32],
@@ -541,7 +542,7 @@ struct TestF6Error;
 #[derive(Default)]
 struct TestF6Authority {
     receipts: BTreeSet<Digest32>,
-    kinds: Vec<u16>,
+    kinds: Rc<RefCell<Vec<u16>>>,
 }
 
 impl F6TransportPortV1 for TestF6Authority {
@@ -553,7 +554,7 @@ impl F6TransportPortV1 for TestF6Authority {
     ) -> Result<DurablePayloadCommitV1, Self::Error> {
         let receipt = *delivery.envelope_digest();
         let duplicate = !self.receipts.insert(receipt);
-        self.kinds.push(delivery.message_type());
+        self.kinds.borrow_mut().push(delivery.message_type());
         Ok(
             DurablePayloadCommitV1::new(DurablePayloadDispositionV1::Applied, receipt, duplicate)
                 .expect("nonzero envelope digest"),
@@ -631,7 +632,7 @@ fn production_resume_completes_each_relay_authority_boundary_and_reopens(
         let store = create_contracts_store(temporary.path(), "contracts-a", &fixture)?;
         let paths = worker_paths(temporary.path(), true);
         let sender = sender_config_for(true, DEFAULT_RELAY_PARTICIPANTS);
-        let inbox = DurableInboxConfigV1::new([0xa2; 32], wire(), INITIATOR, 128)?;
+        let inbox = DurableInboxConfigV1::new([0xa2; 32], [0xd1; 32], wire(), INITIATOR, 128)?;
         let frames = DurableFrameReassemblerConfigV2::new(
             [0xa3; 32],
             wire(),
@@ -737,7 +738,7 @@ fn production_resume_preflights_malformed_authority_topology_without_mutation(
                 frames,
             )?);
         } else {
-            let inbox = DurableInboxConfigV1::new([0xa2; 32], wire(), INITIATOR, 128)?;
+            let inbox = DurableInboxConfigV1::new([0xa2; 32], [0xd1; 32], wire(), INITIATOR, 128)?;
             drop(DurableRelayInboxV1::create(
                 paths.inbox_root(),
                 inbox,
@@ -878,7 +879,7 @@ impl TestPeerOutbound {
         Ok(test_prepared_report(&pending))
     }
 
-    fn submit_outbound_once<Q: RelayQueueV1>(
+    fn submit_outbound_once<Q: RelaySubmitQueueV1>(
         &mut self,
         queue: &mut Q,
     ) -> Result<RelayOutboundStepV1, RelayWorkerOutboundErrorV1> {
@@ -1674,7 +1675,7 @@ struct LoseAckQueue {
     attempts: Vec<Vec<u8>>,
 }
 
-impl RelayQueueV1 for LoseAckQueue {
+impl RelaySubmitQueueV1 for LoseAckQueue {
     fn queue_submit(&mut self, raw: &[u8]) -> Result<AckV1, BridgeRefusal> {
         self.attempts.push(raw.to_vec());
         let ack = self
@@ -1687,12 +1688,6 @@ impl RelayQueueV1 for LoseAckQueue {
         } else {
             Ok(ack)
         }
-    }
-
-    fn queue_deliver(&self, recipient: &ParticipantId) -> Result<Vec<Vec<u8>>, BridgeRefusal> {
-        self.relay
-            .deliver(recipient)
-            .map_err(BridgeRefusal::DurableRelay)
     }
 }
 
@@ -1767,7 +1762,7 @@ fn ack_loss_contracts_crash_duplicate_and_equivocation_survive_restart(
     ));
     assert_eq!(relay.attempts[0], first_attempt);
 
-    let ingest = responder.ingest_mailbox(&relay, now())?;
+    let ingest = responder.ingest_mailbox(&mut relay.relay, now())?;
     assert_eq!((ingest.accepted, ingest.refused.len()), (1, 0));
     assert_eq!(responder.inbox_stats()?.pending_route, 1);
 
@@ -1804,7 +1799,7 @@ fn ack_loss_contracts_crash_duplicate_and_equivocation_survive_restart(
             ..
         }
     ));
-    let duplicate = responder.poll_inbound(&relay, now())?;
+    let duplicate = responder.poll_inbound(&mut relay.relay, now())?;
     assert_eq!(duplicate.dispatch.contracts.applied, 1);
     assert_eq!(duplicate.dispatch.contracts.duplicate_commits, 1);
     assert_eq!(responder.contracts_session_status()?.revision, 1);
@@ -1825,7 +1820,7 @@ fn ack_loss_contracts_crash_duplicate_and_equivocation_survive_restart(
         2
     );
     initiator.submit_outbound_once(&mut relay)?;
-    let equivocation = responder.poll_inbound(&relay, now())?;
+    let equivocation = responder.poll_inbound(&mut relay.relay, now())?;
     assert_eq!(equivocation.dispatch.contracts.failed_closed, 1);
     let failed = responder.contracts_session_status()?;
     assert_eq!(failed.phase, SessionPhaseV1::FailedClosed);
@@ -1839,7 +1834,7 @@ fn ack_loss_contracts_crash_duplicate_and_equivocation_survive_restart(
     let mut responder = open_worker(temporary.path(), false, responder_store)?;
     initiator.prepare_signed_dsc1(&conflict, expiry())?;
     initiator.submit_outbound_once(&mut relay)?;
-    let terminal_duplicate = responder.poll_inbound(&relay, now())?;
+    let terminal_duplicate = responder.poll_inbound(&mut relay.relay, now())?;
     assert_eq!(terminal_duplicate.dispatch.contracts.failed_closed, 1);
     assert_eq!(terminal_duplicate.dispatch.contracts.duplicate_commits, 1);
     assert_eq!(
@@ -1860,7 +1855,18 @@ fn one_checkpoint_and_inbox_order_cover_f6_then_prepared_contracts() -> Result<(
     let refused_replacement = issue_early_authority(&responder_store, &fixture)?;
     let payload = authority.offer_payload()?.to_vec();
     let mut initiator = TestPeerOutbound::create(temporary.path(), true, initiator_store)?;
-    let mut responder = create_worker(temporary.path(), false, responder_store)?;
+    let observed_f6_kinds = Rc::new(RefCell::new(Vec::new()));
+    let mut responder = DurableRelayWorkerV1::create(
+        &worker_paths(temporary.path(), false),
+        worker_config(false),
+        Rc::new(responder_store),
+        rosters(),
+        TestF6Authority {
+            receipts: BTreeSet::new(),
+            kinds: Rc::clone(&observed_f6_kinds),
+        },
+        RESPONDER_RELAY_SECRET,
+    )?;
     responder.install_contracts_ingress(PreparedContractsIngressV1::early(authority))?;
     assert!(matches!(
         responder.install_contracts_ingress(PreparedContractsIngressV1::early(refused_replacement)),
@@ -1907,14 +1913,16 @@ fn one_checkpoint_and_inbox_order_cover_f6_then_prepared_contracts() -> Result<(
         }
     ));
 
-    let report = responder.poll_inbound(&relay, now())?;
-    assert_eq!(report.ingest.accepted, 2);
-    assert_eq!(report.dispatch.f6.applied, 1);
-    assert_eq!(report.dispatch.f6.blocked_by_route, 0);
-    assert_eq!(report.dispatch.contracts.applied, 1);
+    let first_page = responder.ingest_mailbox(&mut relay.relay, now())?;
+    let second_page = responder.ingest_mailbox(&mut relay.relay, now())?;
+    assert_eq!(first_page.accepted + second_page.accepted, 2);
+    let dispatch = responder.dispatch_inbound()?;
+    assert_eq!(dispatch.f6.applied, 1);
+    assert_eq!(dispatch.f6.blocked_by_route, 0);
+    assert_eq!(dispatch.contracts.applied, 1);
     assert_eq!(
-        responder.f6_mut().kinds,
-        vec![relay::auth::message_type::RFQ]
+        observed_f6_kinds.borrow().as_slice(),
+        [relay::auth::message_type::RFQ]
     );
     assert_eq!(responder.contracts_session_status()?.revision, 1);
     Ok(())
@@ -1981,7 +1989,7 @@ fn prepared_operational_bp_stays_closed_then_reissues_across_worker_restart(
     // the authenticated outer and inner sender identities remain identical.
     peer.prepare_signed_dsc1(&second, expiry())?;
     peer.submit_outbound_once(&mut relay)?;
-    assert_eq!(worker.ingest_mailbox(&relay, now())?.accepted, 1);
+    assert_eq!(worker.ingest_mailbox(&mut relay.relay, now())?.accepted, 1);
     let refusal = worker
         .dispatch_inbound()
         .expect_err("unseen BP transport must require its prepared authority");
@@ -2027,7 +2035,7 @@ fn prepared_operational_bp_stays_closed_then_reissues_across_worker_restart(
     // is a Store duplicate, never a second Bulletproof transition.
     peer.prepare_signed_dsc1(&second, expiry())?;
     peer.submit_outbound_once(&mut relay)?;
-    let duplicate = worker.poll_inbound(&relay, now())?;
+    let duplicate = worker.poll_inbound(&mut relay.relay, now())?;
     assert_eq!(duplicate.dispatch.contracts.applied, 1);
     assert_eq!(duplicate.dispatch.contracts.duplicate_commits, 1);
     assert_eq!(worker.contracts_session_status()?.revision, 8);
@@ -2101,7 +2109,7 @@ fn prepared_operational_template_stays_closed_then_reissues_across_worker_restar
 
     peer.prepare_signed_dsc1(&second, expiry())?;
     peer.submit_outbound_once(&mut relay)?;
-    assert_eq!(worker.ingest_mailbox(&relay, now())?.accepted, 1);
+    assert_eq!(worker.ingest_mailbox(&mut relay.relay, now())?.accepted, 1);
     let refusal = worker
         .dispatch_inbound()
         .expect_err("unseen template commit must require its prepared authority");
@@ -2154,7 +2162,7 @@ fn prepared_operational_template_stays_closed_then_reissues_across_worker_restar
     // Store duplicate and cannot create a third template transition.
     peer.prepare_signed_dsc1(&second, expiry())?;
     peer.submit_outbound_once(&mut relay)?;
-    let duplicate = worker.poll_inbound(&relay, now())?;
+    let duplicate = worker.poll_inbound(&mut relay.relay, now())?;
     assert_eq!(duplicate.dispatch.contracts.applied, 1);
     assert_eq!(duplicate.dispatch.contracts.duplicate_commits, 1);
     assert_eq!(worker.contracts_session_status()?.revision, 19);
@@ -2208,7 +2216,7 @@ fn prepared_operational_signing_stays_closed_then_reissues_across_worker_restart
 
     peer.prepare_signed_dsc1(&first, expiry())?;
     peer.submit_outbound_once(&mut relay)?;
-    assert_eq!(worker.ingest_mailbox(&relay, now())?.accepted, 1);
+    assert_eq!(worker.ingest_mailbox(&mut relay.relay, now())?.accepted, 1);
     let refusal = worker
         .dispatch_inbound()
         .expect_err("unseen signing transport must require its prepared authority");
@@ -2288,7 +2296,7 @@ fn prepared_operational_signing_stays_closed_then_reissues_across_worker_restart
             ))?;
             peer.prepare_signed_dsc1(&signed, expiry())?;
             peer.submit_outbound_once(&mut relay)?;
-            let report = worker.poll_inbound(&relay, now())?;
+            let report = worker.poll_inbound(&mut relay.relay, now())?;
             assert_eq!(report.dispatch.contracts.applied, 1);
             assert_eq!(report.dispatch.contracts.duplicate_commits, 0);
             let status = worker.contracts_session_status()?;
@@ -2312,7 +2320,7 @@ fn prepared_operational_signing_stays_closed_then_reissues_across_worker_restart
     // is an exact Store duplicate and cannot create a seventh transition.
     peer.prepare_signed_dsc1(&last_remote, expiry())?;
     peer.submit_outbound_once(&mut relay)?;
-    let duplicate = worker.poll_inbound(&relay, now())?;
+    let duplicate = worker.poll_inbound(&mut relay.relay, now())?;
     assert_eq!(duplicate.dispatch.contracts.applied, 1);
     assert_eq!(duplicate.dispatch.contracts.duplicate_commits, 1);
     assert_eq!(worker.contracts_session_status()?.revision, 25);
@@ -2371,7 +2379,7 @@ fn prepared_operational_final_refund_is_exact_linear_and_restart_safe() -> Resul
 
     peer.prepare_signed_dsc1(&final_refund, expiry())?;
     peer.submit_outbound_once(&mut relay)?;
-    assert_eq!(worker.ingest_mailbox(&relay, now())?.accepted, 1);
+    assert_eq!(worker.ingest_mailbox(&mut relay.relay, now())?.accepted, 1);
     let unprepared = worker
         .dispatch_inbound()
         .expect_err("unseen FinalRefund must not enter through generic ingress");
@@ -2428,7 +2436,7 @@ fn prepared_operational_final_refund_is_exact_linear_and_restart_safe() -> Resul
     // is a Store duplicate, never a second RefundSigned transition.
     peer.prepare_signed_dsc1(&final_refund, expiry())?;
     peer.submit_outbound_once(&mut relay)?;
-    let duplicate = worker.poll_inbound(&relay, now())?;
+    let duplicate = worker.poll_inbound(&mut relay.relay, now())?;
     assert_eq!(duplicate.dispatch.contracts.applied, 1);
     assert_eq!(duplicate.dispatch.contracts.duplicate_commits, 1);
     assert_eq!(worker.contracts_session_status()?.revision, 26);
@@ -2448,7 +2456,7 @@ fn prepared_operational_final_refund_is_exact_linear_and_restart_safe() -> Resul
     )?;
     peer.prepare_signed_dsc1(&conflict, expiry())?;
     peer.submit_outbound_once(&mut relay)?;
-    let equivocation = worker.poll_inbound(&relay, now())?;
+    let equivocation = worker.poll_inbound(&mut relay.relay, now())?;
     assert_eq!(equivocation.dispatch.contracts.failed_closed, 1);
     let failed = worker.contracts_session_status()?;
     assert_eq!(failed.phase, SessionPhaseV1::FailedClosed);
@@ -2491,7 +2499,10 @@ fn post_anchor_claim_pre_signature_requires_its_exact_authority_across_restart(
 
     initiator.prepare_signed_dsc1(&signed, expiry())?;
     initiator.submit_outbound_once(&mut relay)?;
-    assert_eq!(responder.ingest_mailbox(&relay, now())?.accepted, 1);
+    assert_eq!(
+        responder.ingest_mailbox(&mut relay.relay, now())?.accepted,
+        1
+    );
     let unprepared = responder
         .dispatch_inbound()
         .expect_err("unseen 0x0f must not enter through generic derived ingress");
@@ -2865,7 +2876,10 @@ fn relay_delivery_ack_is_not_a_dsc1_ack_and_0x14_stays_inaccessible() -> Result<
     };
     assert_eq!(outer_kind, message_type::ROUTE_TRANSPORT);
     assert_eq!(next_sequence, 1);
-    assert_eq!(responder.ingest_mailbox(&relay, now())?.accepted, 1);
+    assert_eq!(
+        responder.ingest_mailbox(&mut relay.relay, now())?.accepted,
+        1
+    );
 
     // The Relay `AckV1` above is a delivery fact only.  The DSC1 `Ack` it
     // carried has no prepared Contracts authority and no derived redelivery
@@ -2950,7 +2964,10 @@ fn inbound_outer_and_inner_sender_mismatch_remains_durably_pending() -> Result<(
     let relay_root = temporary.path().join("relay");
     let mut relay = create_relay(&relay_root, false)?;
     malicious_sender.submit_pending(&mut relay)?;
-    assert_eq!(responder.ingest_mailbox(&relay, now())?.accepted, 1);
+    assert_eq!(
+        responder.ingest_mailbox(&mut relay.relay, now())?.accepted,
+        1
+    );
 
     let mismatch = responder
         .dispatch_inbound()
@@ -3021,7 +3038,10 @@ fn final_claim_0x12_without_its_ingress_authority_stays_durably_pending(
     )?;
     initiator.prepare_signed_dsc1(&final_claim, expiry())?;
     initiator.submit_outbound_once(&mut relay)?;
-    assert_eq!(responder.ingest_mailbox(&relay, now())?.accepted, 1);
+    assert_eq!(
+        responder.ingest_mailbox(&mut relay.relay, now())?.accepted,
+        1
+    );
 
     let unprepared = responder
         .dispatch_inbound()
@@ -3078,7 +3098,10 @@ fn refused_final_claim_0x12_leaves_irreversible_state_identical_across_restart(
     )?;
     initiator.prepare_signed_dsc1(&final_claim, expiry())?;
     initiator.submit_outbound_once(&mut relay)?;
-    assert_eq!(responder.ingest_mailbox(&relay, now())?.accepted, 1);
+    assert_eq!(
+        responder.ingest_mailbox(&mut relay.relay, now())?.accepted,
+        1
+    );
     assert!(responder.dispatch_inbound().is_err());
     drop(responder);
 
@@ -3215,7 +3238,10 @@ fn final_claim_0x12_with_crossed_outer_and_inner_senders_never_reaches_the_store
     let relay_root = temporary.path().join("relay");
     let mut relay = create_relay(&relay_root, false)?;
     malicious_sender.submit_pending(&mut relay)?;
-    assert_eq!(responder.ingest_mailbox(&relay, now())?.accepted, 1);
+    assert_eq!(
+        responder.ingest_mailbox(&mut relay.relay, now())?.accepted,
+        1
+    );
 
     let mismatch = responder
         .dispatch_inbound()

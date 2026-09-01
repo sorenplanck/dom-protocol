@@ -168,7 +168,6 @@ pub struct VaultGenerationCoreV1 {
 
 impl VaultGenerationCoreV1 {
     /// Constructs an exact generation core from authorized public inputs.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         contract_wallet_id: [u8; 32],
         store_root_id: [u8; 32],

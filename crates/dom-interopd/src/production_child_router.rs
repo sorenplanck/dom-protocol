@@ -13,7 +13,10 @@ use settlement_coordinator::{
 
 use route_composer::RouteScalar;
 
-use crate::production_child_btc::{ProductionBitcoinChildClockV1, ProductionBitcoinChildPortV1};
+use crate::production_child_btc::{
+    ProductionBitcoinChildClockV1, ProductionBitcoinChildPortV1,
+    ProductionBitcoinPublicExtractionHandoffV1,
+};
 use crate::production_child_dom::{
     ProductionDomActionAuthorityV1, ProductionDomChildClockV1, ProductionDomChildPortV1,
 };
@@ -42,6 +45,16 @@ pub(crate) struct ProductionChildMaterializationRequestV1 {
     pub(crate) role_plan_digest: [u8; 32],
     pub(crate) source_scope_digest: [u8; 32],
     pub(crate) exposure: settlement_coordinator::ChildExposureV1,
+}
+
+/// Immutable route scope that must authenticate an extraction handoff before
+/// the Bitcoin child consumes its sole move-only capability.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ProductionBitcoinExtractionHandoffScopeV1 {
+    pub(crate) route_id: [u8; 32],
+    pub(crate) composition_digest: [u8; 32],
+    pub(crate) chain_id: [u8; 32],
+    pub(crate) expected_txid: Option<[u8; 32]>,
 }
 
 /// One chain-specific, owner-scoped production child authority.
@@ -81,6 +94,24 @@ pub(crate) trait ProductionSettlementChildPortV1 {
         &mut self,
         request: &ChildObservationRequestV1,
     ) -> Result<ChildObservationOutcomeV1, ChildAuthorityRefusalV1>;
+
+    /// Moves the sole post-materialization Bitcoin extraction owner out of the
+    /// exact Bitcoin child. Other faces and non-fresh Bitcoin paths refuse.
+    fn take_bitcoin_public_extraction_handoff(
+        &mut self,
+        _expected: ProductionBitcoinExtractionHandoffScopeV1,
+    ) -> Result<ProductionBitcoinPublicExtractionHandoffV1, ChildAuthorityRefusalV1> {
+        Err(ChildAuthorityRefusalV1::Refused)
+    }
+
+    /// Returns a handoff rejected by a downstream installer to the exact child
+    /// that issued it, preserving retry without minting a second authority.
+    fn restore_bitcoin_public_extraction_handoff(
+        &mut self,
+        _handoff: ProductionBitcoinPublicExtractionHandoffV1,
+    ) -> Result<(), ChildAuthorityRefusalV1> {
+        Err(ChildAuthorityRefusalV1::Refused)
+    }
 }
 
 pub(crate) struct AuthenticatedDomChildPortV1(Box<dyn ProductionSettlementChildPortV1>);
@@ -206,6 +237,34 @@ impl ProductionSettlementChildRouterV1 {
             return Err(ChildAuthorityRefusalV1::Conflict);
         }
         port.materialize(request, public_scalar)
+    }
+
+    pub(crate) fn take_bitcoin_public_extraction_handoff(
+        &mut self,
+        expected: ProductionBitcoinExtractionHandoffScopeV1,
+    ) -> Result<ProductionBitcoinPublicExtractionHandoffV1, ChildAuthorityRefusalV1> {
+        let port = self
+            .bitcoin
+            .as_mut()
+            .ok_or(ChildAuthorityRefusalV1::Refused)?;
+        if port.face() != SettlementFaceV1::Bitcoin {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        port.take_bitcoin_public_extraction_handoff(expected)
+    }
+
+    pub(crate) fn restore_bitcoin_public_extraction_handoff(
+        &mut self,
+        handoff: ProductionBitcoinPublicExtractionHandoffV1,
+    ) -> Result<(), ChildAuthorityRefusalV1> {
+        let port = self
+            .bitcoin
+            .as_mut()
+            .ok_or(ChildAuthorityRefusalV1::Refused)?;
+        if port.face() != SettlementFaceV1::Bitcoin {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        port.restore_bitcoin_public_extraction_handoff(handoff)
     }
 }
 

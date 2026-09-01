@@ -14,7 +14,9 @@ use relay::auth::{
     message_type, RecipientContextV1, RosterMemberV1, RosterRegistryV1, RosterSnapshotV1,
 };
 use relay::production::{
-    ProductionRelayError, ProductionRelayV1, RelayDatabaseConfigV1, RelayDatabaseIdV1,
+    DeliveryAckV3, DeliveryCursorV3, DeliveryPageLimitsV2, DeliveryPageLimitsV3, DeliveryPageV3,
+    DeliveryScopeV3, ProductionRelayError, ProductionRelayV1, RelayDatabaseConfigV1,
+    RelayDatabaseIdV1, MAX_DELIVERY_PAGE_BYTES_V2, MAX_DELIVERY_PAGE_ITEMS_V2,
     RELAY_DATABASE_FILE_NAME,
 };
 use relay::recovery::{
@@ -43,11 +45,21 @@ fn xonly_of(secret: &[u8; 32]) -> [u8; 32] {
 }
 
 fn signed(sequence: u64, previous: [u8; 32], payload: &[u8]) -> RelayEnvelopeV1 {
+    signed_in_scope(SESSION, ROUTE, sequence, previous, payload)
+}
+
+fn signed_in_scope(
+    session_id: [u8; 32],
+    route_id: [u8; 32],
+    sequence: u64,
+    previous: [u8; 32],
+    payload: &[u8],
+) -> RelayEnvelopeV1 {
     let mut envelope = RelayEnvelopeV1 {
         network_id: NETWORK,
         message_type: message_type::QUOTE,
-        session_id: SESSION,
-        route_id: ROUTE,
+        session_id,
+        route_id,
         sender_id: SOLVER,
         recipient_id: INITIATOR,
         sender_role: SenderRoleV1::Solver,
@@ -65,6 +77,131 @@ fn signed(sequence: u64, previous: [u8; 32], payload: &[u8]) -> RelayEnvelopeV1 
         .expect("fixture signature")
         .0;
     envelope
+}
+
+#[test]
+fn delivery_v3_interleaved_sessions_restart_and_transplants_are_strictly_scoped() {
+    let parent = owner_root();
+    let root = parent.path().join("relay-v3-scoped");
+    let other_root = parent.path().join("relay-v3-other-database");
+    let session_a = [0x24; 32];
+    let session_b = [0x25; 32];
+    let route_a = [0x34; 32];
+    let route_b = [0x35; 32];
+    let scope_a = DeliveryScopeV3::new(INITIATOR, route_a, session_a).expect("scope A");
+    let scope_b = DeliveryScopeV3::new(INITIATOR, route_b, session_b).expect("scope B");
+    let a0 = signed_in_scope(session_a, route_a, 0, [0; 32], &[0xa0]);
+    let a0_digest = a0.envelope_digest().expect("A0 digest");
+    let a1 = signed_in_scope(session_a, route_a, 1, a0_digest, &[0xa1]);
+    let b0 = signed_in_scope(session_b, route_b, 0, [0; 32], &[0xb0]);
+    let a0_raw = a0.canonical_bytes().expect("A0 bytes");
+    let a1_raw = a1.canonical_bytes().expect("A1 bytes");
+    let b0_raw = b0.canonical_bytes().expect("B0 bytes");
+    let limits =
+        DeliveryPageLimitsV3::new(1, relay::MAX_ENVELOPE_BYTES as u32).expect("one-envelope limit");
+
+    let mut relay = ProductionRelayV1::create(&root, config()).expect("create relay");
+    relay.submit(&a0_raw).expect("submit A0");
+    relay.submit(&b0_raw).expect("submit B0 interleaved");
+    relay.submit(&a1_raw).expect("submit A1 interleaved");
+
+    let cursor_a = relay
+        .acknowledged_delivery_cursor_v3(&scope_a)
+        .expect("cursor A");
+    let cursor_a_bytes = cursor_a.canonical_bytes();
+    assert_eq!(
+        DeliveryCursorV3::decode(&cursor_a_bytes).expect("cursor V3 codec"),
+        cursor_a
+    );
+    assert!(DeliveryCursorV3::decode(&cursor_a_bytes[..cursor_a_bytes.len() - 1]).is_err());
+    let page_a = relay
+        .delivery_page_v3(&scope_a, &cursor_a, limits)
+        .expect("page A");
+    assert_eq!(page_a.envelopes(), std::slice::from_ref(&a0_raw));
+    assert!(page_a.has_more());
+    let page_a_bytes = page_a.canonical_bytes().expect("canonical A page");
+    assert_eq!(
+        DeliveryPageV3::decode(&page_a_bytes, limits).expect("decode A page"),
+        page_a
+    );
+    let mut trailing = page_a_bytes.clone();
+    trailing.push(0);
+    assert!(DeliveryPageV3::decode(&trailing, limits).is_err());
+
+    let cursor_b = relay
+        .acknowledged_delivery_cursor_v3(&scope_b)
+        .expect("cursor B");
+    let page_b = relay
+        .delivery_page_v3(&scope_b, &cursor_b, limits)
+        .expect("page B while A pending");
+    assert_eq!(page_b.envelopes(), std::slice::from_ref(&b0_raw));
+    let page_b_bytes = page_b.canonical_bytes().expect("canonical B page");
+
+    assert!(matches!(
+        relay.acknowledge_delivery_page_v3(&scope_b, page_a.next_cursor()),
+        Err(ProductionRelayError::InvalidDeliveryCursor)
+    ));
+    let wrong_route = DeliveryScopeV3::new(INITIATOR, [0x36; 32], session_a).expect("wrong route");
+    assert!(matches!(
+        relay.acknowledge_delivery_page_v3(&wrong_route, page_a.next_cursor()),
+        Err(ProductionRelayError::InvalidDeliveryCursor)
+    ));
+    let wrong_session =
+        DeliveryScopeV3::new(INITIATOR, route_a, [0x26; 32]).expect("wrong session");
+    assert!(matches!(
+        relay.acknowledge_delivery_page_v3(&wrong_session, page_a.next_cursor()),
+        Err(ProductionRelayError::InvalidDeliveryCursor)
+    ));
+    let wrong_recipient = DeliveryScopeV3::new(ParticipantId([0x32; 32]), route_a, session_a)
+        .expect("wrong recipient");
+    assert!(matches!(
+        relay.acknowledge_delivery_page_v3(&wrong_recipient, page_a.next_cursor()),
+        Err(ProductionRelayError::InvalidDeliveryCursor)
+    ));
+
+    let other_config = RelayDatabaseConfigV1::new(
+        RelayDatabaseIdV1::new([0xa6; 32]).expect("other database id"),
+        64,
+    )
+    .expect("other config");
+    let other = ProductionRelayV1::create(&other_root, other_config).expect("other relay");
+    let other_cursor = other
+        .acknowledged_delivery_cursor_v3(&scope_a)
+        .expect("other database cursor");
+    drop(other);
+    assert!(matches!(
+        relay.delivery_page_v3(&scope_a, &other_cursor, limits),
+        Err(ProductionRelayError::InvalidDeliveryCursor)
+    ));
+
+    let next_a = *page_a.next_cursor();
+    let ack_a = relay
+        .acknowledge_delivery_page_v3(&scope_a, &next_a)
+        .expect("ACK only A0");
+    assert_eq!(
+        DeliveryAckV3::decode(&ack_a.canonical_bytes()).expect("ACK V3 codec"),
+        ack_a
+    );
+    assert_eq!(relay.len().expect("only A0 collected"), 2);
+    drop(relay);
+
+    let mut relay = ProductionRelayV1::open(&root, config()).expect("restart relay");
+    assert_eq!(
+        relay
+            .delivery_page_v3(&scope_b, &cursor_b, limits)
+            .expect("exact B redelivery after restart")
+            .canonical_bytes()
+            .expect("B bytes after restart"),
+        page_b_bytes
+    );
+    relay
+        .acknowledge_delivery_page_v3(&scope_b, page_b.next_cursor())
+        .expect("ACK B only");
+    assert_eq!(relay.len().expect("A1 remains"), 1);
+    let next_page_a = relay
+        .delivery_page_v3(&scope_a, &next_a, limits)
+        .expect("A1 after independent B ACK");
+    assert_eq!(next_page_a.envelopes(), &[a1_raw]);
 }
 
 fn rosters() -> RosterRegistryV1 {
@@ -113,6 +250,22 @@ fn owner_root() -> tempfile::TempDir {
     directory
 }
 
+fn pending_page_bytes(relay: &mut ProductionRelayV1, recipient: ParticipantId) -> Vec<Vec<u8>> {
+    let current = relay
+        .acknowledged_delivery_cursor_v2(&recipient)
+        .expect("delivery cursor");
+    relay
+        .delivery_page_v2(
+            &recipient,
+            &current,
+            DeliveryPageLimitsV2::new(MAX_DELIVERY_PAGE_ITEMS_V2, MAX_DELIVERY_PAGE_BYTES_V2)
+                .expect("delivery limits"),
+        )
+        .expect("bounded delivery page")
+        .envelopes()
+        .to_vec()
+}
+
 #[test]
 fn ack_loss_resend_and_process_restart_preserve_exact_bytes() {
     let parent = owner_root();
@@ -135,7 +288,7 @@ fn ack_loss_resend_and_process_restart_preserve_exact_bytes() {
         reopened.stored_bytes(&key).expect("stored row"),
         Some(raw.clone())
     );
-    assert_eq!(reopened.deliver(&INITIATOR).expect("delivery"), vec![raw]);
+    assert_eq!(pending_page_bytes(&mut reopened, INITIATOR), vec![raw]);
     assert_eq!(reopened.len().expect("row count"), 1);
 
     let mut bad_domain = first_bytes;
@@ -268,9 +421,9 @@ fn database_loss_never_opens_empty_and_only_authenticated_batch_reconstructs() {
     let batch = authenticate_recovery_sources_v1(vec![chain, store], &[scope()], &rosters())
         .expect("authenticated recovery batch");
     assert_eq!(batch.len(), 1, "exact duplicate sources must collapse");
-    let recovered =
+    let mut recovered =
         ProductionRelayV1::reconstruct(&root, config(), batch).expect("reconstruct database");
-    assert_eq!(recovered.deliver(&INITIATOR).expect("delivery"), vec![raw]);
+    assert_eq!(pending_page_bytes(&mut recovered, INITIATOR), vec![raw]);
 }
 
 #[test]
@@ -579,8 +732,8 @@ mod fault_tests {
             &rosters(),
         )
         .expect("authenticated batch");
-        let recovered =
+        let mut recovered =
             ProductionRelayV1::reconstruct(&root, config(), batch).expect("reconstruct");
-        assert_eq!(recovered.deliver(&INITIATOR).expect("delivery"), vec![raw]);
+        assert_eq!(pending_page_bytes(&mut recovered, INITIATOR), vec![raw]);
     }
 }

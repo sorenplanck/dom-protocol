@@ -136,20 +136,21 @@ impl StoredOutput {
         self.updated_at = now;
     }
 
-    /// **D1 guard.** An output may be deleted **only** while `Unconfirmed`
+    /// **D1 guard.** An output may be deleted **only** while `Unconfirmed` and
+    /// not durably pinned as a route payout
     /// (and, at the store layer, only once its producing slate is terminally
     /// `Canceled`/`Failed` — checked by the caller in 3B). Any output that was
     /// ever canonical (`Confirmed`/`Spent`/`Reorged`) returns `false`: this is
     /// the structural enforcement of INV-RET.
     pub fn can_delete(&self) -> bool {
-        matches!(self.status, OutputStatus::Unconfirmed)
+        matches!(self.status, OutputStatus::Unconfirmed) && self.payout_for().is_none()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::OutputOrigin;
+    use crate::types::{OutputOrigin, PayoutForV1};
 
     fn block(h: u64, tag: u8) -> BlockRef {
         BlockRef {
@@ -259,6 +260,15 @@ mod tests {
         assert!(!confirmed().can_delete());
         assert!(!spent().can_delete());
         assert!(!reorged().can_delete());
+    }
+
+    #[test]
+    fn d1_refuses_an_unconfirmed_payout_pin() {
+        let mut output = unconfirmed();
+        output
+            .pin_payout(PayoutForV1::new([0x51; 32]).unwrap(), 1001)
+            .unwrap();
+        assert!(!output.can_delete());
     }
 
     #[test]

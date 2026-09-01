@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[cfg(feature = "production")]
-const PRODUCTION_USAGE_V1: &str = "usage: dom-interopd self-check [--json]\n       dom-interopd run --state-dir PATH [--create]\n              eight secrets are read from standard input, one pass, no trailing newline:\n              <bearer token>\n<upstream Relay signing secret: 64 lowercase hex>\n<downstream Relay signing secret: 64 lowercase hex>\n<Contracts identity passphrase>\n<DOM wallet passphrase>\n<Bitcoin participant secret: 64 lowercase hex>\n<route-secret seal key: 64 lowercase hex>\n<refund-arming credential: 64 lowercase hex>";
+const PRODUCTION_USAGE_V1: &str = "usage: dom-interopd self-check [--json]\n       dom-interopd run --state-dir PATH [--create]\n              nine secrets are read from standard input, one pass, no trailing newline:\n              <bearer token>\n<upstream Relay signing secret: 64 lowercase hex>\n<downstream Relay signing secret: 64 lowercase hex>\n<Contracts identity passphrase>\n<DOM wallet passphrase>\n<Bitcoin participant secret: 64 lowercase hex>\n<route-secret seal key: 64 lowercase hex>\n<refund-arming credential: 64 lowercase hex>\n<local EVM signing secret: 64 lowercase hex>";
 
 fn main() -> ExitCode {
     let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -62,29 +62,38 @@ mod production_usage_tests {
     use super::PRODUCTION_USAGE_V1;
 
     #[test]
-    fn usage_pins_all_eight_secret_lines() {
-        assert!(PRODUCTION_USAGE_V1.contains("eight secrets"));
-        assert_eq!(PRODUCTION_USAGE_V1.matches('<').count(), 8);
+    fn usage_pins_all_nine_secret_lines() {
+        assert!(PRODUCTION_USAGE_V1.contains("nine secrets"));
+        assert_eq!(PRODUCTION_USAGE_V1.matches('<').count(), 9);
         assert!(PRODUCTION_USAGE_V1.contains("upstream Relay signing secret"));
         assert!(PRODUCTION_USAGE_V1.contains("downstream Relay signing secret"));
         assert!(PRODUCTION_USAGE_V1.contains("DOM wallet passphrase"));
         assert!(PRODUCTION_USAGE_V1.contains("Bitcoin participant secret"));
         assert!(PRODUCTION_USAGE_V1.contains("refund-arming credential"));
+        assert!(PRODUCTION_USAGE_V1.contains("local EVM signing secret"));
     }
 }
 
 /// Parses `run` and hands off to the composition root.
 ///
-/// On refusal the missing parts are printed one per line, because an operator
-/// who runs this needs to know what is absent rather than that something
-/// failed. The parts come from `MISSING_PRODUCTION_PARTS_V1`, which is the
-/// measured list and not a guess.
+/// The fail-closed limits of this build are printed one per line at startup,
+/// from `PRODUCTION_KNOWN_LIMITS_V1`, so an operator knows which paths refuse
+/// by policy before the route is driven.
 #[cfg(feature = "production")]
 fn run_production(arguments: &[OsString]) -> ExitCode {
     use dom_interopd::{
-        run_production_v1, ProductionRunErrorV1, ProductionRunModeV1, ProductionRunOptionsV1,
-        MISSING_PRODUCTION_PARTS_V1,
+        require_operational_artifact_v1, run_production_v1, ProductionRunModeV1,
+        ProductionRunOptionsV1, PRODUCTION_KNOWN_LIMITS_V1,
     };
+
+    // Refuse a debug-profile or otherwise incomplete artifact before parsing
+    // a state path, reading the nine secrets, opening a store or reaching a
+    // network boundary. Merely selecting the `production` Cargo feature does
+    // not make an artifact operational.
+    if let Err(error) = require_operational_artifact_v1() {
+        eprintln!("{error}");
+        return ExitCode::FAILURE;
+    }
 
     let mut state_dir: Option<PathBuf> = None;
     let mut mode = ProductionRunModeV1::ReopenExisting;
@@ -122,15 +131,13 @@ fn run_production(arguments: &[OsString]) -> ExitCode {
         return ExitCode::from(2);
     };
 
+    for limit in PRODUCTION_KNOWN_LIMITS_V1 {
+        eprintln!("  known limit: {limit}");
+    }
     match run_production_v1(&ProductionRunOptionsV1 { state_dir, mode }) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");
-            if error == ProductionRunErrorV1::NotComposable {
-                for part in MISSING_PRODUCTION_PARTS_V1 {
-                    eprintln!("  missing: {part}");
-                }
-            }
             ExitCode::FAILURE
         }
     }

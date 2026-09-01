@@ -13,6 +13,7 @@ dom-adaptor.workspace = true
 dom-leg = { workspace = true, features = ["real-dom-adaptor"] }
 dom-scriptless-chain-adapter.workspace = true
 dom-scriptless-store.workspace = true
+f7-anchor-authority = { path = "../../f7-anchor-authority" }
 kaystra-core = { path = "../../kaystra-core" }
 thiserror.workspace = true
 

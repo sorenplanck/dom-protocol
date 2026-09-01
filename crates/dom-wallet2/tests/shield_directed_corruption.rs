@@ -202,7 +202,10 @@ fn truncated_wallet_file_is_rejected_without_panic() {
         match res {
             Err(PersistError::Envelope(_))
             | Err(PersistError::UnsupportedSchema(_))
-            | Err(PersistError::Store(_)) => {}
+            | Err(PersistError::Store(_))
+            | Err(PersistError::InvalidOwnerLock)
+            | Err(PersistError::ProcessLocked)
+            | Err(PersistError::LegacyContainsPayoutPin) => {}
             Ok(_) => panic!("truncated file unexpectedly loaded"),
         }
     }

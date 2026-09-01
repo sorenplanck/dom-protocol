@@ -11,6 +11,7 @@ license.workspace      = true
 # Security & serialization (store types since 3A).
 zeroize.workspace   = true
 serde.workspace     = true
+serde_json.workspace = true
 thiserror.workspace = true
 
 # At-rest persistence (3C): the shared, audited encrypted-file envelope + KDF.
@@ -37,6 +38,7 @@ dom-consensus.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 # Hex decoding of commitments / hashes from the JSON response.
 hex.workspace = true
+fs2 = "=0.4.3"
 
 [dev-dependencies]
 tempfile.workspace = true

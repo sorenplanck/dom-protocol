@@ -291,9 +291,25 @@ impl core::fmt::Debug for ProductionF6CandidateAttestationAuthorityStoreV2 {
 
 #[derive(Clone, Copy)]
 enum StoreOpenModeV2 {
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
     Create,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "retained surface not yet wired by the stage-7 composition root"
+        )
+    )]
     Open,
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
     Resume,
+    Prepared(Digest32),
 }
 
 /// Move-only signer and verifier bundle for one attestation Store opening.
@@ -326,6 +342,10 @@ impl ProductionF6CandidateAuthorityInputsV2 {
 
 impl ProductionF6CandidateAttestationAuthorityStoreV2 {
     /// Creates a pristine durable attestation producer.
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
     pub(crate) fn create_production(
         path: &Path,
         binding: ProductionSolverF6BindingV2,
@@ -335,6 +355,13 @@ impl ProductionF6CandidateAttestationAuthorityStoreV2 {
     }
 
     /// Opens an existing complete producer and verifies its entire journal.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "retained surface not yet wired by the stage-7 composition root"
+        )
+    )]
     pub(crate) fn open_production(
         path: &Path,
         binding: ProductionSolverF6BindingV2,
@@ -344,12 +371,33 @@ impl ProductionF6CandidateAttestationAuthorityStoreV2 {
     }
 
     /// Resumes only a globally authorized pristine Store creation prefix.
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
     pub(crate) fn resume_create_production(
         path: &Path,
         binding: ProductionSolverF6BindingV2,
         inputs: ProductionF6CandidateAuthorityInputsV2,
     ) -> Result<Self, ProductionF6ErrorV2> {
         Self::open_with_mode(path, binding, inputs, StoreOpenModeV2::Resume)
+    }
+
+    /// Opens retained producer state or completes the exact externally
+    /// journalled lazy-binding prefix after both authenticated RFQs fix this
+    /// position's final F6 binding.
+    pub(crate) fn open_or_resume_prepared_production(
+        path: &Path,
+        preparation_digest: Digest32,
+        binding: ProductionSolverF6BindingV2,
+        inputs: ProductionF6CandidateAuthorityInputsV2,
+    ) -> Result<Self, ProductionF6ErrorV2> {
+        Self::open_with_mode(
+            path,
+            binding,
+            inputs,
+            StoreOpenModeV2::Prepared(preparation_digest),
+        )
     }
 
     fn open_with_mode(
@@ -372,6 +420,11 @@ impl ProductionF6CandidateAttestationAuthorityStoreV2 {
             StoreOpenModeV2::Create => Store::create_production(path, store_binding),
             StoreOpenModeV2::Open => Store::open_production(path, store_binding),
             StoreOpenModeV2::Resume => Store::resume_create_production(path, store_binding),
+            StoreOpenModeV2::Prepared(preparation_digest) => {
+                let preparation = ProductionStoreBindingV1::new(preparation_digest)
+                    .map_err(|_| ProductionF6ErrorV2::CandidateAttestationUnavailable)?;
+                Store::open_or_resume_prepared_production(path, preparation, store_binding)
+            }
         }
         .map_err(|_| ProductionF6ErrorV2::CandidateAttestationUnavailable)?;
         let mut value = Self {

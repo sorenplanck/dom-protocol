@@ -15,20 +15,28 @@ use route_composer::{
     FinalClaimRevealModeV1, FinalClaimSecretSourceScopeV1, FinalClaimSecretSourceV1, RouteScalar,
 };
 use route_executor::{derive_effect_id_v1, ActionKindV1, LegIdV1, SecretVisibilityV1};
+#[cfg(test)]
+use settlement_coordinator::SettlementPlanBindingsV1;
 use settlement_coordinator::{
-    ChildAuthorityRefusalV1, ChildDispatchRequestV1, ChildExecutionOutcomeV1, ChildExposureV1,
-    ChildObservationOutcomeV1, ChildObservationRequestV1, ChildReconciliationOutcomeV1,
-    ChildReconciliationRequestV1, DeferredChildMaterializationCapabilityV1,
-    DeferredSettlementChildV1, SecretRequirementV1, SettlementActionV1, SettlementChildAuthorityV1,
+    CanonicalSettlementPlanV1, ChildAuthorityRefusalV1, ChildDispatchRequestV1,
+    ChildExecutionOutcomeV1, ChildExposureV1, ChildObservationOutcomeV1, ChildObservationRequestV1,
+    ChildReconciliationOutcomeV1, ChildReconciliationRequestV1, CompositeSettlementPlanV1,
+    DeferredChildMaterializationCapabilityV1, DeferredSettlementChildV1,
+    DurableSettlementCoordinatorV1, PlanAuthorityRefusalV1, PlanAuthorizationRequestV1,
+    PlanAuthorizationV1, SecretRequirementV1, SettlementActionV1, SettlementChildAuthorityV1,
     SettlementChildObserverV1, SettlementChildPlanV1, SettlementChildrenV1, SettlementFaceV1,
-    SettlementLegV1,
+    SettlementLegV1, SettlementPlanAuthorityV1,
 };
 
 use crate::production_child_router::{
-    ProductionChildMaterializationRequestV1, ProductionSettlementChildRouterV1,
+    ProductionBitcoinExtractionHandoffScopeV1, ProductionChildMaterializationRequestV1,
+    ProductionSettlementChildRouterV1,
 };
 use crate::production_inputs::AuthenticatedProductionInputsV1;
-use crate::production_plan_source::ProductionSettlementDraftMaterializerV1;
+use crate::production_plan_source::{
+    ProductionBitcoinPublicSecretInstallerV1, ProductionDomPublicSecretInstallerV1,
+    ProductionSettlementDraftMaterializerV1,
+};
 use crate::production_settlement::ProductionSettlementPlanDraftV1;
 use crate::supervisor::{AuthorityRefusalV1, RouteActionAuthorizationRequestV1};
 
@@ -42,6 +50,8 @@ const CHILD_MATERIALIZATION_REQUEST_DOMAIN_V1: &[u8] =
     b"DOM-INTEROPD/PRODUCTION-CHILD-MATERIALIZATION/REQUEST/V1\0";
 const DEFERRED_MATERIALIZER_AUTHORITY_DOMAIN_V1: &[u8] =
     b"DOM-INTEROPD/PRODUCTION-DEFERRED-MATERIALIZER/AUTHORITY/V1\0";
+const PLAN_AUTHORIZATION_EVIDENCE_DOMAIN_V1: &[u8] =
+    b"DOM-INTEROPD/PRODUCTION-SETTLEMENT-PLAN/AUTHORIZATION-EVIDENCE/V1\0";
 
 #[derive(Clone, Copy)]
 struct ProductionLegMaterializationBindingsV1 {
@@ -68,26 +78,65 @@ pub(crate) struct ProductionFirstExposureClaimRequestV1 {
 }
 
 impl ProductionFirstExposureClaimRequestV1 {
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
     pub(crate) const fn role_plan_digest(&self) -> Digest32 {
         self.role_plan_digest
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "retained surface not yet wired by the stage-7 composition root"
+        )
+    )]
     pub(crate) const fn source_scope_digest(&self) -> Digest32 {
         self.source_scope_digest
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "retained surface not yet wired by the stage-7 composition root"
+        )
+    )]
     pub(crate) const fn first_face(&self) -> SettlementFaceV1 {
         self.first_face
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "retained surface not yet wired by the stage-7 composition root"
+        )
+    )]
     pub(crate) const fn counterparty_face(&self) -> SettlementFaceV1 {
         self.counterparty_face
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "retained surface not yet wired by the stage-7 composition root"
+        )
+    )]
     pub(crate) const fn dom_request(&self) -> ProductionChildMaterializationRequestV1 {
         self.dom
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "retained surface not yet wired by the stage-7 composition root"
+        )
+    )]
     pub(crate) const fn counterparty_request(&self) -> ProductionChildMaterializationRequestV1 {
         self.counterparty
     }
@@ -283,16 +332,24 @@ impl SharedProductionSettlementRouterV1 {
 pub(crate) struct ProductionSettlementMaterializationOwnerV1 {
     materializer: ProductionSettlementDraftMaterializerV2,
     runtime: ProductionSettlementChildRuntimeHandleV1,
+    plan_authority: ProductionAuthenticatedSettlementPlanAuthorityV1,
 }
 
 impl ProductionSettlementMaterializationOwnerV1 {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+    )]
     pub(crate) fn authenticate(
         inputs: &AuthenticatedProductionInputsV1,
+        coordinator: &DurableSettlementCoordinatorV1,
         role_plan: ComposedFinalClaimRolePlanV1,
         upstream_scope: FinalClaimSecretSourceScopeV1,
         downstream_scope: FinalClaimSecretSourceScopeV1,
-        router: ProductionSettlementChildRouterV1,
+        mut router: ProductionSettlementChildRouterV1,
         first_exposure: ProductionCustodiedFirstExposureClaimAuthorityV1,
+        dom_secret_installer: ProductionDomPublicSecretInstallerV1,
+        mut bitcoin_secret_installer: Option<ProductionBitcoinPublicSecretInstallerV1>,
     ) -> Result<Self, AuthorityRefusalV1> {
         let admission = inputs.admission();
         let composition = inputs.composition();
@@ -326,6 +383,63 @@ impl ProductionSettlementMaterializationOwnerV1 {
         let route_scope_digest = composition.route_scope_digest();
         let composition_digest = composition.binding_digest();
         let role_plan_digest = role_plan.digest();
+        let dom_binding = dom_secret_installer.binding();
+        if dom_secret_installer.route_id() != route_id
+            || dom_secret_installer.composition_digest() != composition_digest
+            || dom_secret_installer.leg() != SettlementLegV1::Downstream
+            || dom_secret_installer.settlement_id() != downstream.settlement_id
+            || dom_secret_installer.chain_id() != dom.deployment().chain_id.0
+            || dom_secret_installer.trusted_chain_id().as_bytes()
+                != &dom_secret_installer.chain_id()
+            || dom_binding.route_id() != route_id
+            || dom_binding.session_id() != composition.downstream().session_id.0
+            || dom_binding.chain_id() != dom_secret_installer.chain_id()
+            || dom_binding.profile_digest() != admission.dom_profile_digest()
+            || dom_binding.deployment_digest() != dom.registry_digest()
+        {
+            return Err(AuthorityRefusalV1::Inconsistent);
+        }
+        let expects_bitcoin_secret_installer =
+            upstream.counterparty_face == SettlementFaceV1::Bitcoin;
+        match (
+            expects_bitcoin_secret_installer,
+            bitcoin_secret_installer.as_ref(),
+        ) {
+            (true, Some(installer))
+                if installer.route_id() == route_id
+                    && installer.composition_digest() == composition_digest
+                    && installer.chain_id() == upstream.counterparty_chain_id => {}
+            (false, None) => {}
+            _ => return Err(AuthorityRefusalV1::Inconsistent),
+        }
+        if let Some(installer) = bitcoin_secret_installer.as_mut() {
+            let expected = ProductionBitcoinExtractionHandoffScopeV1 {
+                route_id: installer.route_id(),
+                composition_digest: installer.composition_digest(),
+                chain_id: installer.chain_id(),
+                expected_txid: None,
+            };
+            match router.take_bitcoin_public_extraction_handoff(expected) {
+                Ok(handoff) => {
+                    if let Err((error, handoff)) = installer.install_recovered_exact(handoff) {
+                        router
+                            .restore_bitcoin_public_extraction_handoff(handoff)
+                            .map_err(map_child_refusal)?;
+                        return Err(error);
+                    }
+                }
+                // A fresh route has no exact claim yet. The same installer is
+                // retained by the materializer and filled immediately after
+                // the Bitcoin child durably retains its exact claim.
+                Err(ChildAuthorityRefusalV1::Refused) => {}
+                Err(ChildAuthorityRefusalV1::Unavailable) => {
+                    return Err(AuthorityRefusalV1::Unavailable)
+                }
+                Err(ChildAuthorityRefusalV1::Conflict) => {
+                    return Err(AuthorityRefusalV1::Inconsistent)
+                }
+            }
+        }
         let materializer_authority_id = digest_parts(
             DEFERRED_MATERIALIZER_AUTHORITY_DOMAIN_V1,
             &[
@@ -341,6 +455,20 @@ impl ProductionSettlementMaterializationOwnerV1 {
             ],
         )?;
         let shared = Rc::new(Cell::new(Some(router)));
+        let plan_authority = ProductionAuthenticatedSettlementPlanAuthorityV1 {
+            authority_id: coordinator.plan_authority_id(),
+            route_id,
+            route_scope_digest,
+            composition_digest,
+            role_plan_digest,
+            terms_digest: admission.frozen_bindings().terms_digest,
+            registry_digest: admission.registry_digest(),
+            dom_profile_digest: admission.dom_profile_digest(),
+            dom_deployment_digest: dom.registry_digest(),
+            dom_chain_id: dom.deployment().chain_id.0,
+            materializer_authority_id,
+            legs: [upstream, downstream],
+        };
         Ok(Self {
             materializer: ProductionSettlementDraftMaterializerV2 {
                 route_id,
@@ -361,10 +489,13 @@ impl ProductionSettlementMaterializationOwnerV1 {
                     slot: Rc::clone(&shared),
                 },
                 first_exposure,
+                dom_secret_installer,
+                bitcoin_secret_installer,
             },
             runtime: ProductionSettlementChildRuntimeHandleV1 {
                 router: SharedProductionSettlementRouterV1 { slot: shared },
             },
+            plan_authority,
         })
     }
 
@@ -373,8 +504,193 @@ impl ProductionSettlementMaterializationOwnerV1 {
     ) -> (
         ProductionSettlementDraftMaterializerV2,
         ProductionSettlementChildRuntimeHandleV1,
+        ProductionAuthenticatedSettlementPlanAuthorityV1,
     ) {
-        (self.materializer, self.runtime)
+        (self.materializer, self.runtime, self.plan_authority)
+    }
+}
+
+/// Concrete route/deployment authority accepted by the production settlement
+/// coordinator. It is derived by the same owner that authenticates the plan
+/// materializer and cannot be constructed from a draft or caller-supplied
+/// transaction facts.
+pub(crate) struct ProductionAuthenticatedSettlementPlanAuthorityV1 {
+    authority_id: Digest32,
+    route_id: Digest32,
+    route_scope_digest: Digest32,
+    composition_digest: Digest32,
+    role_plan_digest: Digest32,
+    terms_digest: Digest32,
+    registry_digest: Digest32,
+    dom_profile_digest: Digest32,
+    dom_deployment_digest: Digest32,
+    dom_chain_id: Digest32,
+    materializer_authority_id: Digest32,
+    legs: [ProductionLegMaterializationBindingsV1; 2],
+}
+
+impl core::fmt::Debug for ProductionAuthenticatedSettlementPlanAuthorityV1 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("ProductionAuthenticatedSettlementPlanAuthorityV1([redacted])")
+    }
+}
+
+impl ProductionAuthenticatedSettlementPlanAuthorityV1 {
+    fn authorize_exact_plan(
+        &self,
+        plan: &CompositeSettlementPlanV1,
+        plan_digest: Digest32,
+    ) -> Result<PlanAuthorizationV1, PlanAuthorityRefusalV1> {
+        if plan_digest == ZERO_DIGEST
+            || plan
+                .canonical_digest()
+                .map_err(|_| PlanAuthorityRefusalV1::Refused)?
+                != plan_digest
+        {
+            return Err(PlanAuthorityRefusalV1::Conflict);
+        }
+        self.validate_plan(plan)?;
+        let bindings = plan.bindings();
+        let leg = self.leg(bindings.leg);
+        let evidence_digest = digest_parts(
+            PLAN_AUTHORIZATION_EVIDENCE_DOMAIN_V1,
+            &[
+                &self.authority_id,
+                &plan_digest,
+                &self.route_id,
+                &self.route_scope_digest,
+                &self.composition_digest,
+                &self.role_plan_digest,
+                &bindings.settlement_id,
+                &[settlement_leg_tag(bindings.leg)],
+                &[settlement_action_tag(bindings.action)],
+                &bindings.semantic_digest,
+                &self.terms_digest,
+                &self.registry_digest,
+                &self.dom_profile_digest,
+                &self.dom_deployment_digest,
+                &leg.counterparty_profile_digest,
+                &leg.counterparty_deployment_digest,
+            ],
+        )
+        .map_err(|error| match error {
+            AuthorityRefusalV1::Unavailable => PlanAuthorityRefusalV1::Unavailable,
+            AuthorityRefusalV1::Refused | AuthorityRefusalV1::Inconsistent => {
+                PlanAuthorityRefusalV1::Conflict
+            }
+        })?;
+        PlanAuthorizationV1::new(self.authority_id, plan_digest, evidence_digest, u64::MAX)
+            .map_err(|_| PlanAuthorityRefusalV1::Conflict)
+    }
+
+    fn validate_plan(
+        &self,
+        plan: &CompositeSettlementPlanV1,
+    ) -> Result<(), PlanAuthorityRefusalV1> {
+        let bindings = plan.bindings();
+        let leg = self.leg(bindings.leg);
+        let expected_semantic = production_semantic_digest_v1(
+            ProductionSemanticBindingsV1 {
+                route_id: self.route_id,
+                route_scope_digest: self.route_scope_digest,
+                composition_digest: self.composition_digest,
+                role_plan_digest: self.role_plan_digest,
+                leg: bindings.leg,
+                action: bindings.action,
+                terms_digest: self.terms_digest,
+                registry_digest: self.registry_digest,
+                dom_profile_digest: self.dom_profile_digest,
+                dom_deployment_digest: self.dom_deployment_digest,
+            },
+            leg,
+        )
+        .map_err(|_| PlanAuthorityRefusalV1::Unavailable)?;
+        if self.authority_id == ZERO_DIGEST
+            || bindings.route_id != self.route_id
+            || bindings.settlement_id != leg.settlement_id
+            || bindings.semantic_digest != expected_semantic
+            || bindings.terms_digest != self.terms_digest
+            || bindings.registry_digest != self.registry_digest
+            || bindings.dom_profile_digest != self.dom_profile_digest
+            || bindings.dom_deployment_digest != self.dom_deployment_digest
+            || bindings.counterparty_profile_digest != leg.counterparty_profile_digest
+            || bindings.counterparty_deployment_digest != leg.counterparty_deployment_digest
+        {
+            return Err(PlanAuthorityRefusalV1::Conflict);
+        }
+        match (bindings.action, plan.child_layout()) {
+            (
+                SettlementActionV1::Funding | SettlementActionV1::Refund,
+                SettlementChildrenV1::Materialized(children),
+            ) => self.validate_materialized_pair(children, leg, ChildExposureV1::NonSecret),
+            (SettlementActionV1::Claim, SettlementChildrenV1::Materialized(children))
+                if bindings.leg == SettlementLegV1::Upstream
+                    && leg.secret_source == FinalClaimSecretSourceV1::VerifiedCounterpartyClaim
+                    && plan.secret_requirement() == SecretRequirementV1::AlreadyPublic
+                    && plan.preexisting_secret_evidence_digest().is_some() =>
+            {
+                self.validate_materialized_pair(children, leg, ChildExposureV1::UsesPublicSecret)
+            }
+            (
+                SettlementActionV1::Claim,
+                SettlementChildrenV1::FirstExposureStaged { first, deferred },
+            ) if bindings.leg == SettlementLegV1::Downstream
+                && leg.secret_source == FinalClaimSecretSourceV1::LocalOrigin
+                && leg.reveal_mode == FinalClaimRevealModeV1::DomRevealsFirst
+                && plan.secret_requirement() == SecretRequirementV1::FirstExposureRequired
+                && plan.preexisting_secret_evidence_digest().is_none() =>
+            {
+                if first.face != SettlementFaceV1::Dom
+                    || first.exposure != ChildExposureV1::FirstSecretExposure
+                    || first.chain_id != self.dom_chain_id
+                    || deferred.face != leg.counterparty_face
+                    || deferred.chain_id != leg.counterparty_chain_id
+                    || deferred.route_scope_digest != self.route_scope_digest
+                    || deferred.composition_digest != self.composition_digest
+                    || deferred.role_plan_digest != self.role_plan_digest
+                    || deferred.source_scope_digest != leg.source_scope_digest
+                    || deferred.materializer_authority_id != self.materializer_authority_id
+                {
+                    return Err(PlanAuthorityRefusalV1::Conflict);
+                }
+                Ok(())
+            }
+            _ => Err(PlanAuthorityRefusalV1::Conflict),
+        }
+    }
+
+    fn validate_materialized_pair(
+        &self,
+        children: &[SettlementChildPlanV1; 2],
+        leg: ProductionLegMaterializationBindingsV1,
+        exposure: ChildExposureV1,
+    ) -> Result<(), PlanAuthorityRefusalV1> {
+        if children[0].face != leg.counterparty_face
+            || children[0].chain_id != leg.counterparty_chain_id
+            || children[0].exposure != exposure
+            || children[1].face != SettlementFaceV1::Dom
+            || children[1].chain_id != self.dom_chain_id
+            || children[1].exposure != exposure
+        {
+            return Err(PlanAuthorityRefusalV1::Conflict);
+        }
+        Ok(())
+    }
+
+    const fn leg(&self, leg: SettlementLegV1) -> ProductionLegMaterializationBindingsV1 {
+        match leg {
+            SettlementLegV1::Upstream => self.legs[0],
+            SettlementLegV1::Downstream => self.legs[1],
+        }
+    }
+}
+
+impl SettlementPlanAuthorityV1 for ProductionAuthenticatedSettlementPlanAuthorityV1 {
+    fn authorize_plan(
+        &mut self,
+        request: PlanAuthorizationRequestV1<'_>,
+    ) -> Result<PlanAuthorizationV1, PlanAuthorityRefusalV1> {
+        self.authorize_exact_plan(request.plan(), request.plan_digest())
     }
 }
 
@@ -394,6 +710,8 @@ pub(crate) struct ProductionSettlementDraftMaterializerV2 {
     legs: [ProductionLegMaterializationBindingsV1; 2],
     router: SharedProductionSettlementRouterV1,
     first_exposure: ProductionCustodiedFirstExposureClaimAuthorityV1,
+    dom_secret_installer: ProductionDomPublicSecretInstallerV1,
+    bitcoin_secret_installer: Option<ProductionBitcoinPublicSecretInstallerV1>,
 }
 
 impl core::fmt::Debug for ProductionSettlementDraftMaterializerV2 {
@@ -531,6 +849,7 @@ impl ProductionSettlementDraftMaterializerV1 for ProductionSettlementDraftMateri
                 Ok([counterparty_plan, dom_plan])
             })
             .map_err(map_child_refusal)?;
+        self.install_bitcoin_secret_handoff_if_required(&counterparty, &children[0], leg)?;
         self.validate_pair(
             leg,
             &children,
@@ -617,11 +936,59 @@ impl ProductionSettlementDraftMaterializerV1 for ProductionSettlementDraftMateri
         {
             return Err(AuthorityRefusalV1::Inconsistent);
         }
+        let leg = self.legs[1];
+        self.install_bitcoin_secret_handoff_if_required(&request, &result, leg)?;
         Ok(result)
     }
 }
 
 impl ProductionSettlementDraftMaterializerV2 {
+    fn install_bitcoin_secret_handoff_if_required(
+        &mut self,
+        request: &ProductionChildMaterializationRequestV1,
+        plan: &SettlementChildPlanV1,
+        leg: ProductionLegMaterializationBindingsV1,
+    ) -> Result<(), AuthorityRefusalV1> {
+        if plan.face != SettlementFaceV1::Bitcoin
+            || leg.secret_source != FinalClaimSecretSourceV1::VerifiedCounterpartyClaim
+        {
+            return Ok(());
+        }
+        let installer = self
+            .bitcoin_secret_installer
+            .as_mut()
+            .ok_or(AuthorityRefusalV1::Inconsistent)?;
+        let expected = ProductionBitcoinExtractionHandoffScopeV1 {
+            route_id: request.route_id,
+            composition_digest: request.composition_digest,
+            chain_id: plan.chain_id,
+            expected_txid: Some(plan.expected_transaction_id),
+        };
+        match self
+            .router
+            .with_router(|router| router.take_bitcoin_public_extraction_handoff(expected))
+        {
+            Ok(handoff) => match installer.install_from_exact_child(request, plan, handoff) {
+                Ok(()) => Ok(()),
+                Err((error, handoff)) => {
+                    self.router
+                        .with_router(|router| {
+                            router.restore_bitcoin_public_extraction_handoff(handoff)
+                        })
+                        .map_err(map_child_refusal)?;
+                    Err(error)
+                }
+            },
+            // On a same-route replay the slot may already own the only
+            // handoff. Authenticate the exact plan instead of requesting a
+            // second authority from the child.
+            Err(ChildAuthorityRefusalV1::Refused) => {
+                installer.authenticate_installed_exact_child(request, plan)
+            }
+            Err(error) => Err(map_child_refusal(error)),
+        }
+    }
+
     fn require_scope(
         &self,
         composition: &ComposedBindingV2,
@@ -653,24 +1020,20 @@ impl ProductionSettlementDraftMaterializerV2 {
         action: ActionKindV1,
         leg: ProductionLegMaterializationBindingsV1,
     ) -> Result<Digest32, AuthorityRefusalV1> {
-        digest_parts(
-            SEMANTIC_DOMAIN_V1,
-            &[
-                &self.route_id,
-                &self.route_scope_digest,
-                &self.composition_digest,
-                &self.role_plan_digest,
-                &leg.settlement_id,
-                &[route_leg_tag(route_leg)],
-                &[action_tag(action)],
-                &self.frozen_terms_digest,
-                &self.registry_digest,
-                &self.dom_profile_digest,
-                &self.dom_deployment_digest,
-                &leg.counterparty_profile_digest,
-                &leg.counterparty_deployment_digest,
-                &leg.source_scope_digest,
-            ],
+        production_semantic_digest_v1(
+            ProductionSemanticBindingsV1 {
+                route_id: self.route_id,
+                route_scope_digest: self.route_scope_digest,
+                composition_digest: self.composition_digest,
+                role_plan_digest: self.role_plan_digest,
+                leg: settlement_leg(route_leg),
+                action: settlement_action(action),
+                terms_digest: self.frozen_terms_digest,
+                registry_digest: self.registry_digest,
+                dom_profile_digest: self.dom_profile_digest,
+                dom_deployment_digest: self.dom_deployment_digest,
+            },
+            leg,
         )
     }
 
@@ -787,6 +1150,7 @@ impl ProductionSettlementDraftMaterializerV2 {
                 false,
             ),
         };
+        let dom_request = authority_request.dom;
         let first_exposure = &mut self.first_exposure;
         let first = self
             .router
@@ -803,6 +1167,8 @@ impl ProductionSettlementDraftMaterializerV2 {
         {
             return Err(AuthorityRefusalV1::Inconsistent);
         }
+        self.dom_secret_installer
+            .install_from_exact_child(&dom_request, &first)?;
         Ok(SettlementChildrenV1::FirstExposureStaged {
             first,
             deferred: DeferredSettlementChildV1 {
@@ -871,6 +1237,45 @@ impl ProductionSettlementDraftMaterializerV2 {
             children,
         })
     }
+}
+
+#[derive(Clone, Copy)]
+struct ProductionSemanticBindingsV1 {
+    route_id: Digest32,
+    route_scope_digest: Digest32,
+    composition_digest: Digest32,
+    role_plan_digest: Digest32,
+    leg: SettlementLegV1,
+    action: SettlementActionV1,
+    terms_digest: Digest32,
+    registry_digest: Digest32,
+    dom_profile_digest: Digest32,
+    dom_deployment_digest: Digest32,
+}
+
+fn production_semantic_digest_v1(
+    bindings: ProductionSemanticBindingsV1,
+    leg: ProductionLegMaterializationBindingsV1,
+) -> Result<Digest32, AuthorityRefusalV1> {
+    digest_parts(
+        SEMANTIC_DOMAIN_V1,
+        &[
+            &bindings.route_id,
+            &bindings.route_scope_digest,
+            &bindings.composition_digest,
+            &bindings.role_plan_digest,
+            &leg.settlement_id,
+            &[settlement_leg_tag(bindings.leg)],
+            &[settlement_action_tag(bindings.action)],
+            &bindings.terms_digest,
+            &bindings.registry_digest,
+            &bindings.dom_profile_digest,
+            &bindings.dom_deployment_digest,
+            &leg.counterparty_profile_digest,
+            &leg.counterparty_deployment_digest,
+            &leg.source_scope_digest,
+        ],
+    )
 }
 
 fn authenticate_leg(
@@ -1022,21 +1427,6 @@ fn child_materialization_digest(
     })
 }
 
-const fn route_leg_tag(leg: LegIdV1) -> u8 {
-    match leg {
-        LegIdV1::Upstream => 1,
-        LegIdV1::Downstream => 2,
-    }
-}
-
-const fn action_tag(action: ActionKindV1) -> u8 {
-    match action {
-        ActionKindV1::Funding => 1,
-        ActionKindV1::Claim => 2,
-        ActionKindV1::Refund => 3,
-    }
-}
-
 const fn settlement_leg(leg: LegIdV1) -> SettlementLegV1 {
     match leg {
         LegIdV1::Upstream => SettlementLegV1::Upstream,
@@ -1100,6 +1490,370 @@ mod tests {
     assert_not_impl_any!(ProductionSettlementMaterializationOwnerV1: Clone, Copy);
     assert_not_impl_any!(ProductionSettlementDraftMaterializerV2: Clone, Copy);
     assert_not_impl_any!(ProductionSettlementChildRuntimeHandleV1: Clone, Copy);
+    assert_not_impl_any!(ProductionAuthenticatedSettlementPlanAuthorityV1: Clone, Copy);
+
+    fn plan_authority() -> ProductionAuthenticatedSettlementPlanAuthorityV1 {
+        ProductionAuthenticatedSettlementPlanAuthorityV1 {
+            authority_id: [0x11; 32],
+            route_id: [0x12; 32],
+            route_scope_digest: [0x13; 32],
+            composition_digest: [0x14; 32],
+            role_plan_digest: [0x15; 32],
+            terms_digest: [0x16; 32],
+            registry_digest: [0x17; 32],
+            dom_profile_digest: [0x18; 32],
+            dom_deployment_digest: [0x19; 32],
+            dom_chain_id: [0x1a; 32],
+            materializer_authority_id: [0x1b; 32],
+            legs: [
+                ProductionLegMaterializationBindingsV1 {
+                    settlement_id: [0x21; 32],
+                    counterparty_face: SettlementFaceV1::Evm,
+                    counterparty_chain_id: [0x22; 32],
+                    counterparty_profile_digest: [0x23; 32],
+                    counterparty_deployment_digest: [0x24; 32],
+                    source_scope_digest: [0x25; 32],
+                    reveal_mode: FinalClaimRevealModeV1::DomReactsToCounterpartyReveal,
+                    secret_source: FinalClaimSecretSourceV1::VerifiedCounterpartyClaim,
+                },
+                ProductionLegMaterializationBindingsV1 {
+                    settlement_id: [0x31; 32],
+                    counterparty_face: SettlementFaceV1::Bitcoin,
+                    counterparty_chain_id: [0x32; 32],
+                    counterparty_profile_digest: [0x33; 32],
+                    counterparty_deployment_digest: [0x34; 32],
+                    source_scope_digest: [0x35; 32],
+                    reveal_mode: FinalClaimRevealModeV1::DomRevealsFirst,
+                    secret_source: FinalClaimSecretSourceV1::LocalOrigin,
+                },
+            ],
+        }
+    }
+
+    fn plan_bindings(
+        authority: &ProductionAuthenticatedSettlementPlanAuthorityV1,
+        leg_id: SettlementLegV1,
+        action: SettlementActionV1,
+    ) -> SettlementPlanBindingsV1 {
+        let leg = authority.leg(leg_id);
+        let semantic_digest = production_semantic_digest_v1(
+            ProductionSemanticBindingsV1 {
+                route_id: authority.route_id,
+                route_scope_digest: authority.route_scope_digest,
+                composition_digest: authority.composition_digest,
+                role_plan_digest: authority.role_plan_digest,
+                leg: leg_id,
+                action,
+                terms_digest: authority.terms_digest,
+                registry_digest: authority.registry_digest,
+                dom_profile_digest: authority.dom_profile_digest,
+                dom_deployment_digest: authority.dom_deployment_digest,
+            },
+            leg,
+        )
+        .expect("semantic digest");
+        SettlementPlanBindingsV1 {
+            route_id: authority.route_id,
+            effect_id: [0x41; 32],
+            settlement_id: leg.settlement_id,
+            leg: leg_id,
+            action,
+            fencing_epoch: 7,
+            semantic_digest,
+            terms_digest: authority.terms_digest,
+            registry_digest: authority.registry_digest,
+            dom_profile_digest: authority.dom_profile_digest,
+            dom_deployment_digest: authority.dom_deployment_digest,
+            counterparty_profile_digest: leg.counterparty_profile_digest,
+            counterparty_deployment_digest: leg.counterparty_deployment_digest,
+        }
+    }
+
+    fn child(
+        face: SettlementFaceV1,
+        exposure: ChildExposureV1,
+        chain_id: Digest32,
+        seed: u8,
+    ) -> SettlementChildPlanV1 {
+        SettlementChildPlanV1 {
+            face,
+            exposure,
+            chain_id,
+            expected_transaction_id: [seed; 32],
+            intent_digest: [seed.wrapping_add(1); 32],
+            custody_digest: [seed.wrapping_add(2); 32],
+        }
+    }
+
+    fn funding_plan(
+        authority: &ProductionAuthenticatedSettlementPlanAuthorityV1,
+    ) -> CompositeSettlementPlanV1 {
+        let leg = authority.legs[0];
+        CompositeSettlementPlanV1::new(
+            plan_bindings(
+                authority,
+                SettlementLegV1::Upstream,
+                SettlementActionV1::Funding,
+            ),
+            SecretRequirementV1::None,
+            None,
+            [
+                child(
+                    leg.counterparty_face,
+                    ChildExposureV1::NonSecret,
+                    leg.counterparty_chain_id,
+                    0x51,
+                ),
+                child(
+                    SettlementFaceV1::Dom,
+                    ChildExposureV1::NonSecret,
+                    authority.dom_chain_id,
+                    0x61,
+                ),
+            ],
+        )
+        .expect("funding plan")
+    }
+
+    fn staged_claim_plan(
+        authority: &ProductionAuthenticatedSettlementPlanAuthorityV1,
+    ) -> CompositeSettlementPlanV1 {
+        let leg = authority.legs[1];
+        CompositeSettlementPlanV1::new_first_exposure_staged(
+            plan_bindings(
+                authority,
+                SettlementLegV1::Downstream,
+                SettlementActionV1::Claim,
+            ),
+            child(
+                SettlementFaceV1::Dom,
+                ChildExposureV1::FirstSecretExposure,
+                authority.dom_chain_id,
+                0x71,
+            ),
+            DeferredSettlementChildV1 {
+                face: leg.counterparty_face,
+                chain_id: leg.counterparty_chain_id,
+                route_scope_digest: authority.route_scope_digest,
+                composition_digest: authority.composition_digest,
+                role_plan_digest: authority.role_plan_digest,
+                source_scope_digest: leg.source_scope_digest,
+                materializer_authority_id: authority.materializer_authority_id,
+            },
+        )
+        .expect("staged claim plan")
+    }
+
+    fn authorize(
+        authority: &ProductionAuthenticatedSettlementPlanAuthorityV1,
+        plan: &CompositeSettlementPlanV1,
+    ) -> Result<PlanAuthorizationV1, PlanAuthorityRefusalV1> {
+        authority.authorize_exact_plan(plan, plan.canonical_digest().expect("plan digest"))
+    }
+
+    #[test]
+    fn production_plan_authority_accepts_only_exact_authenticated_route_shapes() {
+        let authority = plan_authority();
+        for plan in [funding_plan(&authority), staged_claim_plan(&authority)] {
+            let digest = plan.canonical_digest().expect("plan digest");
+            let first = authorize(&authority, &plan).expect("exact authorization");
+            let second = authorize(&authority, &plan).expect("idempotent authorization");
+            assert_eq!(first, second);
+            assert_eq!(first.authority_id(), authority.authority_id);
+            assert_eq!(first.plan_digest(), digest);
+            assert_eq!(first.valid_until_unix_ms(), u64::MAX);
+        }
+    }
+
+    #[test]
+    fn production_plan_authority_refuses_digest_binding_and_child_transplants() {
+        let authority = plan_authority();
+        let exact = funding_plan(&authority);
+        assert_eq!(
+            authority.authorize_exact_plan(&exact, [0x91; 32]),
+            Err(PlanAuthorityRefusalV1::Conflict)
+        );
+
+        let leg = authority.legs[0];
+        let exact_bindings = plan_bindings(
+            &authority,
+            SettlementLegV1::Upstream,
+            SettlementActionV1::Funding,
+        );
+        let mut variants = Vec::new();
+        for transplanted in [
+            SettlementPlanBindingsV1 {
+                route_id: [0x92; 32],
+                ..exact_bindings.clone()
+            },
+            SettlementPlanBindingsV1 {
+                settlement_id: [0x93; 32],
+                ..exact_bindings.clone()
+            },
+            SettlementPlanBindingsV1 {
+                semantic_digest: [0x94; 32],
+                ..exact_bindings.clone()
+            },
+            SettlementPlanBindingsV1 {
+                terms_digest: [0x95; 32],
+                ..exact_bindings.clone()
+            },
+            SettlementPlanBindingsV1 {
+                registry_digest: [0x96; 32],
+                ..exact_bindings.clone()
+            },
+            SettlementPlanBindingsV1 {
+                dom_profile_digest: [0x97; 32],
+                ..exact_bindings.clone()
+            },
+            SettlementPlanBindingsV1 {
+                dom_deployment_digest: [0x98; 32],
+                ..exact_bindings.clone()
+            },
+            SettlementPlanBindingsV1 {
+                counterparty_profile_digest: [0x99; 32],
+                ..exact_bindings.clone()
+            },
+            SettlementPlanBindingsV1 {
+                counterparty_deployment_digest: [0x9a; 32],
+                ..exact_bindings
+            },
+        ] {
+            variants.push(
+                CompositeSettlementPlanV1::new(
+                    transplanted,
+                    SecretRequirementV1::None,
+                    None,
+                    [
+                        child(
+                            leg.counterparty_face,
+                            ChildExposureV1::NonSecret,
+                            leg.counterparty_chain_id,
+                            0x51,
+                        ),
+                        child(
+                            SettlementFaceV1::Dom,
+                            ChildExposureV1::NonSecret,
+                            authority.dom_chain_id,
+                            0x61,
+                        ),
+                    ],
+                )
+                .expect("structurally valid transplant"),
+            );
+        }
+        variants.push(
+            CompositeSettlementPlanV1::new(
+                plan_bindings(
+                    &authority,
+                    SettlementLegV1::Upstream,
+                    SettlementActionV1::Funding,
+                ),
+                SecretRequirementV1::None,
+                None,
+                [
+                    child(
+                        leg.counterparty_face,
+                        ChildExposureV1::NonSecret,
+                        [0x9b; 32],
+                        0x51,
+                    ),
+                    child(
+                        SettlementFaceV1::Dom,
+                        ChildExposureV1::NonSecret,
+                        authority.dom_chain_id,
+                        0x61,
+                    ),
+                ],
+            )
+            .expect("wrong counterparty chain remains structurally valid"),
+        );
+        for variant in variants {
+            assert_eq!(
+                authorize(&authority, &variant),
+                Err(PlanAuthorityRefusalV1::Conflict)
+            );
+        }
+    }
+
+    #[test]
+    fn production_plan_authority_refuses_staged_descriptor_transplants() {
+        let authority = plan_authority();
+        let leg = authority.legs[1];
+        let mut variants = Vec::new();
+        for deferred in [
+            DeferredSettlementChildV1 {
+                route_scope_digest: [0xa1; 32],
+                ..match staged_claim_plan(&authority).child_layout() {
+                    SettlementChildrenV1::FirstExposureStaged { deferred, .. } => deferred.clone(),
+                    SettlementChildrenV1::Materialized(_) => unreachable!(),
+                }
+            },
+            DeferredSettlementChildV1 {
+                materializer_authority_id: [0xa2; 32],
+                ..match staged_claim_plan(&authority).child_layout() {
+                    SettlementChildrenV1::FirstExposureStaged { deferred, .. } => deferred.clone(),
+                    SettlementChildrenV1::Materialized(_) => unreachable!(),
+                }
+            },
+            DeferredSettlementChildV1 {
+                source_scope_digest: [0xa3; 32],
+                ..match staged_claim_plan(&authority).child_layout() {
+                    SettlementChildrenV1::FirstExposureStaged { deferred, .. } => deferred.clone(),
+                    SettlementChildrenV1::Materialized(_) => unreachable!(),
+                }
+            },
+        ] {
+            variants.push(
+                CompositeSettlementPlanV1::new_first_exposure_staged(
+                    plan_bindings(
+                        &authority,
+                        SettlementLegV1::Downstream,
+                        SettlementActionV1::Claim,
+                    ),
+                    child(
+                        SettlementFaceV1::Dom,
+                        ChildExposureV1::FirstSecretExposure,
+                        authority.dom_chain_id,
+                        0x71,
+                    ),
+                    deferred,
+                )
+                .expect("structurally valid staged transplant"),
+            );
+        }
+        variants.push(
+            CompositeSettlementPlanV1::new_first_exposure_staged(
+                plan_bindings(
+                    &authority,
+                    SettlementLegV1::Downstream,
+                    SettlementActionV1::Claim,
+                ),
+                child(
+                    SettlementFaceV1::Dom,
+                    ChildExposureV1::FirstSecretExposure,
+                    [0xa4; 32],
+                    0x71,
+                ),
+                DeferredSettlementChildV1 {
+                    face: leg.counterparty_face,
+                    chain_id: leg.counterparty_chain_id,
+                    route_scope_digest: authority.route_scope_digest,
+                    composition_digest: authority.composition_digest,
+                    role_plan_digest: authority.role_plan_digest,
+                    source_scope_digest: leg.source_scope_digest,
+                    materializer_authority_id: authority.materializer_authority_id,
+                },
+            )
+            .expect("wrong DOM chain remains structurally valid"),
+        );
+        for variant in variants {
+            assert_eq!(
+                authorize(&authority, &variant),
+                Err(PlanAuthorityRefusalV1::Conflict)
+            );
+        }
+    }
 
     struct MaterializingPortV1 {
         face: SettlementFaceV1,

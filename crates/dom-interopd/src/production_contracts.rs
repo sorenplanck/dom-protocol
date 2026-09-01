@@ -10,22 +10,43 @@ use dom_actuator::{
     DomSessionBindingV1,
 };
 use dom_adaptor::TrustedChainIdV1;
+use dom_core::Hash256;
 use dom_scriptless_identity_store::{ContractsTransportIdentityStoreV1, IdentityStoreError};
 use dom_scriptless_store::{
-    ContractsNonceVaultV1, ContractsSessionStoreV1, OutboundDsc1RecoveryV1,
-    PreparedDsc1SigningRequestV1, PreparedOperationalM8FundingGateV2,
-    PreparedPostAnchorClaimPreSignatureTransportAuthorityV2, SessionStoreError,
+    ClaimSigningAuthorizationV2, ConsumedClaimSigningAuthorizationV2, ContractsNonceVaultV1,
+    ContractsSessionStoreV1, OutboundDsc1RecoveryV1, PreparedDsc1SigningRequestV1,
+    PreparedEvmSignedActionImportV1, PreparedOperationalFinalRefundTransportAuthorityV1,
+    PreparedOperationalM8FundingGateV2, PreparedPostAnchorClaimPreSignatureTransportAuthorityV2,
+    SessionStoreError,
 };
+use f7_anchor_authority::VerifiedF7AnchorAuthorizationV2;
 use kaystra_core::state::EvidenceRefV1;
 use relay::auth::RosterRegistryV1;
 use relay::{SenderRoleV1, TimelockSpec};
-use route_transport::{F6TransportPortV1, RelayQueueV1, RouteApplicationDispositionV2};
+use route_executor::{FrozenBindingsV1, LegIdV1};
+use route_transport::{
+    F6AppliedReplayErrorV1, F6AppliedReplayReportV1, F6TransportPortV1, RelaySubmitQueueV1,
+    RouteApplicationDispositionV2,
+};
+use settlement_coordinator::ChildAuthorityRefusalV1;
 
-use crate::production_plan_source::ProductionDomPublicSecretSourceV1;
+use crate::production_evm_remote_signer::{
+    ProductionEvmRemoteRequestV1, ProductionEvmRemoteSignerBindingV1,
+    ProductionEvmRemoteTransportV1,
+};
+use crate::production_f6_lifecycle::{ProductionF6LifecycleErrorV2, ProductionF6LifecyclePortV2};
+use crate::production_plan_source::{
+    ProductionDomPublicSecretConsumerAuthorityV1, ProductionDomPublicSecretInstallerV1,
+    ProductionDomPublicSecretSourceScopeV1, ProductionDomPublicSecretSourceV1,
+};
+use crate::production_refund_arming::{
+    ProductionDomRefundFaceScopeV1, ProductionDomRefundFaceV1, ProductionRefundArmingOpenErrorV1,
+};
 use crate::relay_worker::{
     ContractsRelayIngressErrorV1, ContractsSessionStatusV1, DurableRelayWorkerV1,
-    PreparedContractsIngressV1, RelayOutboundStepV1, RelayWorkerConfigV1, RelayWorkerOpenErrorV1,
-    RelayWorkerOutboundErrorV1, RelayWorkerPathsV1,
+    PreparedContractsIngressV1, RelayInboundPollReportV1, RelayOutboundStepV1, RelayWorkerConfigV1,
+    RelayWorkerInboundErrorV1, RelayWorkerOpenErrorV1, RelayWorkerOutboundErrorV1,
+    RelayWorkerPathsV1,
 };
 use crate::supervisor::AuthorityRefusalV1;
 
@@ -64,6 +85,10 @@ pub(crate) enum ProductionContractsOutboundErrorV1 {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[expect(
+    dead_code,
+    reason = "retained surface not yet wired by the stage-7 composition root"
+)]
 pub(crate) enum ProductionContractsInboundErrorV1 {
     #[error("real DOM observation failed closed")]
     Observation(#[source] RealDomError),
@@ -73,6 +98,132 @@ pub(crate) enum ProductionContractsInboundErrorV1 {
     Store(#[source] SessionStoreError),
     #[error("Contracts Relay refused FinalClaim ingress authority")]
     Relay(#[source] ContractsRelayIngressErrorV1),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ProductionContractsF6RecoveryErrorV2 {
+    #[error("Contracts Relay owner is already executing another operation")]
+    OwnerBusy,
+    #[error("production F6 applied history failed authentication")]
+    Replay(#[source] F6AppliedReplayErrorV1<ProductionF6LifecycleErrorV2>),
+}
+
+/// Redacted refusal from the productive F7/M.8 Contracts boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[expect(
+    dead_code,
+    reason = "retained surface not yet wired by the stage-7 composition root"
+)]
+pub(crate) enum ProductionContractsPostAnchorErrorV2 {
+    /// The verified authorization does not belong to this retained owner or
+    /// the durable Store refused its exact post-anchor transition.
+    #[error("Contracts Store refused productive post-anchor authority")]
+    StoreRefused,
+}
+
+/// Move-only post-anchor authority over the same physical Contracts Store.
+///
+/// This wrapper cannot be built from public anchor facts. Its only constructor
+/// is [`ProductionContractsV1::issue_post_anchor_v2`], which consumes the
+/// opaque result of the real F7 V2 verifier into this owner's retained Store.
+/// Keeping the `Rc` beside the linear authorization prevents a later stage
+/// from reopening or substituting a different Contracts authority.
+#[must_use = "the productive post-anchor Contracts authority is linear"]
+#[expect(
+    dead_code,
+    reason = "retained surface not yet wired by the stage-7 composition root"
+)]
+pub(crate) struct ProductionContractsPostAnchorV2 {
+    store: Rc<ContractsSessionStoreV1>,
+    authorization: ClaimSigningAuthorizationV2,
+}
+
+impl core::fmt::Debug for ProductionContractsPostAnchorV2 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("ProductionContractsPostAnchorV2([authority redacted])")
+    }
+}
+
+/// Durable consumed form retained with the same physical Contracts Store.
+#[must_use = "the consumed post-anchor Contracts authority remains linear"]
+#[expect(
+    dead_code,
+    reason = "retained surface not yet wired by the stage-7 composition root"
+)]
+pub(crate) struct ProductionContractsConsumedPostAnchorV2 {
+    store: Rc<ContractsSessionStoreV1>,
+    authorization: ConsumedClaimSigningAuthorizationV2,
+}
+
+impl core::fmt::Debug for ProductionContractsConsumedPostAnchorV2 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("ProductionContractsConsumedPostAnchorV2([authority redacted])")
+    }
+}
+
+impl ProductionContractsPostAnchorV2 {
+    /// Durably consumes issuance before any DOM claim nonce or signature use.
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
+    pub(crate) fn consume(
+        self,
+    ) -> Result<ProductionContractsConsumedPostAnchorV2, ProductionContractsPostAnchorErrorV2> {
+        let authorization = self
+            .store
+            .consume_post_anchor_dom_claim_signing_v2(self.authorization)
+            .map_err(|_| ProductionContractsPostAnchorErrorV2::StoreRefused)?;
+        Ok(ProductionContractsConsumedPostAnchorV2 {
+            store: self.store,
+            authorization,
+        })
+    }
+}
+
+impl ProductionContractsConsumedPostAnchorV2 {
+    /// Reauthenticates the consumed capability against its retained Store.
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
+    pub(crate) fn revalidate(&self) -> Result<(), ProductionContractsPostAnchorErrorV2> {
+        self.store
+            .revalidate_consumed_post_anchor_dom_claim_signing_v2(&self.authorization)
+            .map_err(|_| ProductionContractsPostAnchorErrorV2::StoreRefused)
+    }
+
+    /// Borrows the Store-authenticated capability without separating it from
+    /// the retained physical owner. This is the only intended DOM signer edge.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "retained surface not yet wired by the stage-7 composition root"
+        )
+    )]
+    pub(crate) const fn authorization(&self) -> &ConsumedClaimSigningAuthorizationV2 {
+        &self.authorization
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ProductionContractsPollErrorV1<E>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    #[error("Contracts Relay owner is already executing another operation")]
+    OwnerBusy,
+    #[error("Contracts Relay inbound step failed closed")]
+    Worker(#[source] RelayWorkerInboundErrorV1<E>),
+}
+
+impl From<F6AppliedReplayErrorV1<ProductionF6LifecycleErrorV2>>
+    for ProductionContractsF6RecoveryErrorV2
+{
+    fn from(error: F6AppliedReplayErrorV1<ProductionF6LifecycleErrorV2>) -> Self {
+        Self::Replay(error)
+    }
 }
 
 impl From<RealDomError> for ProductionContractsInboundErrorV1 {
@@ -118,6 +269,10 @@ impl From<RelayWorkerOutboundErrorV1> for ProductionContractsOutboundErrorV1 {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[expect(
+    dead_code,
+    reason = "retained surface not yet wired by the stage-7 composition root"
+)]
 pub(crate) enum ProductionContractsResumeV1 {
     Idle,
     Staged(RouteApplicationDispositionV2),
@@ -129,6 +284,106 @@ pub(crate) enum ProductionDomFinalClaimTransportRecoveryV1 {
     Staged,
 }
 
+/// Restart-safe state of one exact counterparty EVM signature response.
+pub(crate) enum ProductionEvmRemoteResponseV1 {
+    /// The authenticated `0x16` has not reached this Contracts Store yet.
+    Pending,
+    /// The Store consumed the exact response into its one-shot import grant.
+    Prepared(Box<PreparedEvmSignedActionImportV1>),
+}
+
+impl core::fmt::Debug for ProductionEvmRemoteResponseV1 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Pending => formatter.write_str("ProductionEvmRemoteResponseV1::Pending"),
+            Self::Prepared(_) => formatter
+                .write_str("ProductionEvmRemoteResponseV1::Prepared([raw transaction redacted])"),
+        }
+    }
+}
+
+/// Narrow, move-only view of the one Contracts/Relay opening used by an EVM
+/// child whose signing key belongs to the counterparty.
+pub(crate) struct ProductionEvmRemoteContractsAuthorityV1<F>
+where
+    F: F6TransportPortV1,
+{
+    session_id: [u8; 32],
+    route_id: [u8; 32],
+    local_participant: [u8; 32],
+    remote_participant: [u8; 32],
+    store: Rc<ContractsSessionStoreV1>,
+    identity: Rc<ContractsTransportIdentityStoreV1>,
+    relay: Rc<RefCell<DurableRelayWorkerV1<F>>>,
+    expiry: TimelockSpec,
+}
+
+impl<F> core::fmt::Debug for ProductionEvmRemoteContractsAuthorityV1<F>
+where
+    F: F6TransportPortV1,
+{
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("ProductionEvmRemoteContractsAuthorityV1([authority redacted])")
+    }
+}
+
+impl<F> ProductionEvmRemoteTransportV1 for ProductionEvmRemoteContractsAuthorityV1<F>
+where
+    F: F6TransportPortV1,
+{
+    fn stage_request(
+        &mut self,
+        request: &ProductionEvmRemoteRequestV1,
+    ) -> Result<[u8; 32], ChildAuthorityRefusalV1> {
+        prepare_and_stage_evm_remote_action_request_shared(
+            EvmRemoteContractsSharedV1 {
+                session_id: self.session_id,
+                route_id: self.route_id,
+                local_participant: self.local_participant,
+                remote_participant: self.remote_participant,
+                store: self.store.as_ref(),
+                identity: self.identity.as_ref(),
+                relay: &self.relay,
+            },
+            request,
+            self.expiry,
+        )
+        .map_err(map_evm_remote_transport_error)
+    }
+
+    fn take_response(
+        &mut self,
+        request: &ProductionEvmRemoteRequestV1,
+        request_message_digest: [u8; 32],
+    ) -> Result<Option<PreparedEvmSignedActionImportV1>, ChildAuthorityRefusalV1> {
+        match take_evm_remote_signed_response_shared(
+            self.session_id,
+            self.route_id,
+            self.local_participant,
+            self.remote_participant,
+            self.store.as_ref(),
+            request,
+            request_message_digest,
+        )
+        .map_err(map_evm_remote_transport_error)?
+        {
+            ProductionEvmRemoteResponseV1::Pending => Ok(None),
+            ProductionEvmRemoteResponseV1::Prepared(prepared) => Ok(Some(*prepared)),
+        }
+    }
+}
+
+fn map_evm_remote_transport_error(
+    error: ProductionContractsOutboundErrorV1,
+) -> ChildAuthorityRefusalV1 {
+    match error {
+        ProductionContractsOutboundErrorV1::Relay(_)
+        | ProductionContractsOutboundErrorV1::OwnerBusy => ChildAuthorityRefusalV1::Unavailable,
+        ProductionContractsOutboundErrorV1::Identity(_)
+        | ProductionContractsOutboundErrorV1::Store(_) => ChildAuthorityRefusalV1::Conflict,
+    }
+}
+
 /// Validated one-opening handoff into the DOM public-secret source.
 ///
 /// This remains private to the composition module. It has no store accessor;
@@ -136,8 +391,75 @@ pub(crate) enum ProductionDomFinalClaimTransportRecoveryV1 {
 /// source after all owner and chain checks have passed.
 struct ProductionDomPublicSecretOpeningV1 {
     store: Rc<ContractsSessionStoreV1>,
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
+    binding: DomSessionBindingV1,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "retained surface not yet wired by the stage-7 composition root"
+        )
+    )]
+    trusted_chain_id: TrustedChainIdV1,
+}
+
+/// Opaque, purpose-specific ownership handoff for one DOM refund face.
+///
+/// Only [`ProductionContractsV1`] can construct this value.  Its operations
+/// deliberately expose neither the retained [`Rc`] nor the Store itself.
+pub(crate) struct ProductionDomRefundStoreFaceV1 {
+    store: Rc<ContractsSessionStoreV1>,
     binding: DomSessionBindingV1,
     trusted_chain_id: TrustedChainIdV1,
+    position: LegIdV1,
+    owner_id: [u8; 32],
+    authority_epoch: u64,
+    composition_digest: [u8; 32],
+    frozen_bindings: FrozenBindingsV1,
+}
+
+impl core::fmt::Debug for ProductionDomRefundStoreFaceV1 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("ProductionDomRefundStoreFaceV1([authority redacted])")
+    }
+}
+
+impl ProductionDomRefundStoreFaceV1 {
+    pub(crate) const fn binding(&self) -> DomSessionBindingV1 {
+        self.binding
+    }
+
+    pub(crate) fn bind(&self) -> DomActuatorResult<DomContractsActuatorV1<'_>> {
+        DomContractsActuatorV1::bind(self.store.as_ref(), self.binding)
+    }
+
+    pub(crate) fn prepare_final_refund(
+        &self,
+    ) -> Result<PreparedOperationalFinalRefundTransportAuthorityV1, SessionStoreError> {
+        self.store
+            .prepare_operational_final_refund_transport_authority(
+                self.trusted_chain_id,
+                self.binding.session_id(),
+            )
+    }
+
+    pub(crate) fn authenticates_scope(
+        &self,
+        position: LegIdV1,
+        owner_id: [u8; 32],
+        authority_epoch: u64,
+        composition_digest: [u8; 32],
+        frozen_bindings: &FrozenBindingsV1,
+    ) -> bool {
+        self.position == position
+            && self.owner_id == owner_id
+            && self.authority_epoch == authority_epoch
+            && self.composition_digest == composition_digest
+            && &self.frozen_bindings == frozen_bindings
+    }
 }
 
 /// Owned, purpose-specific handoff of the sole Contracts opening to the DOM
@@ -361,6 +683,140 @@ where
         .map_err(ProductionContractsOutboundErrorV1::from)
 }
 
+struct EvmRemoteContractsSharedV1<'owner, F>
+where
+    F: F6TransportPortV1,
+{
+    session_id: [u8; 32],
+    route_id: [u8; 32],
+    local_participant: [u8; 32],
+    remote_participant: [u8; 32],
+    store: &'owner ContractsSessionStoreV1,
+    identity: &'owner ContractsTransportIdentityStoreV1,
+    relay: &'owner Rc<RefCell<DurableRelayWorkerV1<F>>>,
+}
+
+fn prepare_and_stage_evm_remote_action_request_shared<F>(
+    shared: EvmRemoteContractsSharedV1<'_, F>,
+    request: &ProductionEvmRemoteRequestV1,
+    expiry: TimelockSpec,
+) -> Result<[u8; 32], ProductionContractsOutboundErrorV1>
+where
+    F: F6TransportPortV1,
+{
+    let EvmRemoteContractsSharedV1 {
+        session_id,
+        route_id,
+        local_participant,
+        remote_participant,
+        store,
+        identity,
+        relay,
+    } = shared;
+    let payload = request.payload();
+    if request.session_id() != session_id
+        || payload.route_id() != &route_id
+        || payload.requester_id() != &local_participant
+        || payload.signer_id() != &remote_participant
+    {
+        return Err(ProductionContractsOutboundErrorV1::Store(
+            SessionStoreError::InvalidTransition,
+        ));
+    }
+    let payload_bytes = request.payload_bytes();
+    match store.resume_evm_action_request_exact(session_id, local_participant, payload_bytes) {
+        Ok(accepted) => {
+            let message_digest = *accepted.message_digest();
+            match store.resume_outbound_dsc1(session_id)? {
+                OutboundDsc1RecoveryV1::SigningRequest(prepared)
+                    if prepared.message_type() == 0x15
+                        && prepared.unsigned_message_digest() == &message_digest
+                        && prepared.payload() == payload_bytes =>
+                {
+                    sign_commit_and_stage_with_shared_relay(
+                        session_id,
+                        local_participant,
+                        store,
+                        identity,
+                        relay,
+                        *prepared,
+                        expiry,
+                    )?;
+                }
+                OutboundDsc1RecoveryV1::Committed(committed)
+                    if committed.message_digest() == &message_digest =>
+                {
+                    relay
+                        .try_borrow_mut()
+                        .map_err(|_| ProductionContractsOutboundErrorV1::OwnerBusy)?
+                        .stage_store_outbound_dsc1(*committed, expiry)?;
+                }
+                // A later outbound head can exist only after this exact
+                // request completed its Relay handoff. `None` has the same
+                // meaning. The authenticated message row above is the durable
+                // proof; no request is recreated.
+                OutboundDsc1RecoveryV1::SigningRequest(_)
+                | OutboundDsc1RecoveryV1::Committed(_)
+                | OutboundDsc1RecoveryV1::None => {}
+            }
+            return Ok(message_digest);
+        }
+        Err(SessionStoreError::SessionNotFound) => {}
+        Err(error) => return Err(ProductionContractsOutboundErrorV1::Store(error)),
+    }
+    let prepared = store
+        .prepare_evm_action_request_dsc1_signing_request(session_id, payload_bytes)?
+        .ok_or(ProductionContractsOutboundErrorV1::Store(
+            SessionStoreError::InvalidTransition,
+        ))?;
+    let message_digest = *prepared.unsigned_message_digest();
+    sign_commit_and_stage_with_shared_relay(
+        session_id,
+        local_participant,
+        store,
+        identity,
+        relay,
+        prepared,
+        expiry,
+    )?;
+    Ok(message_digest)
+}
+
+fn take_evm_remote_signed_response_shared(
+    session_id: [u8; 32],
+    route_id: [u8; 32],
+    local_participant: [u8; 32],
+    remote_participant: [u8; 32],
+    store: &ContractsSessionStoreV1,
+    request: &ProductionEvmRemoteRequestV1,
+    request_message_digest: [u8; 32],
+) -> Result<ProductionEvmRemoteResponseV1, ProductionContractsOutboundErrorV1> {
+    let payload = request.payload();
+    if request.session_id() != session_id
+        || payload.route_id() != &route_id
+        || payload.requester_id() != &local_participant
+        || payload.signer_id() != &remote_participant
+        || request_message_digest == [0; 32]
+    {
+        return Err(ProductionContractsOutboundErrorV1::Store(
+            SessionStoreError::InvalidTransition,
+        ));
+    }
+    let accepted = match store.resume_evm_signed_action_for_request(
+        session_id,
+        remote_participant,
+        request_message_digest,
+    ) {
+        Ok(accepted) => accepted,
+        Err(SessionStoreError::SessionNotFound) => {
+            return Ok(ProductionEvmRemoteResponseV1::Pending)
+        }
+        Err(error) => return Err(ProductionContractsOutboundErrorV1::Store(error)),
+    };
+    let prepared = store.take_evm_signed_action_for_import(accepted)?;
+    Ok(ProductionEvmRemoteResponseV1::Prepared(Box::new(prepared)))
+}
+
 /// One physical Contracts Store opening shared only with typed authorities.
 /// Owner-only composition of the production Contracts authorities for one
 /// route and one participant.
@@ -376,11 +832,14 @@ where
     session_id: [u8; 32],
     route_id: [u8; 32],
     local_participant: [u8; 32],
+    remote_participant: [u8; 32],
     local_protocol_index: u8,
     store: Rc<ContractsSessionStoreV1>,
     identity: Rc<ContractsTransportIdentityStoreV1>,
     relay: Rc<RefCell<DurableRelayWorkerV1<F>>>,
     dom_child_store_authority_issued: Cell<bool>,
+    dom_refund_face_issued: Cell<bool>,
+    evm_remote_transport_authority_issued: Cell<bool>,
 }
 
 impl<F> ProductionContractsV1<F>
@@ -399,11 +858,17 @@ where
     where
         I: Into<Rc<ContractsTransportIdentityStoreV1>>,
     {
+        if !config.is_production_v6_bound() {
+            return Err(ProductionContractsOpenErrorV1::Relay(
+                RelayWorkerOpenErrorV1::InvalidConfiguration,
+            ));
+        }
         let identity = identity.into();
         let wire = config.wire_context();
         let session_id = wire.session_id;
         let route_id = wire.route_id;
         let local_participant = config.local_participant().0;
+        let remote_participant = config.remote_participant().0;
         let relay_keys = validate_relay_roster(&rosters, &config)?;
         let local_protocol_index =
             validate_and_bind_identity(&store, &identity, &config, &relay_keys)?;
@@ -420,11 +885,14 @@ where
             session_id,
             route_id,
             local_participant,
+            remote_participant,
             local_protocol_index,
             store,
             identity,
             relay: Rc::new(RefCell::new(relay)),
             dom_child_store_authority_issued: Cell::new(false),
+            dom_refund_face_issued: Cell::new(false),
+            evm_remote_transport_authority_issued: Cell::new(false),
         })
     }
 
@@ -440,11 +908,17 @@ where
     where
         I: Into<Rc<ContractsTransportIdentityStoreV1>>,
     {
+        if !config.is_production_v6_bound() {
+            return Err(ProductionContractsOpenErrorV1::Relay(
+                RelayWorkerOpenErrorV1::InvalidConfiguration,
+            ));
+        }
         let identity = identity.into();
         let wire = config.wire_context();
         let session_id = wire.session_id;
         let route_id = wire.route_id;
         let local_participant = config.local_participant().0;
+        let remote_participant = config.remote_participant().0;
         let relay_keys = validate_relay_roster(&rosters, &config)?;
         let local_protocol_index =
             validate_and_bind_identity(&store, &identity, &config, &relay_keys)?;
@@ -461,11 +935,14 @@ where
             session_id,
             route_id,
             local_participant,
+            remote_participant,
             local_protocol_index,
             store,
             identity,
             relay: Rc::new(RefCell::new(relay)),
             dom_child_store_authority_issued: Cell::new(false),
+            dom_refund_face_issued: Cell::new(false),
+            evm_remote_transport_authority_issued: Cell::new(false),
         })
     }
 
@@ -481,11 +958,17 @@ where
     where
         I: Into<Rc<ContractsTransportIdentityStoreV1>>,
     {
+        if !config.is_production_v6_bound() {
+            return Err(ProductionContractsOpenErrorV1::Relay(
+                RelayWorkerOpenErrorV1::InvalidConfiguration,
+            ));
+        }
         let identity = identity.into();
         let wire = config.wire_context();
         let session_id = wire.session_id;
         let route_id = wire.route_id;
         let local_participant = config.local_participant().0;
+        let remote_participant = config.remote_participant().0;
         let relay_keys = validate_relay_roster(&rosters, &config)?;
         let local_protocol_index =
             validate_and_bind_identity(&store, &identity, &config, &relay_keys)?;
@@ -502,14 +985,70 @@ where
             session_id,
             route_id,
             local_participant,
+            remote_participant,
             local_protocol_index,
             store,
             identity,
             relay: Rc::new(RefCell::new(relay)),
             dom_child_store_authority_issued: Cell::new(false),
+            dom_refund_face_issued: Cell::new(false),
+            evm_remote_transport_authority_issued: Cell::new(false),
         })
     }
 
+    /// Consumes the Contracts share of one real F7 V2 aggregate into this
+    /// owner's exact Store, or reauthenticates the same durable issuance after
+    /// a publication-boundary crash, and retains that opening beside it.
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
+    pub(crate) fn issue_post_anchor_v2(
+        &self,
+        verified_anchors: VerifiedF7AnchorAuthorizationV2,
+    ) -> Result<ProductionContractsPostAnchorV2, ProductionContractsPostAnchorErrorV2> {
+        if verified_anchors.session_id() != &self.session_id
+            || verified_anchors.route_id() != &self.route_id
+        {
+            return Err(ProductionContractsPostAnchorErrorV2::StoreRefused);
+        }
+        let authorization = self
+            .store
+            .issue_or_resume_post_anchor_dom_claim_signing_v2(verified_anchors)
+            .map_err(|_| ProductionContractsPostAnchorErrorV2::StoreRefused)?;
+        if authorization.session_id() != &self.session_id {
+            return Err(ProductionContractsPostAnchorErrorV2::StoreRefused);
+        }
+        Ok(ProductionContractsPostAnchorV2 {
+            store: Rc::clone(&self.store),
+            authorization,
+        })
+    }
+
+    /// Re-enables the exact post-anchor chain projection only from a fresh
+    /// real-verifier capability, never from caller-shaped anchor fields.
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
+    pub(crate) fn revalidate_post_anchor_projection_v2(
+        &self,
+        expected_revision: u64,
+        verified_anchors: VerifiedF7AnchorAuthorizationV2,
+    ) -> Result<(), ProductionContractsPostAnchorErrorV2> {
+        self.store
+            .revalidate_post_anchor_dom_claim_chain_projection_v2(
+                expected_revision,
+                verified_anchors,
+            )
+            .map(|_| ())
+            .map_err(|_| ProductionContractsPostAnchorErrorV2::StoreRefused)
+    }
+
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
     pub(crate) fn bind_dom_actuator(
         &self,
         binding: DomSessionBindingV1,
@@ -559,27 +1098,160 @@ where
         Ok(authority)
     }
 
-    /// Build the DOM public-secret recovery source from this owner's one
-    /// already-open Contracts Store. No store handle is exposed: the source
-    /// receives only an [`Rc`] clone after the exact owner binding succeeds.
+    /// Issues the sole DOM refund verifier backed by this owner's exact Store
+    /// opening. All route facts come from the authenticated admission and V2
+    /// composition; the caller cannot supply a detached session or chain.
+    pub(crate) fn dom_refund_face(
+        &self,
+        scope: ProductionDomRefundFaceScopeV1<'_>,
+        binding: DomSessionBindingV1,
+    ) -> Result<ProductionDomRefundFaceV1, ProductionRefundArmingOpenErrorV1> {
+        self.issue_dom_refund_face_once(|| self.authenticate_dom_refund_scope(scope, binding))
+    }
+
+    fn issue_dom_refund_face_once(
+        &self,
+        authenticate: impl FnOnce() -> Result<
+            ProductionDomRefundStoreFaceV1,
+            ProductionRefundArmingOpenErrorV1,
+        >,
+    ) -> Result<ProductionDomRefundFaceV1, ProductionRefundArmingOpenErrorV1> {
+        if self.dom_refund_face_issued.replace(true) {
+            return Err(ProductionRefundArmingOpenErrorV1::InvalidConfiguration);
+        }
+        let authority = match authenticate() {
+            Ok(authority) => authority,
+            Err(error) => {
+                self.dom_refund_face_issued.set(false);
+                return Err(error);
+            }
+        };
+        Ok(ProductionDomRefundFaceV1::from_contracts_owner(authority))
+    }
+
+    fn authenticate_dom_refund_scope(
+        &self,
+        scope: ProductionDomRefundFaceScopeV1<'_>,
+        binding: DomSessionBindingV1,
+    ) -> Result<ProductionDomRefundStoreFaceV1, ProductionRefundArmingOpenErrorV1> {
+        let admission = scope.admission();
+        let composition = scope.composition();
+        let position = scope.position();
+        let owner_id = scope.owner_id();
+        let authority_epoch = scope.authority_epoch();
+        let settlement = match position {
+            LegIdV1::Upstream => composition.upstream(),
+            LegIdV1::Downstream => composition.downstream(),
+        };
+        let terms_digest = settlement
+            .terms_hash()
+            .map_err(|_| ProductionRefundArmingOpenErrorV1::InvalidConfiguration)?;
+        let time = admission
+            .route_time_binding_v2()
+            .ok_or(ProductionRefundArmingOpenErrorV1::InvalidConfiguration)?;
+        let deployment = admission
+            .dom_deployment_capability()
+            .map_err(|_| ProductionRefundArmingOpenErrorV1::InvalidConfiguration)?;
+        let dom = deployment.deployment();
+        let trusted_chain_id = TrustedChainIdV1::from_authenticated_genesis(
+            binding.runtime_identity().network_magic,
+            &Hash256::from_bytes(binding.genesis_hash()),
+        );
+        if owner_id == [0; 32]
+            || authority_epoch == 0
+            || admission.route_id() != self.route_id
+            || binding.route_id() != admission.route_id()
+            || binding.session_id() != self.session_id
+            || binding.session_id() != settlement.session_id.0
+            || binding.terms_digest() != terms_digest
+            || binding.chain_id() != settlement.dom_leg.chain_id.0
+            || binding.profile_digest() != settlement.dom_leg.adapter_profile_hash
+            || binding.chain_id() != dom.chain_id.0
+            || binding.genesis_hash() != dom.genesis_hash
+            || binding.runtime_identity() != dom.runtime_identity
+            || binding.profile_digest() != dom.consensus_rules_digest
+            || binding.deployment_digest() != deployment.registry_digest()
+            || binding.asset_binding_digest() != deployment.native_asset_binding_digest()
+            || binding.registry_epoch() != deployment.registry_epoch()
+            || binding.min_confirmations() != dom.finality.min_confirmations
+            || binding.max_reorg_depth() != dom.finality.max_reorg_depth
+            || trusted_chain_id.as_bytes() != &binding.chain_id()
+            || time.route_scope_digest() != composition.route_scope_digest()
+            || time.policy_digest() != composition.time_policy_digest()
+            || time.evidence_digest() != composition.time_evidence_digest()
+            || time.proof_digest() != composition.time_proof_digest()
+            || time.evidence_sequence() != composition.evidence_sequence()
+            || time.issued_at_seconds() != composition.time_proof_issued_at_seconds()
+            || time.valid_until_seconds() != composition.time_proof_valid_until_seconds()
+            || time.validated_at_seconds() != composition.time_proof_validated_at_seconds()
+            || self.validate_dom_binding(binding).is_err()
+            || DomContractsActuatorV1::bind(self.store.as_ref(), binding).is_err()
+        {
+            return Err(ProductionRefundArmingOpenErrorV1::InvalidConfiguration);
+        }
+        Ok(ProductionDomRefundStoreFaceV1 {
+            store: Rc::clone(&self.store),
+            binding,
+            trusted_chain_id,
+            position,
+            owner_id,
+            authority_epoch,
+            composition_digest: composition.binding_digest(),
+            frozen_bindings: admission.frozen_bindings().clone(),
+        })
+    }
+
+    /// Issues the sole purpose-limited remote EVM transport view while
+    /// retaining this exact physical Contracts Store and Relay opening.
+    pub(crate) fn evm_remote_transport_authority(
+        &self,
+        binding: &ProductionEvmRemoteSignerBindingV1,
+        expiry: TimelockSpec,
+    ) -> Result<Box<dyn ProductionEvmRemoteTransportV1>, ChildAuthorityRefusalV1>
+    where
+        F: 'static,
+    {
+        if !valid_timelock(expiry)
+            || !binding.binds_contracts_owner(
+                self.route_id,
+                self.session_id,
+                self.local_participant,
+                self.remote_participant,
+            )
+            || self.evm_remote_transport_authority_issued.replace(true)
+        {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        Ok(Box::new(ProductionEvmRemoteContractsAuthorityV1 {
+            session_id: self.session_id,
+            route_id: self.route_id,
+            local_participant: self.local_participant,
+            remote_participant: self.remote_participant,
+            store: Rc::clone(&self.store),
+            identity: Rc::clone(&self.identity),
+            relay: Rc::clone(&self.relay),
+            expiry,
+        }))
+    }
+
+    /// Build the startup-safe DOM public-secret source/installer pair from this
+    /// owner's one already-open Contracts Store. The source cannot re-extract
+    /// until the installer sees the real downstream DOM child plan; neither
+    /// half accepts a caller-shaped transaction identity.
     pub(crate) fn dom_public_secret_source(
         &self,
-        composition_digest: [u8; 32],
-        expected_claim_transaction_id: [u8; 32],
-        binding: DomSessionBindingV1,
-        trusted_chain_id: TrustedChainIdV1,
-        consumer: RealDomClaimConsumerV1,
-    ) -> Result<ProductionDomPublicSecretSourceV1, AuthorityRefusalV1> {
-        let opening = self.prepare_dom_public_secret_opening(binding, trusted_chain_id)?;
-        ProductionDomPublicSecretSourceV1::new(
-            self.route_id,
-            composition_digest,
-            expected_claim_transaction_id,
-            opening.store,
-            opening.binding,
-            opening.trusted_chain_id,
-            consumer,
-        )
+        scope: ProductionDomPublicSecretSourceScopeV1,
+        authority: ProductionDomPublicSecretConsumerAuthorityV1,
+    ) -> Result<
+        (
+            ProductionDomPublicSecretSourceV1,
+            ProductionDomPublicSecretInstallerV1,
+        ),
+        AuthorityRefusalV1,
+    > {
+        let opening =
+            self.prepare_dom_public_secret_opening(scope.binding(), scope.trusted_chain_id())?;
+        ProductionDomPublicSecretSourceV1::new_installable(opening.store, scope, authority)
     }
 
     fn prepare_dom_public_secret_opening(
@@ -599,6 +1271,10 @@ where
         })
     }
 
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
     pub(crate) fn participant_signer(
         &self,
         binding: DomSessionBindingV1,
@@ -619,6 +1295,10 @@ where
         )
     }
 
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
     pub(crate) fn sign_commit_and_stage(
         &mut self,
         request: PreparedDsc1SigningRequestV1,
@@ -635,6 +1315,67 @@ where
         )
     }
 
+    /// Persists, signs and Relay-stages the exact public `0x15` request issued
+    /// by the authenticated remote EVM role boundary.
+    ///
+    /// Only the fixed public request crosses Contracts. The counterparty key,
+    /// unsigned transaction, calldata and route scalar are absent. The Store
+    /// commits the DSC1 request before Relay submission and returns its exact
+    /// digest for later `0x16` pairing.
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
+    pub(crate) fn prepare_and_stage_evm_remote_action_request(
+        &mut self,
+        request: &ProductionEvmRemoteRequestV1,
+        expiry: TimelockSpec,
+    ) -> Result<[u8; 32], ProductionContractsOutboundErrorV1> {
+        prepare_and_stage_evm_remote_action_request_shared(
+            EvmRemoteContractsSharedV1 {
+                session_id: self.session_id,
+                route_id: self.route_id,
+                local_participant: self.local_participant,
+                remote_participant: self.remote_participant,
+                store: self.store.as_ref(),
+                identity: self.identity.as_ref(),
+                relay: &self.relay,
+            },
+            request,
+            expiry,
+        )
+    }
+
+    /// Recovers the unique authenticated `0x16` by its exact `0x15` digest
+    /// and consumes it into the Store's move-only actuator import grant.
+    ///
+    /// `SessionNotFound` is the sole pending classification. Corruption,
+    /// equivocation, participant transplant and duplicate in-process take all
+    /// remain typed refusals.
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
+    pub(crate) fn take_evm_remote_signed_response(
+        &self,
+        request: &ProductionEvmRemoteRequestV1,
+        request_message_digest: [u8; 32],
+    ) -> Result<ProductionEvmRemoteResponseV1, ProductionContractsOutboundErrorV1> {
+        take_evm_remote_signed_response_shared(
+            self.session_id,
+            self.route_id,
+            self.local_participant,
+            self.remote_participant,
+            self.store.as_ref(),
+            request,
+            request_message_digest,
+        )
+    }
+
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
     pub(crate) fn prepare_and_stage_m8_ready_to_fund_v2(
         &mut self,
         gate: &PreparedOperationalM8FundingGateV2,
@@ -661,6 +1402,10 @@ where
     /// The Store owns the decision: it returns `None` when the bound local
     /// signer is not the canonical sender for this edge, so the owner never
     /// infers a sender and never shapes the payload.
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
     pub(crate) fn prepare_and_stage_post_anchor_claim_pre_signature_v2(
         &mut self,
         authority: &PreparedPostAnchorClaimPreSignatureTransportAuthorityV2,
@@ -682,6 +1427,13 @@ where
     /// accepts a naked transport authority. That bundle exists only where both
     /// the Contracts admission and owner-only mirror are durable. A receiver
     /// cannot obtain it and therefore cannot enter this emitter boundary.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "retained surface not yet wired by the stage-7 composition root"
+        )
+    )]
     pub(crate) fn prepare_and_stage_final_claim_v2(
         &mut self,
         bundle: DomFinalClaimAdmissionBundleV2,
@@ -698,6 +1450,13 @@ where
         )
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "retained surface not yet wired by the stage-7 composition root"
+        )
+    )]
     pub(crate) fn resume_and_stage(
         &mut self,
         expiry: TimelockSpec,
@@ -735,6 +1494,13 @@ where
     /// transaction and adaptor opening, while the actuator binds the resulting
     /// linear observation to this exact session revision before the Store can
     /// mint the ingress capability. No Relay borrow is held during RPC.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "retained surface not yet wired by the stage-7 composition root"
+        )
+    )]
     pub(crate) fn observe_and_install_final_claim_ingress_v2(
         &mut self,
         binding: DomSessionBindingV1,
@@ -797,6 +1563,13 @@ where
             .install_contracts_ingress(authority)
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "retained surface not yet wired by the stage-7 composition root"
+        )
+    )]
     pub(crate) fn take_contracts_ingress(
         &mut self,
     ) -> Result<Option<PreparedContractsIngressV1>, ContractsRelayIngressErrorV1> {
@@ -807,7 +1580,7 @@ where
             .take_contracts_ingress())
     }
 
-    pub(crate) fn submit_outbound_once<Q: RelayQueueV1>(
+    pub(crate) fn submit_outbound_once<Q: RelaySubmitQueueV1>(
         &mut self,
         queue: &mut Q,
     ) -> Result<RelayOutboundStepV1, RelayWorkerOutboundErrorV1> {
@@ -817,6 +1590,31 @@ where
             .submit_outbound_once(queue)
     }
 
+    /// Pull and dispatch one bounded production Relay page through this
+    /// owner's sole worker opening.
+    ///
+    /// The concrete queue keeps the V2 bounded/cursor/ACK contract on the
+    /// production path. The worker itself never escapes this owner, so callers
+    /// cannot split the shared transcript or install an independent inbox.
+    pub(crate) fn poll_inbound(
+        &mut self,
+        queue: &mut relay::production::ProductionRelayV1,
+        now: TimelockSpec,
+    ) -> Result<RelayInboundPollReportV1, ProductionContractsPollErrorV1<F::Error>> {
+        self.relay
+            .try_borrow_mut()
+            .map_err(|_| ProductionContractsPollErrorV1::OwnerBusy)?
+            .poll_inbound(queue, now)
+            .map_err(ProductionContractsPollErrorV1::Worker)
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "retained surface not yet wired by the stage-7 composition root"
+        )
+    )]
     pub(crate) fn contracts_session_status(
         &mut self,
     ) -> Result<ContractsSessionStatusV1, SessionStoreError> {
@@ -824,6 +1622,17 @@ where
             .try_borrow_mut()
             .map_err(|_| SessionStoreError::StoreBusy)?
             .contracts_session_status()
+    }
+
+    /// Highest timestamp-domain Relay time already authenticated and committed
+    /// by this exact worker opening.
+    pub(crate) fn retained_relay_timestamp_floor(
+        &self,
+    ) -> Result<Option<u64>, route_transport::DurableInboxError> {
+        self.relay
+            .try_borrow()
+            .map_err(|_| route_transport::DurableInboxError::StorageUnavailable)?
+            .retained_timestamp_floor()
     }
 
     fn validate_dom_binding(&self, binding: DomSessionBindingV1) -> DomActuatorResult<()> {
@@ -835,6 +1644,25 @@ where
             return Err(DomActuatorError::InvalidBinding);
         }
         Ok(())
+    }
+}
+
+impl ProductionContractsV1<ProductionF6LifecyclePortV2> {
+    /// Reauthenticates retained applied F6 history through the exact Relay
+    /// worker and lifecycle owned by this Contracts composition.
+    ///
+    /// Startup must complete this boundary before it marks the surrounding
+    /// provisioning journal complete or exposes inbound polling. A failed
+    /// replay mutates neither the inbox nor that caller-owned journal, and the
+    /// lifecycle continues refusing pending F6 with `RecoveryRequired`.
+    pub(crate) fn recover_production_f6_applied_history(
+        &self,
+    ) -> Result<F6AppliedReplayReportV1, ProductionContractsF6RecoveryErrorV2> {
+        self.relay
+            .try_borrow_mut()
+            .map_err(|_| ProductionContractsF6RecoveryErrorV2::OwnerBusy)?
+            .recover_production_f6_applied_history()
+            .map_err(ProductionContractsF6RecoveryErrorV2::from)
     }
 }
 
@@ -983,13 +1811,17 @@ mod tests {
     };
     use kaystra_core::types::{AssetId, ChainId, FinalityPolicyV1};
     use relay::auth::{RosterMemberV1, RosterSnapshotV1};
+    use relay::production::{ProductionRelayV1, RelayDatabaseConfigV1, RelayDatabaseIdV1};
     use relay::server::{AckV1, RelayV1};
     use relay::ParticipantId;
+    use route_executor::LegIdV1;
     use route_transport::{
         BridgeRefusal, DurableFrameReassemblerConfigV2, DurableInboxConfigV1,
-        DurableRelaySenderConfigV1, RouteApplicationStateV2, RouteWireContextV1,
+        DurableRelaySenderConfigV1, RelayQueueV1, RouteApplicationStateV2, RouteWireContextV1,
     };
+    use static_assertions::assert_not_impl_any;
 
+    use crate::production_evm_remote_signer::ProductionEvmRemoteSignerPinsV1;
     use crate::relay_worker::{RelayOutboundStepV1, UnavailableF6AuthorityV1};
 
     const SESSION: [u8; 32] = [0x31; 32];
@@ -997,6 +1829,9 @@ mod tests {
     const LOCAL: ParticipantId = ParticipantId([0x41; 32]);
     const REMOTE: ParticipantId = ParticipantId([0x51; 32]);
     const LOCAL_RELAY_SECRET: [u8; 32] = [0x61; 32];
+
+    assert_not_impl_any!(ProductionContractsPostAnchorV2: Clone, Copy, Default);
+    assert_not_impl_any!(ProductionContractsConsumedPostAnchorV2: Clone, Copy, Default);
     const REMOTE_RELAY_SECRET: [u8; 32] = [0x62; 32];
 
     type TestOwner = ProductionContractsV1<UnavailableF6AuthorityV1>;
@@ -1135,9 +1970,22 @@ mod tests {
             }
         }
 
-        fn queue_deliver(&self, recipient: &ParticipantId) -> Result<Vec<Vec<u8>>, BridgeRefusal> {
+        fn queue_deliver_ephemeral_v1(
+            &self,
+            recipient: &ParticipantId,
+        ) -> Result<Vec<Vec<u8>>, BridgeRefusal> {
             Ok(self.relay.deliver(recipient))
         }
+    }
+
+    #[test]
+    fn production_owner_exposes_only_the_purpose_specific_f6_recovery_boundary() {
+        let _recover: fn(
+            &ProductionContractsV1<ProductionF6LifecyclePortV2>,
+        ) -> Result<F6AppliedReplayReportV1, ProductionContractsF6RecoveryErrorV2> =
+            ProductionContractsV1::<
+                ProductionF6LifecyclePortV2,
+            >::recover_production_f6_applied_history;
     }
 
     #[test]
@@ -1480,6 +2328,260 @@ mod tests {
             Err(DomActuatorError::InvalidBinding)
         ));
         owner.dom_child_store_authority(binding, expiry())?;
+        Ok(())
+    }
+
+    #[test]
+    fn worker_child_and_refund_share_one_store_while_refund_issue_is_one_shot_and_reentrant_closed(
+    ) -> TestResult {
+        let fixture = TestFixture::new(IdentityPlacement::Local, false)?;
+        let TestFixture {
+            _directory,
+            store,
+            identity,
+            paths,
+            config,
+            ..
+        } = fixture;
+        let owner = TestOwner::create(
+            store,
+            identity,
+            &paths,
+            config,
+            relay_rosters(*config.relay_signer_xonly()),
+            UnavailableF6AuthorityV1,
+            LOCAL_RELAY_SECRET,
+        )?;
+        let binding = dom_binding(SESSION, LOCAL.0, 0)?;
+        let _child = owner.dom_child_store_authority(binding, expiry())?;
+        let baseline_store_references = Rc::strong_count(&owner.store);
+        let relay = Rc::clone(&owner.relay);
+        let worker_guard = relay.borrow_mut();
+        let face = owner.issue_dom_refund_face_once(|| {
+            assert!(matches!(
+                owner.issue_dom_refund_face_once(|| panic!("reentrant issuer executed")),
+                Err(ProductionRefundArmingOpenErrorV1::InvalidConfiguration)
+            ));
+            Ok(test_dom_refund_store_face(
+                &owner,
+                binding,
+                LegIdV1::Upstream,
+            ))
+        })?;
+        assert_eq!(
+            Rc::strong_count(&owner.store),
+            baseline_store_references + 1
+        );
+        assert!(matches!(
+            owner.issue_dom_refund_face_once(|| panic!("second issuer executed")),
+            Err(ProductionRefundArmingOpenErrorV1::InvalidConfiguration)
+        ));
+        drop(worker_guard);
+        drop(face);
+        assert_eq!(Rc::strong_count(&owner.store), baseline_store_references);
+        Ok(())
+    }
+
+    #[test]
+    fn refund_face_scope_refuses_position_owner_epoch_composition_and_binding_transplants(
+    ) -> TestResult {
+        let fixture = TestFixture::new(IdentityPlacement::Local, false)?;
+        let TestFixture {
+            _directory,
+            store,
+            identity,
+            paths,
+            config,
+            ..
+        } = fixture;
+        let owner = TestOwner::create(
+            store,
+            identity,
+            &paths,
+            config,
+            relay_rosters(*config.relay_signer_xonly()),
+            UnavailableF6AuthorityV1,
+            LOCAL_RELAY_SECRET,
+        )?;
+        let authority = test_dom_refund_store_face(
+            &owner,
+            dom_binding(SESSION, LOCAL.0, 0)?,
+            LegIdV1::Upstream,
+        );
+        let frozen = test_refund_frozen_bindings();
+        assert!(authority.authenticates_scope(
+            LegIdV1::Upstream,
+            [0xa1; 32],
+            7,
+            [0xa2; 32],
+            &frozen,
+        ));
+        assert!(!authority.authenticates_scope(
+            LegIdV1::Downstream,
+            [0xa1; 32],
+            7,
+            [0xa2; 32],
+            &frozen,
+        ));
+        assert!(!authority.authenticates_scope(
+            LegIdV1::Upstream,
+            [0xb1; 32],
+            7,
+            [0xa2; 32],
+            &frozen,
+        ));
+        assert!(!authority.authenticates_scope(
+            LegIdV1::Upstream,
+            [0xa1; 32],
+            8,
+            [0xa2; 32],
+            &frozen,
+        ));
+        assert!(!authority.authenticates_scope(
+            LegIdV1::Upstream,
+            [0xa1; 32],
+            7,
+            [0xb2; 32],
+            &frozen,
+        ));
+        let mut wrong_frozen = frozen;
+        wrong_frozen.deployment_bundle_digest = [0xb3; 32];
+        assert!(!authority.authenticates_scope(
+            LegIdV1::Upstream,
+            [0xa1; 32],
+            7,
+            [0xa2; 32],
+            &wrong_frozen,
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn refund_face_reissues_only_from_the_reauthenticated_restart_opening() -> TestResult {
+        let fixture = TestFixture::new(IdentityPlacement::Local, false)?;
+        let TestFixture {
+            _directory,
+            parent,
+            passphrase,
+            store,
+            identity,
+            paths,
+            config,
+            ..
+        } = fixture;
+        let owner = TestOwner::create(
+            store,
+            identity,
+            &paths,
+            config,
+            relay_rosters(*config.relay_signer_xonly()),
+            UnavailableF6AuthorityV1,
+            LOCAL_RELAY_SECRET,
+        )?;
+        let binding = dom_binding(SESSION, LOCAL.0, 0)?;
+        let face = owner.issue_dom_refund_face_once(|| {
+            Ok(test_dom_refund_store_face(
+                &owner,
+                binding,
+                LegIdV1::Upstream,
+            ))
+        })?;
+        drop(face);
+        drop(owner);
+
+        let store = ContractsSessionStoreV1::open_production(
+            Arc::clone(&parent),
+            "contracts",
+            production_policy()?,
+        )?;
+        let identity = ContractsTransportIdentityStoreV1::open_production(
+            Arc::clone(&parent),
+            "identity",
+            &passphrase,
+        )?;
+        let resumed = TestOwner::open_existing(
+            store,
+            identity,
+            &paths,
+            config,
+            relay_rosters(*config.relay_signer_xonly()),
+            UnavailableF6AuthorityV1,
+            LOCAL_RELAY_SECRET,
+        )?;
+        let resumed_face = resumed.issue_dom_refund_face_once(|| {
+            Ok(test_dom_refund_store_face(
+                &resumed,
+                binding,
+                LegIdV1::Upstream,
+            ))
+        })?;
+        assert!(matches!(
+            ContractsSessionStoreV1::open_production(parent, "contracts", production_policy()?,),
+            Err(SessionStoreError::StoreBusy)
+        ));
+        drop(resumed_face);
+        Ok(())
+    }
+
+    #[test]
+    fn evm_remote_handoff_is_single_owner_bound_and_invalid_issue_is_non_consuming() -> TestResult {
+        let fixture = TestFixture::new(IdentityPlacement::Local, false)?;
+        let TestFixture {
+            _directory,
+            store,
+            identity,
+            paths,
+            config,
+            ..
+        } = fixture;
+        let owner = TestOwner::create(
+            store,
+            identity,
+            &paths,
+            config,
+            relay_rosters(*config.relay_signer_xonly()),
+            UnavailableF6AuthorityV1,
+            LOCAL_RELAY_SECRET,
+        )?;
+        let pins = ProductionEvmRemoteSignerPinsV1 {
+            route_id: wire().route_id,
+            session_id: SESSION,
+            settlement_id: [0x71; 32],
+            terms_digest: [0x72; 32],
+            registry_digest: [0x73; 32],
+            profile_digest: [0x74; 32],
+            deployment_digest: [0x75; 32],
+            composition_digest: [0x76; 32],
+            chain_id: 31_337,
+            contract: [0x77; 20],
+            signer_account: [0x78; 20],
+            role: evm_actuator::EvmSignerRoleV1::Beneficiary,
+            requester_id: LOCAL.0,
+            signer_id: REMOTE.0,
+            owner_id: [0x79; 32],
+        };
+        let wrong = ProductionEvmRemoteSignerBindingV1::new(ProductionEvmRemoteSignerPinsV1 {
+            route_id: [0x7a; 32],
+            ..pins
+        })?;
+        assert!(matches!(
+            owner.evm_remote_transport_authority(&wrong, expiry()),
+            Err(ChildAuthorityRefusalV1::Conflict)
+        ));
+        let correct = ProductionEvmRemoteSignerBindingV1::new(pins)?;
+        assert!(matches!(
+            owner.evm_remote_transport_authority(
+                &correct,
+                TimelockSpec::TimestampSeconds { value: 0 },
+            ),
+            Err(ChildAuthorityRefusalV1::Conflict)
+        ));
+        let authority = owner.evm_remote_transport_authority(&correct, expiry())?;
+        assert!(!format!("{authority:?}").contains("7878"));
+        assert!(matches!(
+            owner.evm_remote_transport_authority(&correct, expiry()),
+            Err(ChildAuthorityRefusalV1::Conflict)
+        ));
         Ok(())
     }
 
@@ -1885,6 +2987,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn inbound_poll_keeps_the_worker_private_and_refuses_reentrant_owner_borrow() -> TestResult {
+        let fixture = TestFixture::new(IdentityPlacement::Local, false)?;
+        let TestFixture {
+            _directory,
+            store,
+            identity,
+            paths,
+            config,
+            ..
+        } = fixture;
+        let mut owner = TestOwner::create(
+            store,
+            identity,
+            &paths,
+            config,
+            relay_rosters(*config.relay_signer_xonly()),
+            UnavailableF6AuthorityV1,
+            LOCAL_RELAY_SECRET,
+        )?;
+        let relay_root = _directory.path().join("production-relay");
+        let relay_config = RelayDatabaseConfigV1::new(RelayDatabaseIdV1::new([0xd1; 32])?, 256)?;
+        let mut relay = ProductionRelayV1::create(&relay_root, relay_config)?;
+
+        let retained_worker = Rc::clone(&owner.relay);
+        let _active_operation = retained_worker
+            .try_borrow_mut()
+            .map_err(|_| "test worker borrow must be available")?;
+        assert!(matches!(
+            owner.poll_inbound(&mut relay, expiry()),
+            Err(ProductionContractsPollErrorV1::OwnerBusy)
+        ));
+        Ok(())
+    }
+
     fn create_error(
         fixture: TestFixture,
     ) -> Result<ProductionContractsOpenErrorV1, Box<dyn Error>> {
@@ -1988,6 +3125,31 @@ mod tests {
             runtime.network_magic,
             &genesis,
         ))
+    }
+
+    fn test_refund_frozen_bindings() -> FrozenBindingsV1 {
+        FrozenBindingsV1 {
+            terms_digest: [0xa3; 32],
+            profile_bundle_digest: [0xa4; 32],
+            deployment_bundle_digest: [0xa5; 32],
+        }
+    }
+
+    fn test_dom_refund_store_face(
+        owner: &TestOwner,
+        binding: DomSessionBindingV1,
+        position: LegIdV1,
+    ) -> ProductionDomRefundStoreFaceV1 {
+        ProductionDomRefundStoreFaceV1 {
+            store: Rc::clone(&owner.store),
+            binding,
+            trusted_chain_id: trusted_dom_chain().expect("trusted test chain"),
+            position,
+            owner_id: [0xa1; 32],
+            authority_epoch: 7,
+            composition_digest: [0xa2; 32],
+            frozen_bindings: test_refund_frozen_bindings(),
+        }
     }
 
     fn dom_binding(
@@ -2359,7 +3521,7 @@ mod tests {
             signer_xonly,
             128,
         )?;
-        let inbox = DurableInboxConfigV1::new([0x15; 32], wire(), local, 128)?;
+        let inbox = DurableInboxConfigV1::new([0x15; 32], [0xd1; 32], wire(), local, 128)?;
         let frames = DurableFrameReassemblerConfigV2::new(
             [0x16; 32],
             wire(),
@@ -2368,7 +3530,28 @@ mod tests {
             2 * 1024 * 1024,
             128,
         )?;
-        Ok(RelayWorkerConfigV1::new(sender, inbox, frames)?)
+        let pins = crate::production_config::ProductionRelayAuthorityPinsV6 {
+            relay_database_id: [0xd1; 32],
+            upstream_sender_store_id: [0x14; 32],
+            upstream_inbox_id: [0x15; 32],
+            upstream_reassembler_id: [0x16; 32],
+            downstream_sender_store_id: [0x17; 32],
+            downstream_inbox_id: [0x18; 32],
+            downstream_reassembler_id: [0x19; 32],
+            relay_max_envelopes: 256,
+            sender_max_envelopes: 128,
+            inbox_max_entries: 128,
+            frame_max_messages: 16,
+            frame_max_active_bytes: 2 * 1024 * 1024,
+            frame_max_active_chunks: 128,
+        };
+        Ok(RelayWorkerConfigV1::new_production_v6(
+            sender,
+            inbox,
+            frames,
+            pins,
+            LegIdV1::Upstream,
+        )?)
     }
 
     fn relay_rosters(local_xonly: [u8; 32]) -> RosterRegistryV1 {

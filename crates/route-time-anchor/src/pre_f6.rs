@@ -758,6 +758,29 @@ impl DurablePreF6TimeStoreV2 {
         Ok(value)
     }
 
+    /// Opens an initialized RFQ-scoped time authority or completes an
+    /// externally provisioned lazy-binding prefix after the authenticated RFQ
+    /// fixes the final policy scope.
+    pub fn open_or_resume_prepared_production(
+        path: &Path,
+        preparation_digest: Digest32,
+        policy: PreF6TimePolicyV2,
+        authorities: AuthoritySetV1,
+        secp: &SecpContext,
+    ) -> Result<Self> {
+        let preparation = ProductionStoreBindingV1::new(preparation_digest)
+            .map_err(|_| RouteTimeAnchorErrorV2::StorageUnavailable)?;
+        let binding = production_binding(policy, &authorities, secp)?;
+        let value = Self {
+            store: Store::open_or_resume_prepared_production(path, preparation, binding)
+                .map_err(|_| RouteTimeAnchorErrorV2::StorageUnavailable)?,
+            policy,
+            authorities,
+        };
+        value.audit(secp)?;
+        Ok(value)
+    }
+
     /// Installs or exactly replays fresh evidence and returns a current
     /// move-only capability from the durable head.
     pub fn install_and_prove_current_pre_f6_time(

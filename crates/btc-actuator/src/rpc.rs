@@ -162,6 +162,8 @@ mod http {
     const MAX_COOKIE_BYTES: usize = 4096;
     const RPC_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
     const RPC_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    const RPC_MAX_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    const RPC_MAX_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
     const OBSERVATION_DOMAIN: &[u8] = b"DOM-INTEROP/BTC-ACTUATOR/RPC-EVIDENCE/V2\0";
 
     /// Local authenticated Bitcoin Core HTTP configuration.
@@ -174,6 +176,53 @@ mod http {
         pub endpoint: String,
         /// Owner-only Bitcoin Core cookie path.
         pub cookie_path: PathBuf,
+    }
+
+    /// Validated connection and whole-request deadlines for Bitcoin Core.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct HttpBitcoinCoreRpcTimeoutsV1 {
+        connect: std::time::Duration,
+        request: std::time::Duration,
+    }
+
+    impl HttpBitcoinCoreRpcTimeoutsV1 {
+        /// Validates non-zero bounded deadlines. Connection establishment may
+        /// not exceed the complete RPC budget.
+        pub fn new(
+            connect: std::time::Duration,
+            request: std::time::Duration,
+        ) -> core::result::Result<Self, BitcoinRpcErrorV1> {
+            if connect.is_zero()
+                || request.is_zero()
+                || connect > RPC_MAX_CONNECT_TIMEOUT
+                || request > RPC_MAX_REQUEST_TIMEOUT
+                || connect > request
+            {
+                return Err(BitcoinRpcErrorV1::TransportUnavailable);
+            }
+            Ok(Self { connect, request })
+        }
+
+        /// Existing production defaults used by [`HttpBitcoinCoreRpcV1::connect`].
+        #[must_use]
+        pub const fn production_default() -> Self {
+            Self {
+                connect: RPC_CONNECT_TIMEOUT,
+                request: RPC_REQUEST_TIMEOUT,
+            }
+        }
+
+        /// Connection-establishment deadline.
+        #[must_use]
+        pub const fn connect(&self) -> std::time::Duration {
+            self.connect
+        }
+
+        /// Whole-request deadline, including bounded body reads.
+        #[must_use]
+        pub const fn request(&self) -> std::time::Duration {
+            self.request
+        }
     }
 
     /// Blocking, bounded live Bitcoin Core RPC authority.
@@ -199,6 +248,15 @@ mod http {
         pub fn connect(
             config: HttpBitcoinCoreRpcConfigV1,
         ) -> core::result::Result<Self, BitcoinRpcErrorV1> {
+            Self::connect_with_timeouts(config, HttpBitcoinCoreRpcTimeoutsV1::production_default())
+        }
+
+        /// Connects with explicit validated connection and whole-request
+        /// deadlines while preserving the same endpoint and cookie policy.
+        pub fn connect_with_timeouts(
+            config: HttpBitcoinCoreRpcConfigV1,
+            timeouts: HttpBitcoinCoreRpcTimeoutsV1,
+        ) -> core::result::Result<Self, BitcoinRpcErrorV1> {
             let endpoint = Url::parse(&config.endpoint)
                 .map_err(|_| BitcoinRpcErrorV1::TransportUnavailable)?;
             if !matches!(endpoint.scheme(), "http" | "https")
@@ -215,8 +273,8 @@ mod http {
             }
             let client = Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
-                .connect_timeout(RPC_CONNECT_TIMEOUT)
-                .timeout(RPC_REQUEST_TIMEOUT)
+                .connect_timeout(timeouts.connect())
+                .timeout(timeouts.request())
                 .build()
                 .map_err(|_| BitcoinRpcErrorV1::TransportUnavailable)?;
             Ok(Self {
@@ -722,7 +780,7 @@ mod http {
 
         use super::{
             confirmed_evidence_digest, parse_json_bytes, validated_canonical_block_facts,
-            BitcoinRpcErrorV1,
+            BitcoinRpcErrorV1, HttpBitcoinCoreRpcTimeoutsV1,
         };
 
         #[test]
@@ -804,8 +862,35 @@ mod http {
             assert_ne!(first, next_height);
             Ok(())
         }
+
+        #[test]
+        fn timeout_policy_is_bounded_and_preserves_defaults() {
+            let defaults = HttpBitcoinCoreRpcTimeoutsV1::production_default();
+            assert_eq!(defaults.connect(), std::time::Duration::from_secs(5));
+            assert_eq!(defaults.request(), std::time::Duration::from_secs(30));
+            assert!(HttpBitcoinCoreRpcTimeoutsV1::new(
+                std::time::Duration::ZERO,
+                std::time::Duration::from_secs(1),
+            )
+            .is_err());
+            assert!(HttpBitcoinCoreRpcTimeoutsV1::new(
+                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(1),
+            )
+            .is_err());
+            assert!(HttpBitcoinCoreRpcTimeoutsV1::new(
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(301),
+            )
+            .is_err());
+            assert!(HttpBitcoinCoreRpcTimeoutsV1::new(
+                std::time::Duration::from_millis(250),
+                std::time::Duration::from_secs(2),
+            )
+            .is_ok());
+        }
     }
 }
 
 #[cfg(feature = "rpc-http")]
-pub use http::{HttpBitcoinCoreRpcConfigV1, HttpBitcoinCoreRpcV1};
+pub use http::{HttpBitcoinCoreRpcConfigV1, HttpBitcoinCoreRpcTimeoutsV1, HttpBitcoinCoreRpcV1};

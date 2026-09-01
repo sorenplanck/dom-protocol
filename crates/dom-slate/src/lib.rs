@@ -50,6 +50,7 @@ use k256::elliptic_curve::PrimeField;
 use k256::Scalar;
 use rand::RngCore;
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 /// Errors arising from slate construction, response, or finalization.
 ///
@@ -103,7 +104,7 @@ pub fn receiver_response(
     expected_network_magic: u32,
     expected_chain_id: &[u8; 32],
     current_height: u64,
-) -> Result<(SlateEnvelope, [u8; 32]), SlateError> {
+) -> Result<(SlateEnvelope, Zeroizing<[u8; 32]>), SlateError> {
     validate_envelope_context(
         &envelope,
         expected_network_magic,
@@ -181,24 +182,22 @@ fn validate_envelope_context(
 /// The caller (which owns coin selection and the persisted output set)
 /// supplies the input commitment and its blinding. Value/maturity decisions
 /// are the caller's; this crate only does the slate crypto.
-#[derive(Clone)]
 pub struct SlateInput {
     /// Compressed 33-byte Pedersen commitment of the input being spent.
     pub commitment: [u8; 33],
     /// 32-byte blinding factor of the input being spent.
-    pub blinding: [u8; 32],
+    pub blinding: Zeroizing<[u8; 32]>,
 }
 
 /// Self-spend change material the caller must persist (the proof itself is
 /// carried inside the returned slate's `sender_change_output`).
-#[derive(Clone)]
 pub struct ChangeMaterial {
     /// Compressed 33-byte Pedersen commitment of the change output.
     pub commitment: [u8; 33],
     /// Change value in noms.
     pub value: u64,
     /// 32-byte random blinding factor for the change output.
-    pub blinding: [u8; 32],
+    pub blinding: Zeroizing<[u8; 32]>,
 }
 
 /// Result of [`build_send`] — the public slate plus the sender secrets the
@@ -208,9 +207,9 @@ pub struct SenderSlate {
     /// The step-1 slate to hand to the recipient. Contains only public data.
     pub slate: Slate,
     /// Sender excess blinding `x_S` for the aggregate kernel key. Secret.
-    pub excess_blinding: [u8; 32],
+    pub excess_blinding: Zeroizing<[u8; 32]>,
     /// Random single-use sender nonce `k_S`. Secret; discard after finalize.
-    pub nonce: [u8; 32],
+    pub nonce: Zeroizing<[u8; 32]>,
     /// Self-spend change to register once the tx confirms. `None` for exact
     /// spends (no change).
     pub change: Option<ChangeMaterial>,
@@ -222,7 +221,7 @@ pub struct ReceiveResponse {
     /// The step-2 slate to hand back to the sender. Contains only public data.
     pub slate: Slate,
     /// Recipient output blinding `x_R`. Secret; never exported or journaled.
-    pub recipient_output_blinding: [u8; 32],
+    pub recipient_output_blinding: Zeroizing<[u8; 32]>,
 }
 
 /// Seed-derived recovery context supplied by Wallet V3 output creation.
@@ -289,7 +288,7 @@ pub fn build_send_with_lock_height(
             Some(ChangeMaterial {
                 commitment: commitment_bytes,
                 value: change_value,
-                blinding: *change_blinding.as_bytes(),
+                blinding: Zeroizing::new(*change_blinding.as_bytes()),
             }),
             Some(change_blinding),
         )
@@ -298,12 +297,12 @@ pub fn build_send_with_lock_height(
     };
 
     let sender_offset = BlindingFactor::random();
-    let excess_blinding = sender_excess_blinding(
-        inputs.iter().map(|i| &i.blinding),
+    let excess_blinding = Zeroizing::new(sender_excess_blinding(
+        inputs.iter().map(|i| &*i.blinding),
         change_blinding.as_ref().map(|b| b.as_bytes()),
         sender_offset.as_bytes(),
-    )?;
-    let sender_excess_key = SecretKey::from_bytes(&excess_blinding)
+    )?);
+    let sender_excess_key = SecretKey::from_bytes(excess_blinding.as_ref())
         .map_err(|e| SlateError::Crypto(format!("sender excess key invalid: {e}")))?;
 
     // Multisignature Schnorr nonces must be fresh CSPRNG output and
@@ -312,7 +311,7 @@ pub fn build_send_with_lock_height(
     // private key can be recovered. The caller persists this nonce only in
     // encrypted wallet state and discards it after finalize.
     let sender_nonce_key = random_secret_key();
-    let sender_nonce = sender_nonce_key.to_be_bytes_raw();
+    let sender_nonce = Zeroizing::new(sender_nonce_key.to_be_bytes_raw());
 
     let slate = Slate {
         version: CURRENT_SLATE_VERSION,
@@ -364,7 +363,7 @@ pub fn build_send_recoverable(
         sender.change.as_ref(),
         sender.slate.sender_change_output.as_mut(),
     ) {
-        let blinding = BlindingFactor::from_bytes(change.blinding)
+        let blinding = BlindingFactor::from_bytes(*change.blinding)
             .map_err(|error| SlateError::Crypto(error.to_string()))?;
         let capsule = dom_crypto::recovery::create_recovery_capsule(
             recovery.root,
@@ -479,7 +478,7 @@ pub fn respond_receive(
 
     Ok(ReceiveResponse {
         slate,
-        recipient_output_blinding: *recipient_blinding.as_bytes(),
+        recipient_output_blinding: Zeroizing::new(*recipient_blinding.as_bytes()),
     })
 }
 
@@ -503,7 +502,7 @@ pub fn respond_receive_recoverable(
     slate.version = CURRENT_SLATE_VERSION;
     let mut response = respond_receive(slate, expected_chain_id)?;
     response.slate.sender_change_recovery_capsule = sender_change_capsule;
-    let recipient_blinding = BlindingFactor::from_bytes(response.recipient_output_blinding)
+    let recipient_blinding = BlindingFactor::from_bytes(*response.recipient_output_blinding)
         .map_err(|error| SlateError::Crypto(error.to_string()))?;
     let output = response
         .slate
@@ -832,10 +831,10 @@ fn validate_slate_version(slate: &Slate) -> Result<(), SlateError> {
 
 /// Generate a fresh random secp256k1 secret key via rejection sampling.
 pub fn random_secret_key() -> SecretKey {
-    let mut bytes = [0u8; 32];
+    let mut bytes = Zeroizing::new([0u8; 32]);
     loop {
-        rand::thread_rng().fill_bytes(&mut bytes);
-        if let Ok(secret_key) = SecretKey::from_bytes(&bytes) {
+        rand::thread_rng().fill_bytes(bytes.as_mut());
+        if let Ok(secret_key) = SecretKey::from_bytes(bytes.as_ref()) {
             return secret_key;
         }
     }

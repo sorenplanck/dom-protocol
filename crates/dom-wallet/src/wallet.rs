@@ -26,6 +26,7 @@ use dom_tx::SpendBuilder;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
+use zeroize::Zeroizing;
 
 /// A spend transaction that has been *constructed* but not yet reserved
 /// or persisted.
@@ -1379,7 +1380,7 @@ impl Wallet {
             .iter()
             .map(|output| dom_slate::SlateInput {
                 commitment: output.commitment,
-                blinding: *output.blinding,
+                blinding: Zeroizing::new(*output.blinding),
             })
             .collect();
         let built =
@@ -1389,7 +1390,7 @@ impl Wallet {
         let pending_change = built.change.map(|c| PendingChange {
             commitment: c.commitment,
             value: c.value,
-            blinding: c.blinding,
+            blinding: *c.blinding,
         });
         let slate = built.slate;
 
@@ -1420,8 +1421,8 @@ impl Wallet {
                 change: pending_change,
                 send_slate: Some(PendingSendSlate { slate_bytes }),
                 send_slate_secrets: Some(PendingSendSlateSecrets {
-                    sender_excess_blinding,
-                    sender_nonce,
+                    sender_excess_blinding: *sender_excess_blinding,
+                    sender_nonce: *sender_nonce,
                 }),
                 receive_slate: None,
                 receive_slate_secrets: None,
@@ -1467,7 +1468,7 @@ impl Wallet {
                     slate_bytes: response_bytes,
                 }),
                 receive_slate_secrets: Some(PendingReceiveSlateSecrets {
-                    recipient_output_blinding,
+                    recipient_output_blinding: *recipient_output_blinding,
                 }),
             },
         );

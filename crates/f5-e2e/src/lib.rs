@@ -45,7 +45,6 @@ use adapter_btc::templates::{
 };
 use adapter_btc::timelock::{encode_csv, AnchoredCrossChainWindowV1, BitcoinCsvDelayV1};
 use adapter_btc::types::BitcoinNetworkV1 as TemplateNetwork;
-use adapter_btc_live::PreparedFreshBitcoinClaimV1;
 use bitcoin::absolute::LockTime;
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::hashes::Hash;
@@ -215,51 +214,6 @@ impl PreparedBitcoinRouteClaimV1 {
     #[must_use]
     pub const fn funding_ref(&self) -> FundingRef {
         self.funding
-    }
-
-    /// Imports the public result of the authenticated fresh-key claim owner.
-    ///
-    /// The live boundary has already consumed the two real signing keys and
-    /// both M.8-gated nonce owners. This conversion accepts only its
-    /// secret-free, non-forgeable preparation, then round-trips the result
-    /// through the durable continuation validator before returning it. No
-    /// deterministic F5 signing material is consulted by this path.
-    pub fn from_fresh_live_preparation(
-        prepared: PreparedFreshBitcoinClaimV1,
-    ) -> Result<Self, String> {
-        let parts = prepared.into_parts();
-        let funding = FundingRef {
-            txid: parts.funding_txid,
-            vout: parts.funding_vout,
-            amount_sat: parts.funding_amount_sat,
-        };
-        let expected_adaptor_point = AdaptorPointBytes(parts.adaptor_point);
-        let settlement_id = parts.settlement_id;
-        let session_id = parts.session_id;
-        let terms_hash = parts.terms_hash;
-        let candidate = Self {
-            settlement_id,
-            session_id,
-            terms_hash,
-            funding,
-            transaction: parts.transaction,
-            template_digest: parts.template_digest,
-            tap_sighash: parts.tap_sighash,
-            nonce_parity: parts.nonce_parity,
-            adaptor_point: parts.adaptor_point,
-            output_xonly: parts.output_xonly,
-            pre_signature: parts.pre_signature,
-            signer_one_partial: parts.signer_one_partial,
-            signer_two_partial: parts.signer_two_partial,
-        };
-        let continuation = candidate.durable_continuation_bytes()?;
-        Self::from_durable_continuation_bytes(
-            &continuation,
-            settlement_id,
-            session_id,
-            terms_hash,
-            &expected_adaptor_point,
-        )
     }
 
     /// Encodes the non-secret prepared-claim continuation for durable storage.

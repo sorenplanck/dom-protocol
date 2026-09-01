@@ -45,6 +45,10 @@ use dom_scriptless_store::{
     PreparedOperationalFinalClaimSubmissionV2, RealDomContractFactsV2, RefundBroadcastV1,
     RetainedClaimRoundFactsV2, SessionStoreError,
 };
+use f7_anchor_authority::{
+    verify_f7_route_anchor_authority_v2, F7AnchorAuthorityError, F7AnchorValidationRequestV2,
+    VerifiedF7RouteAnchorAuthorizationsV2,
+};
 use kaystra_core::settlement_engine::{
     ChainCursorV1, ChainRecordV1, ChainSourceErrorV1, ChainSourceV1, EffectOutcome, EffectSinkV1,
 };
@@ -543,6 +547,19 @@ impl RealDomRpcRuntimeV1 {
             cache: Mutex::new(RuntimeCacheV1::default()),
             history_limit,
         })
+    }
+
+    /// Drives productive F7 V2 anchor verification through this runtime's
+    /// sole authenticated DOM client.
+    ///
+    /// The adapter is never returned or cloned. A composition root may share
+    /// an `Arc<RealDomRpcRuntimeV1>` between funding and this read-only gate,
+    /// proving both operations use the same physical client and identity.
+    pub fn verify_f7_route_anchor_authority_v2(
+        &self,
+        request: F7AnchorValidationRequestV2<'_>,
+    ) -> Result<VerifiedF7RouteAnchorAuthorizationsV2, F7AnchorAuthorityError> {
+        verify_f7_route_anchor_authority_v2(&self.adapter, request)
     }
 
     /// Submit one exact Contracts-owned funding outbox through this runtime's

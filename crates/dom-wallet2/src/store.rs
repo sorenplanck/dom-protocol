@@ -9,7 +9,7 @@
 //! ([`StoredOutput::can_delete`]). This makes the retention invariant INV-RET a
 //! structural property of the API, not merely a convention.
 
-use crate::types::{OutputStatus, StoredOutput};
+use crate::types::{OutputStatus, PayoutForV1, PayoutPinDisposition, PayoutPinError, StoredOutput};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -37,12 +37,22 @@ pub enum StoreError {
     /// primary key).
     #[error("duplicate commitment")]
     DuplicateCommitment,
+    /// Two different outputs carried the same payout preparation digest.
+    #[error("duplicate payout preparation digest")]
+    DuplicatePayoutPin,
+    /// One commitment was bound to two different payout preparations.
+    #[error("conflicting payout preparation for output")]
+    PayoutPinConflict,
+    /// A backup tried to attach a payout pin to different immutable output
+    /// material under an existing commitment.
+    #[error("payout-pinned backup output identity mismatch")]
+    PayoutOutputIdentityMismatch,
     /// No output with this commitment exists.
     #[error("output not found")]
     NotFound,
-    /// Deletion refused: the output was canonical at some point and INV-RET
-    /// forbids removing it (only an `Unconfirmed` output may be deleted, D1).
-    #[error("output is not deletable (INV-RET): status is not Unconfirmed")]
+    /// Deletion refused: the output is canonical or carries an immutable payout
+    /// pin. D1 permits only unpinned `Unconfirmed` outputs.
+    #[error("output is not deletable (INV-RET or payout pin)")]
     NotDeletable,
 }
 
@@ -104,6 +114,15 @@ impl OutputStore {
         if self.get(&output.commitment).is_some() {
             return Err(StoreError::DuplicateCommitment);
         }
+        if let Some(pin) = output.payout_for() {
+            if self
+                .outputs
+                .iter()
+                .any(|existing| existing.payout_for() == Some(pin))
+            {
+                return Err(StoreError::DuplicatePayoutPin);
+            }
+        }
         self.outputs.push(output);
         Ok(())
     }
@@ -119,6 +138,31 @@ impl OutputStore {
         self.outputs
             .iter_mut()
             .find(|o| &o.commitment == commitment)
+    }
+
+    /// Bind one existing output to an authority-minted payout preparation.
+    ///
+    /// The preparation digest is globally unique within this wallet. An exact
+    /// retry on the same output is idempotent; reuse on any other output or a
+    /// different pin on this output fails without mutation.
+    pub fn pin_payout(
+        &mut self,
+        commitment: &[u8; 33],
+        payout_for: PayoutForV1,
+        now: u64,
+    ) -> Result<PayoutPinDisposition, StoreError> {
+        if self.outputs.iter().any(|output| {
+            &output.commitment != commitment && output.payout_for() == Some(payout_for)
+        }) {
+            return Err(StoreError::DuplicatePayoutPin);
+        }
+        self.get_mut(commitment)
+            .ok_or(StoreError::NotFound)?
+            .pin_payout(payout_for, now)
+            .map_err(|error| match error {
+                PayoutPinError::Conflict => StoreError::PayoutPinConflict,
+                PayoutPinError::ZeroPrepareDigest => StoreError::DuplicatePayoutPin,
+            })
     }
 
     /// Iterate over all stored outputs.
@@ -160,20 +204,43 @@ impl OutputStore {
     /// touched. The caller SHOULD run [`crate::reconcile`] afterwards to bring
     /// statuses up to the current tip (§2.7) — the merge itself only guarantees
     /// no loss and no downgrade, not chain-consistency.
-    pub fn merge_backup(&mut self, incoming: Vec<StoredOutput>) -> MergeReport {
+    pub fn merge_backup(&mut self, incoming: Vec<StoredOutput>) -> Result<MergeReport, StoreError> {
+        // Rebuild the incoming set first so duplicate commitments or payout
+        // pins fail before any local state can change. Apply the merge to a
+        // clone for the same reason: a conflict in a later record must not
+        // leave an earlier record partially imported.
+        let incoming = OutputStore::from_outputs(incoming)?.outputs;
+        let mut candidate = self.clone();
         let mut report = MergeReport::default();
         for out_bak in incoming {
-            match self.get(&out_bak.commitment) {
+            match candidate.get(&out_bak.commitment) {
                 None => {
-                    // Absent locally: recover it. insert() cannot fail here
-                    // (we just checked the commitment is not present).
-                    let _ = self.insert(out_bak);
+                    candidate.insert(out_bak)?;
                     report.inserted += 1;
                 }
                 Some(existing) => {
+                    if let Some(incoming_pin) = out_bak.payout_for() {
+                        if candidate.outputs.iter().any(|output| {
+                            output.commitment != out_bak.commitment
+                                && output.payout_for() == Some(incoming_pin)
+                        }) {
+                            return Err(StoreError::DuplicatePayoutPin);
+                        }
+                    }
+                    match (existing.payout_for(), out_bak.payout_for()) {
+                        (Some(local), Some(incoming)) if local != incoming => {
+                            return Err(StoreError::PayoutPinConflict)
+                        }
+                        (_, Some(_)) if !same_payout_output_identity(existing, &out_bak) => {
+                            return Err(StoreError::PayoutOutputIdentityMismatch)
+                        }
+                        _ => {}
+                    }
                     let existing_rank = existing.status.merge_rank();
+                    let incoming_pin = out_bak.payout_for();
+                    let incoming_updated_at = out_bak.updated_at;
                     if out_bak.status.merge_rank() > existing_rank {
-                        let slot = self
+                        let slot = candidate
                             .get_mut(&out_bak.commitment)
                             .expect("commitment present");
                         slot.status = out_bak.status;
@@ -185,16 +252,33 @@ impl OutputStore {
                     } else {
                         report.kept += 1;
                     }
+                    if let Some(pin) = incoming_pin {
+                        let slot = candidate
+                            .get_mut(&out_bak.commitment)
+                            .expect("commitment present");
+                        let pin_updated_at = slot.updated_at.max(incoming_updated_at);
+                        match slot.pin_payout(pin, pin_updated_at) {
+                            Ok(_) => {}
+                            Err(PayoutPinError::Conflict) => {
+                                return Err(StoreError::PayoutPinConflict)
+                            }
+                            Err(PayoutPinError::ZeroPrepareDigest) => {
+                                return Err(StoreError::DuplicatePayoutPin)
+                            }
+                        }
+                    }
                 }
             }
         }
-        report
+        *self = candidate;
+        Ok(report)
     }
 
     /// Remove an output **only if** the `D1` guard allows it (still
     /// `Unconfirmed`). Returns the removed record. Any canonical output
-    /// (`Confirmed`/`Spent`/`Reorged`) is refused with [`StoreError::NotDeletable`]
-    /// — the store-level enforcement of INV-RET.
+    /// (`Confirmed`/`Spent`/`Reorged`) or an output with a durable payout pin is
+    /// refused with [`StoreError::NotDeletable`] — the store-level enforcement
+    /// of INV-RET and payout ownership.
     ///
     /// Note: 3B will additionally require the producing slate to be terminally
     /// `Canceled`/`Failed` before calling this; that condition lives with the
@@ -215,10 +299,20 @@ impl OutputStore {
     }
 }
 
+fn same_payout_output_identity(local: &StoredOutput, incoming: &StoredOutput) -> bool {
+    local.commitment == incoming.commitment
+        && local.value == incoming.value
+        && *local.blinding == *incoming.blinding
+        && local.origin == incoming.origin
+        && local.is_coinbase == incoming.is_coinbase
+        && local.derivable == incoming.derivable
+        && local.created_at == incoming.created_at
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{BlockRef, OutputOrigin, StoredOutput};
+    use crate::types::{BlockRef, OutputOrigin, PayoutForV1, StoredOutput};
 
     fn out(tag: u8, value: u64, origin: OutputOrigin) -> StoredOutput {
         let mut commitment = [0u8; 33];
@@ -244,6 +338,92 @@ mod tests {
             s.insert(out(1, 200, OutputOrigin::Change)).unwrap_err(),
             StoreError::DuplicateCommitment
         );
+    }
+
+    #[test]
+    fn duplicate_payout_pin_rejected_across_outputs() {
+        let pin = PayoutForV1::new([0x44; 32]).unwrap();
+        let mut first = out(1, 100, OutputOrigin::ReceiveSlate);
+        first.pin_payout(pin, 1001).unwrap();
+        let mut second = out(2, 200, OutputOrigin::ReceiveSlate);
+        second.pin_payout(pin, 1001).unwrap();
+        let mut store = OutputStore::new();
+        store.insert(first).unwrap();
+        assert_eq!(
+            store.insert(second).unwrap_err(),
+            StoreError::DuplicatePayoutPin
+        );
+    }
+
+    #[test]
+    fn store_payout_pin_api_is_global_one_shot_and_read_only_on_conflict() {
+        let mut store = OutputStore::new();
+        let first = out(1, 100, OutputOrigin::ReceiveSlate);
+        let first_key = first.commitment;
+        let second = out(2, 200, OutputOrigin::ReceiveSlate);
+        let second_key = second.commitment;
+        store.insert(first).unwrap();
+        store.insert(second).unwrap();
+        let pin = PayoutForV1::new([0x45; 32]).unwrap();
+        assert_eq!(
+            store.pin_payout(&first_key, pin, 1001).unwrap(),
+            PayoutPinDisposition::Pinned
+        );
+        assert_eq!(
+            store.pin_payout(&first_key, pin, 1002).unwrap(),
+            PayoutPinDisposition::Idempotent
+        );
+        assert_eq!(
+            store.pin_payout(&second_key, pin, 1003).unwrap_err(),
+            StoreError::DuplicatePayoutPin
+        );
+        assert!(store.get(&second_key).unwrap().payout_for().is_none());
+    }
+
+    #[test]
+    fn merge_payout_conflict_is_atomic_even_after_an_earlier_insert() {
+        let mut local = out(1, 100, OutputOrigin::ReceiveSlate);
+        local
+            .pin_payout(PayoutForV1::new([0x11; 32]).unwrap(), 1001)
+            .unwrap();
+        let mut store = OutputStore::new();
+        store.insert(local).unwrap();
+
+        let earlier = out(2, 200, OutputOrigin::Change);
+        let mut conflict = out(1, 100, OutputOrigin::ReceiveSlate);
+        conflict
+            .pin_payout(PayoutForV1::new([0x22; 32]).unwrap(), 1002)
+            .unwrap();
+        assert_eq!(
+            store.merge_backup(vec![earlier, conflict]).unwrap_err(),
+            StoreError::PayoutPinConflict
+        );
+        assert_eq!(store.len(), 1);
+        let key_one = out(1, 0, OutputOrigin::Change).commitment;
+        let key_two = out(2, 0, OutputOrigin::Change).commitment;
+        assert!(store.get(&key_two).is_none());
+        assert_eq!(
+            store.get(&key_one).unwrap().payout_for(),
+            Some(PayoutForV1::new([0x11; 32]).unwrap())
+        );
+    }
+
+    #[test]
+    fn merge_adopts_exact_pin_but_preserves_a_newer_local_pin() {
+        let mut store = OutputStore::new();
+        store
+            .insert(out(1, 100, OutputOrigin::ReceiveSlate))
+            .unwrap();
+        let pin = PayoutForV1::new([0x33; 32]).unwrap();
+        let mut incoming = out(1, 100, OutputOrigin::ReceiveSlate);
+        incoming.pin_payout(pin, 1001).unwrap();
+        store.merge_backup(vec![incoming]).unwrap();
+        let key = out(1, 0, OutputOrigin::Change).commitment;
+        assert_eq!(store.get(&key).unwrap().payout_for(), Some(pin));
+
+        let stale = out(1, 100, OutputOrigin::ReceiveSlate);
+        store.merge_backup(vec![stale]).unwrap();
+        assert_eq!(store.get(&key).unwrap().payout_for(), Some(pin));
     }
 
     #[test]
@@ -303,6 +483,22 @@ mod tests {
             StoreError::NotDeletable
         );
         assert_eq!(s.len(), 1);
+    }
+
+    #[test]
+    fn remove_if_deletable_refuses_unconfirmed_payout_pin() {
+        let mut output = out(1, 100, OutputOrigin::ReceiveSlate);
+        output
+            .pin_payout(PayoutForV1::new([0x55; 32]).unwrap(), 1001)
+            .unwrap();
+        let mut store = OutputStore::new();
+        store.insert(output).unwrap();
+        let key = out(1, 0, OutputOrigin::Change).commitment;
+        assert_eq!(
+            store.remove_if_deletable(&key).unwrap_err(),
+            StoreError::NotDeletable
+        );
+        assert_eq!(store.len(), 1);
     }
 
     #[test]

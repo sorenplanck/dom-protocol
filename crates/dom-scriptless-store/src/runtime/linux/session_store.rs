@@ -75,7 +75,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, Weak},
 };
 use zeroize::Zeroizing;
 
@@ -206,6 +206,12 @@ const OPERATIONAL_FINAL_REFUND_V2_RECORD_MAX_LEN: usize =
 /// `dom-scriptless-transport`; see [`transport_payload_cap`] for why this
 /// crate holds its own copy and for the divergence that copy once carried.
 const OPERATIONAL_ABORT_PAYLOAD_LEN: usize = 32;
+/// Exact fixed request bytes of DSC1 `EvmActionRequest` (`0x15`).
+const EVM_ACTION_REQUEST_PAYLOAD_LEN: usize = 352;
+/// Fixed response bytes before its exact signed EVM transaction (`0x16`).
+const EVM_SIGNED_ACTION_PAYLOAD_PREFIX_LEN: usize = 452;
+/// Maximum exact signed EVM transaction carried by `0x16`.
+const EVM_SIGNED_ACTION_RAW_MAX_LEN: usize = 8 * 1024;
 const OPERATIONAL_ABORT_AUTHORITY_RECORD_LEN: usize = 392;
 const LOCAL_TRANSPORT_SIGNER_RECORD_LEN: usize = 344;
 const OUTBOUND_DSC1_REQUEST_PREFIX_LEN: usize = 456;
@@ -2683,6 +2689,183 @@ pub enum OutboundDsc1RecoveryV1 {
     None,
 }
 
+/// Move-only proof that one exact `0x15` EVM action request is durably in the
+/// authenticated DSC1 transcript of this Store opening.
+pub struct AcceptedEvmActionRequestV1 {
+    session_id: [u8; 32],
+    requester_id: [u8; 32],
+    signer_id: [u8; 32],
+    sequence: u64,
+    message_digest: [u8; 32],
+    record_digest: [u8; 32],
+    payload: [u8; EVM_ACTION_REQUEST_PAYLOAD_LEN],
+    open_instance_id: [u8; 32],
+}
+
+impl AcceptedEvmActionRequestV1 {
+    /// Session containing the accepted request.
+    pub const fn session_id(&self) -> &[u8; 32] {
+        &self.session_id
+    }
+    /// Requesting DSC1 participant.
+    pub const fn requester_id(&self) -> &[u8; 32] {
+        &self.requester_id
+    }
+    /// Counterparty participant whose role-scoped signer must answer.
+    pub const fn signer_id(&self) -> &[u8; 32] {
+        &self.signer_id
+    }
+    /// Exact accepted DSC1 request digest.
+    pub const fn message_digest(&self) -> &[u8; 32] {
+        &self.message_digest
+    }
+    /// Exact canonical public request payload.
+    pub const fn payload(&self) -> &[u8; EVM_ACTION_REQUEST_PAYLOAD_LEN] {
+        &self.payload
+    }
+}
+
+/// Move-only proof that one exact bounded signed EVM transaction is durably
+/// paired with an authenticated `0x15` request in this Store opening.
+pub struct AcceptedEvmSignedActionV1 {
+    session_id: [u8; 32],
+    signer_id: [u8; 32],
+    sequence: u64,
+    action_id: [u8; 32],
+    owner_id: [u8; 32],
+    owner_epoch: u64,
+    request_message_digest: [u8; 32],
+    response_message_digest: [u8; 32],
+    transaction_hash: [u8; 32],
+    signed_raw_digest: [u8; 32],
+    signed_raw_transaction: Vec<u8>,
+    record_digest: [u8; 32],
+    open_instance_id: [u8; 32],
+}
+
+struct AuthenticatedEvmActionRequestV1 {
+    chain_id: [u8; 32],
+    session_id: [u8; 32],
+    requester_id: [u8; 32],
+    signer_id: [u8; 32],
+    message_digest: [u8; 32],
+    record_digest: [u8; 32],
+    payload: [u8; EVM_ACTION_REQUEST_PAYLOAD_LEN],
+}
+
+impl AcceptedEvmSignedActionV1 {
+    /// Session containing the response.
+    pub const fn session_id(&self) -> &[u8; 32] {
+        &self.session_id
+    }
+    /// Stable action identifier.
+    pub const fn action_id(&self) -> &[u8; 32] {
+        &self.action_id
+    }
+    /// Durable owner identifier echoed from the request.
+    pub const fn owner_id(&self) -> &[u8; 32] {
+        &self.owner_id
+    }
+    /// Durable owner epoch echoed from the request.
+    pub const fn owner_epoch(&self) -> u64 {
+        self.owner_epoch
+    }
+    /// Exact accepted request digest.
+    pub const fn request_message_digest(&self) -> &[u8; 32] {
+        &self.request_message_digest
+    }
+    /// Exact accepted response digest.
+    pub const fn response_message_digest(&self) -> &[u8; 32] {
+        &self.response_message_digest
+    }
+    /// EVM transaction hash asserted by the role-scoped responder.
+    pub const fn transaction_hash(&self) -> &[u8; 32] {
+        &self.transaction_hash
+    }
+    /// Digest of the exact signed raw transaction.
+    pub const fn signed_raw_digest(&self) -> &[u8; 32] {
+        &self.signed_raw_digest
+    }
+    /// Exact signed raw EVM transaction bytes.
+    pub fn signed_raw_transaction(&self) -> &[u8] {
+        &self.signed_raw_transaction
+    }
+}
+
+/// One-shot, process-bound authority to import an exact accepted signed EVM
+/// transaction into the validating actuator boundary.
+///
+/// It is issued by consuming [`AcceptedEvmSignedActionV1`]. The Store refuses
+/// to issue it twice in one opening. After a crash, the exact durable inbox
+/// record can reissue it so the downstream idempotent actuator can reconcile
+/// an unknown outcome; no raw transaction becomes authorized merely by being
+/// present on disk.
+pub struct PreparedEvmSignedActionImportV1 {
+    session_id: [u8; 32],
+    action_id: [u8; 32],
+    owner_id: [u8; 32],
+    owner_epoch: u64,
+    request_payload: [u8; EVM_ACTION_REQUEST_PAYLOAD_LEN],
+    request_message_digest: [u8; 32],
+    response_message_digest: [u8; 32],
+    transaction_hash: [u8; 32],
+    signed_raw_digest: [u8; 32],
+    signed_raw_transaction: Vec<u8>,
+}
+
+impl PreparedEvmSignedActionImportV1 {
+    /// Session owning this exact import.
+    pub const fn session_id(&self) -> &[u8; 32] {
+        &self.session_id
+    }
+    /// Stable action identifier.
+    pub const fn action_id(&self) -> &[u8; 32] {
+        &self.action_id
+    }
+    /// Durable owner identifier.
+    pub const fn owner_id(&self) -> &[u8; 32] {
+        &self.owner_id
+    }
+    /// Durable owner epoch.
+    pub const fn owner_epoch(&self) -> u64 {
+        self.owner_epoch
+    }
+    /// Exact canonical `0x15` payload that the actuator must bind to its
+    /// independently authenticated route, role, deployment and operation.
+    pub const fn request_payload(&self) -> &[u8; EVM_ACTION_REQUEST_PAYLOAD_LEN] {
+        &self.request_payload
+    }
+    /// Exact request message digest.
+    pub const fn request_message_digest(&self) -> &[u8; 32] {
+        &self.request_message_digest
+    }
+    /// Exact response message digest.
+    pub const fn response_message_digest(&self) -> &[u8; 32] {
+        &self.response_message_digest
+    }
+    /// Asserted EVM transaction hash, to be recomputed by the actuator.
+    pub const fn transaction_hash(&self) -> &[u8; 32] {
+        &self.transaction_hash
+    }
+    /// Exact raw-byte digest.
+    pub const fn signed_raw_digest(&self) -> &[u8; 32] {
+        &self.signed_raw_digest
+    }
+    /// Exact signed raw bytes. The actuator must still verify type, chain,
+    /// signer, destination, value, calldata, nonce, and fee policy.
+    pub fn signed_raw_transaction(&self) -> &[u8] {
+        &self.signed_raw_transaction
+    }
+
+    /// Moves the exact raw bytes out while consuming this one-shot import
+    /// authority. Callers that need the public commitments must copy those
+    /// fixed-size values before this call. This avoids a second heap copy at
+    /// the actuator handoff without adding any signing or broadcast power.
+    pub fn into_signed_raw_transaction(self) -> Vec<u8> {
+        self.signed_raw_transaction
+    }
+}
+
 /// Durable receipt for one authenticated signed transport message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DurableTransportReceiptV1 {
@@ -3873,6 +4056,8 @@ pub struct ContractsSessionStoreV1 {
     recovery_projection: Mutex<Option<ContractsStoreRecoveryProjectionV1>>,
     process_funding_authorities: Mutex<BTreeSet<[u8; 32]>>,
     process_claim_signing_authorities: Mutex<BTreeSet<[u8; 32]>>,
+    process_claim_signing_authorities_v2: Mutex<BTreeMap<[u8; 32], Weak<()>>>,
+    process_evm_signed_action_imports: Mutex<BTreeSet<[u8; 32]>>,
 }
 
 /// Move-only, locked production Store opening authenticated before recovery.
@@ -4084,6 +4269,40 @@ impl ContractsSessionStoreV1 {
         Self::prepare_open(parent, root_name, policy)
     }
 
+    /// Authenticates and locks a complete production Store that was created
+    /// under the exact resumable-provisioning binding supplied by the caller.
+    ///
+    /// This is narrower than [`Self::prepare_open_production`]: it recomputes
+    /// the inode- and root-name-bound resumable Store identity and refuses a
+    /// valid backup or an otherwise valid Store from another provisioning
+    /// family.  The comparison happens while the root and cooperative lock
+    /// are retained and before [`PreparedContractsSessionStoreOpenV1::finish`]
+    /// may perform any authenticated recovery write.
+    pub fn prepare_open_resumed_production(
+        parent: Arc<Dir>,
+        root_name: &str,
+        policy: BudgetPolicyV1,
+        creation_binding: [u8; 32],
+    ) -> Result<PreparedContractsSessionStoreOpenV1, SessionStoreError> {
+        if policy.profile() != BudgetPolicyProfileV1::ProductionRatified {
+            return Err(SessionStoreError::PolicyProfile);
+        }
+        if creation_binding == [0; 32] {
+            return Err(SessionStoreError::Quarantined);
+        }
+        let prepared = Self::prepare_open(parent, root_name, policy)?;
+        let expected_store_id = resumable_store_id(
+            &prepared.store.root,
+            root_name,
+            &prepared.store.policy,
+            creation_binding,
+        )?;
+        if prepared.store._store_id != expected_store_id {
+            return Err(SessionStoreError::Quarantined);
+        }
+        Ok(prepared)
+    }
+
     /// Creates an evidence-only store. This constructor is absent unless the
     /// explicit evidence feature (or unit-test build) is active.
     #[cfg(any(test, feature = "evidence-only"))]
@@ -4273,6 +4492,8 @@ impl ContractsSessionStoreV1 {
             recovery_projection: Mutex::new(None),
             process_funding_authorities: Mutex::new(BTreeSet::new()),
             process_claim_signing_authorities: Mutex::new(BTreeSet::new()),
+            process_claim_signing_authorities_v2: Mutex::new(BTreeMap::new()),
+            process_evm_signed_action_imports: Mutex::new(BTreeSet::new()),
         };
         store.recover_operational_funding_issuances()?;
         store.recover_consumed_funding()?;
@@ -4395,8 +4616,8 @@ impl ContractsSessionStoreV1 {
         let staging_inventory =
             PreRecoveryStagingInventoryV1::capture(&durable_profile_directories)?;
         require_canonical_pre_recovery_inventory(&durable_profile_directories)?;
-        staging_inventory.install_scan_exclusions(&durable_profile_directories)?;
         let durable_profile_census = census_m8_f7_durable_profiles(&durable_profile_directories)?;
+        staging_inventory.install_scan_exclusions(&durable_profile_directories)?;
         preflight_m8_f7_v2_finals(&durable_profile_census, &durable_profile_directories)?;
         let store = Self {
             root,
@@ -4414,6 +4635,8 @@ impl ContractsSessionStoreV1 {
             recovery_projection: Mutex::new(None),
             process_funding_authorities: Mutex::new(BTreeSet::new()),
             process_claim_signing_authorities: Mutex::new(BTreeSet::new()),
+            process_claim_signing_authorities_v2: Mutex::new(BTreeMap::new()),
+            process_evm_signed_action_imports: Mutex::new(BTreeSet::new()),
         };
         let recovery_plan = store.prepare_recovery_plan()?;
         if staging_inventory
@@ -5188,7 +5411,10 @@ impl ContractsSessionStoreV1 {
     /// phase, round predecessor transcript, and global sender sequence bases
     /// are authenticated before an immutable binding record is fsynced. The
     /// returned handle has no public constructor or codec.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+    )]
     pub fn bind_operational_signing_session(
         &self,
         trusted_chain_id: TrustedChainIdV1,
@@ -7792,6 +8018,714 @@ impl ContractsSessionStoreV1 {
         .map(Some)
     }
 
+    /// Persists the outbound DSC1 `0x15` request selected by the local
+    /// transport owner. The fixed payload is validated with the same closed
+    /// codec as `dom-scriptless-transport`; it contains no raw transaction or
+    /// scalar. A non-local requester returns `None` without creating state.
+    pub fn prepare_evm_action_request_dsc1_signing_request(
+        &self,
+        session_id: [u8; 32],
+        payload: [u8; EVM_ACTION_REQUEST_PAYLOAD_LEN],
+    ) -> Result<Option<PreparedDsc1SigningRequestV1>, SessionStoreError> {
+        validate_evm_action_request_payload(&payload)?;
+        let _guard = self.operation_lock()?;
+        let current = self.load_session_locked(session_id)?;
+        require_evm_action_phase(payload[6], current.phase())?;
+        let roster = self.load_transport_roster(session_id)?;
+        let requester_id = copy_array(&payload[248..280])?;
+        let signer_id = copy_array(&payload[280..312])?;
+        require_evm_action_participants(&roster, requester_id, signer_id)?;
+        let signer = self.authenticate_local_transport_signer_binding(session_id)?;
+        if signer.participant_id != requester_id {
+            return Ok(None);
+        }
+        let sequence =
+            self.transport_sequence_at_revision(session_id, requester_id, current.revision())?;
+        let authority_digest = evm_action_request_authority_digest(
+            &self._store_id,
+            &session_id,
+            current.digest(),
+            &payload,
+        );
+        self.issue_outbound_dsc1_request_locked(OutboundDsc1RequestIssueV1 {
+            authority_class: OutboundDsc1AuthorityClassV1::EvmActionRequest,
+            chain_id: roster.chain_id,
+            session_id,
+            sender_id: requester_id,
+            sequence,
+            previous_transcript_hash: current.transcript_hash(),
+            predecessor: &current,
+            authority_digest,
+            payload: &payload,
+        })
+        .map(Some)
+    }
+
+    /// Accepts and durably journals one authenticated DSC1 `0x15` request.
+    /// Exact duplicates return the same logical capability; envelope-key
+    /// equivocation uses the existing durable FailedClosed path.
+    pub fn accept_evm_action_request_transport_message(
+        &self,
+        signed_bytes: &[u8],
+    ) -> Result<AcceptedEvmActionRequestV1, SessionStoreError> {
+        let envelope = ParsedTransportEnvelopeV1::parse(signed_bytes)?;
+        if envelope.message_type != 0x15 {
+            return Err(SessionStoreError::InvalidTransition);
+        }
+        let payload = envelope.payload(signed_bytes)?;
+        validate_evm_action_request_payload(payload)?;
+        let _guard = self.operation_lock()?;
+        let current = self.load_session_locked(envelope.session_id)?;
+        require_evm_action_phase(payload[6], current.phase())?;
+        let roster = self.load_transport_roster(envelope.session_id)?;
+        let participant = roster
+            .participants
+            .iter()
+            .find(|candidate| candidate.participant_id == envelope.sender_id)
+            .ok_or(SessionStoreError::Canonical)?;
+        let requester_id = copy_array(&payload[248..280])?;
+        let signer_id = copy_array(&payload[280..312])?;
+        require_evm_action_participants(&roster, requester_id, signer_id)?;
+        if requester_id != envelope.sender_id {
+            return Err(SessionStoreError::InvalidTransition);
+        }
+        let transcript_hash = accepted_transport_transcript_hash(
+            &current.transcript_hash(),
+            &envelope.message_digest,
+            participant.direction,
+            envelope.message_type,
+            current.phase(),
+        )?;
+        let successor = current.advance(
+            current.revision(),
+            current.phase(),
+            transcript_hash,
+            current.irreversible(),
+            current.chain(),
+            current.encrypted_payload(),
+        )?;
+        let failed = current.advance(
+            current.revision(),
+            SessionPhaseV1::FailedClosed,
+            current.transcript_hash(),
+            current.irreversible(),
+            current.chain(),
+            current.encrypted_payload(),
+        )?;
+        match self.accept_transport_message_with_successor_locked(
+            signed_bytes,
+            &successor,
+            Some(&failed),
+        )? {
+            DurableTransportOutcomeV1::Accepted(_) => self.load_accepted_evm_action_request_handle(
+                envelope.session_id,
+                envelope.sender_id,
+                envelope.sequence,
+            ),
+            DurableTransportOutcomeV1::EquivocationPersisted => Err(SessionStoreError::Conflict),
+        }
+    }
+
+    /// Persists the local requested signer's exact DSC1 `0x16` response.
+    /// The response must echo the complete accepted request and bind its exact
+    /// DSC1 digest; the Store never signs or interprets the EVM transaction.
+    pub fn prepare_evm_signed_action_dsc1_signing_request(
+        &self,
+        accepted_request: &AcceptedEvmActionRequestV1,
+        response_payload: &[u8],
+    ) -> Result<Option<PreparedDsc1SigningRequestV1>, SessionStoreError> {
+        validate_evm_signed_action_payload(response_payload)?;
+        let _guard = self.operation_lock()?;
+        let request = self.authenticate_accepted_evm_action_request(accepted_request)?;
+        require_evm_response_matches_request(
+            response_payload,
+            &request.payload,
+            &request.message_digest,
+        )?;
+        let current = self.load_session_locked(request.session_id)?;
+        require_evm_action_phase(request.payload[6], current.phase())?;
+        let signer = self.authenticate_local_transport_signer_binding(request.session_id)?;
+        if signer.participant_id != request.signer_id {
+            return Ok(None);
+        }
+        let sequence = self.transport_sequence_at_revision(
+            request.session_id,
+            request.signer_id,
+            current.revision(),
+        )?;
+        self.issue_outbound_dsc1_request_locked(OutboundDsc1RequestIssueV1 {
+            authority_class: OutboundDsc1AuthorityClassV1::EvmSignedAction,
+            chain_id: request.chain_id,
+            session_id: request.session_id,
+            sender_id: request.signer_id,
+            sequence,
+            previous_transcript_hash: current.transcript_hash(),
+            predecessor: &current,
+            authority_digest: request.record_digest,
+            payload: response_payload,
+        })
+        .map(Some)
+    }
+
+    /// Accepts one authenticated DSC1 `0x16`, requires its exact retained
+    /// `0x15` predecessor binding, and returns only a process-bound handle to
+    /// the exact public signed transaction bytes.
+    pub fn accept_evm_signed_action_transport_message(
+        &self,
+        signed_bytes: &[u8],
+    ) -> Result<AcceptedEvmSignedActionV1, SessionStoreError> {
+        let envelope = ParsedTransportEnvelopeV1::parse(signed_bytes)?;
+        if envelope.message_type != 0x16 {
+            return Err(SessionStoreError::InvalidTransition);
+        }
+        let payload = envelope.payload(signed_bytes)?;
+        validate_evm_signed_action_payload(payload)?;
+        let _guard = self.operation_lock()?;
+        let request_digest = copy_array(&payload[352..384])?;
+        let request = self.load_evm_action_request_by_digest(request_digest)?;
+        require_evm_response_matches_request(payload, &request.payload, &request.message_digest)?;
+        if envelope.session_id != request.session_id || envelope.sender_id != request.signer_id {
+            return Err(SessionStoreError::InvalidTransition);
+        }
+        let current = self.load_session_locked(envelope.session_id)?;
+        require_evm_action_phase(request.payload[6], current.phase())?;
+        let roster = self.load_transport_roster(envelope.session_id)?;
+        let participant = roster
+            .participants
+            .iter()
+            .find(|candidate| candidate.participant_id == envelope.sender_id)
+            .ok_or(SessionStoreError::Canonical)?;
+        let transcript_hash = accepted_transport_transcript_hash(
+            &current.transcript_hash(),
+            &envelope.message_digest,
+            participant.direction,
+            envelope.message_type,
+            current.phase(),
+        )?;
+        let successor = current.advance(
+            current.revision(),
+            current.phase(),
+            transcript_hash,
+            current.irreversible(),
+            current.chain(),
+            current.encrypted_payload(),
+        )?;
+        let failed = current.advance(
+            current.revision(),
+            SessionPhaseV1::FailedClosed,
+            current.transcript_hash(),
+            current.irreversible(),
+            current.chain(),
+            current.encrypted_payload(),
+        )?;
+        match self.accept_transport_message_with_successor_locked(
+            signed_bytes,
+            &successor,
+            Some(&failed),
+        )? {
+            DurableTransportOutcomeV1::Accepted(_) => self.load_accepted_evm_signed_action_handle(
+                envelope.session_id,
+                envelope.sender_id,
+                envelope.sequence,
+            ),
+            DurableTransportOutcomeV1::EquivocationPersisted => Err(SessionStoreError::Conflict),
+        }
+    }
+
+    fn load_accepted_evm_action_request_handle(
+        &self,
+        session_id: [u8; 32],
+        requester_id: [u8; 32],
+        sequence: u64,
+    ) -> Result<AcceptedEvmActionRequestV1, SessionStoreError> {
+        let record = self.load_evm_transport_record(session_id, requester_id, sequence)?;
+        let envelope = ParsedTransportEnvelopeV1::parse(&record.signed_bytes)?;
+        if record.equivocation || envelope.message_type != 0x15 {
+            return Err(SessionStoreError::InvalidTransition);
+        }
+        let payload: [u8; EVM_ACTION_REQUEST_PAYLOAD_LEN] = envelope
+            .payload(&record.signed_bytes)?
+            .try_into()
+            .map_err(|_| SessionStoreError::Canonical)?;
+        validate_evm_action_request_payload(&payload)?;
+        Ok(AcceptedEvmActionRequestV1 {
+            session_id,
+            requester_id,
+            signer_id: copy_array(&payload[280..312])?,
+            sequence,
+            message_digest: envelope.message_digest,
+            record_digest: record.record_digest()?,
+            payload,
+            open_instance_id: self.open_instance_id,
+        })
+    }
+
+    fn authenticate_accepted_evm_action_request(
+        &self,
+        handle: &AcceptedEvmActionRequestV1,
+    ) -> Result<AuthenticatedEvmActionRequestV1, SessionStoreError> {
+        if handle.open_instance_id != self.open_instance_id {
+            return Err(SessionStoreError::InvalidTransition);
+        }
+        let issued = self.load_accepted_evm_action_request_handle(
+            handle.session_id,
+            handle.requester_id,
+            handle.sequence,
+        )?;
+        if issued.signer_id != handle.signer_id
+            || issued.message_digest != handle.message_digest
+            || issued.record_digest != handle.record_digest
+            || issued.payload != handle.payload
+        {
+            return Err(SessionStoreError::InvalidTransition);
+        }
+        let record = self.load_evm_transport_record(
+            handle.session_id,
+            handle.requester_id,
+            handle.sequence,
+        )?;
+        let envelope = ParsedTransportEnvelopeV1::parse(&record.signed_bytes)?;
+        Ok(AuthenticatedEvmActionRequestV1 {
+            chain_id: envelope.chain_id,
+            session_id: handle.session_id,
+            requester_id: handle.requester_id,
+            signer_id: handle.signer_id,
+            message_digest: handle.message_digest,
+            record_digest: handle.record_digest,
+            payload: handle.payload,
+        })
+    }
+
+    fn load_evm_action_request_by_digest(
+        &self,
+        digest: [u8; 32],
+    ) -> Result<AuthenticatedEvmActionRequestV1, SessionStoreError> {
+        let mut found = None;
+        self.messages.scan_lexicographic(|name, node| {
+            if node.node_type != ExpectedNodeType::RegularFile || name.starts_with('.') {
+                return Err(LinuxCapabilityError::InvalidObject);
+            }
+            if !name.ends_with(".message") {
+                return Ok(());
+            }
+            let bytes = self.messages.read_bounded_file(
+                &ValidatedComponent::registered(name)?,
+                TRANSPORT_MESSAGE_MAX_LEN,
+            )?;
+            let record = TransportMessageRecordV1::from_bytes(&bytes)
+                .map_err(|_| LinuxCapabilityError::ExactBytesMismatch)?;
+            if record.message_type != 0x15 || record.message_digest != digest {
+                return Ok(());
+            }
+            let (envelope, _) = self
+                .authenticate_transport_record(name, &record)
+                .map_err(|_| LinuxCapabilityError::ExactBytesMismatch)?;
+            if record.equivocation || found.is_some() {
+                return Err(LinuxCapabilityError::ExactBytesMismatch);
+            }
+            let payload: [u8; EVM_ACTION_REQUEST_PAYLOAD_LEN] = envelope
+                .payload(&record.signed_bytes)
+                .map_err(|_| LinuxCapabilityError::ExactBytesMismatch)?
+                .try_into()
+                .map_err(|_| LinuxCapabilityError::ExactBytesMismatch)?;
+            validate_evm_action_request_payload(&payload)
+                .map_err(|_| LinuxCapabilityError::ExactBytesMismatch)?;
+            found = Some(AuthenticatedEvmActionRequestV1 {
+                chain_id: envelope.chain_id,
+                session_id: envelope.session_id,
+                requester_id: envelope.sender_id,
+                signer_id: copy_array(&payload[280..312])
+                    .map_err(|_| LinuxCapabilityError::ExactBytesMismatch)?,
+                message_digest: envelope.message_digest,
+                record_digest: record
+                    .record_digest()
+                    .map_err(|_| LinuxCapabilityError::ExactBytesMismatch)?,
+                payload,
+            });
+            Ok(())
+        })?;
+        found.ok_or(SessionStoreError::SessionNotFound)
+    }
+
+    fn load_accepted_evm_signed_action_handle(
+        &self,
+        session_id: [u8; 32],
+        signer_id: [u8; 32],
+        sequence: u64,
+    ) -> Result<AcceptedEvmSignedActionV1, SessionStoreError> {
+        let record = self.load_evm_transport_record(session_id, signer_id, sequence)?;
+        let envelope = ParsedTransportEnvelopeV1::parse(&record.signed_bytes)?;
+        if record.equivocation || envelope.message_type != 0x16 {
+            return Err(SessionStoreError::InvalidTransition);
+        }
+        let payload = envelope.payload(&record.signed_bytes)?;
+        let raw = validate_evm_signed_action_payload(payload)?;
+        let request_message_digest = copy_array(&payload[352..384])?;
+        let request = self.load_evm_action_request_by_digest(request_message_digest)?;
+        require_evm_response_matches_request(payload, &request.payload, &request.message_digest)?;
+        Ok(AcceptedEvmSignedActionV1 {
+            session_id,
+            signer_id,
+            sequence,
+            action_id: copy_array(&payload[24..56])?,
+            owner_id: copy_array(&payload[216..248])?,
+            owner_epoch: u64::from_le_bytes(copy_array(&payload[8..16])?),
+            request_message_digest,
+            response_message_digest: envelope.message_digest,
+            transaction_hash: copy_array(&payload[416..448])?,
+            signed_raw_digest: copy_array(&payload[384..416])?,
+            signed_raw_transaction: raw.to_vec(),
+            record_digest: record.record_digest()?,
+            open_instance_id: self.open_instance_id,
+        })
+    }
+
+    /// Reissues an accepted request handle after restart from its exact
+    /// durable logical key. No request is created by this operation.
+    pub fn resume_evm_action_request(
+        &self,
+        session_id: [u8; 32],
+        requester_id: [u8; 32],
+        sequence: u64,
+    ) -> Result<AcceptedEvmActionRequestV1, SessionStoreError> {
+        let _guard = self.operation_lock()?;
+        self.load_accepted_evm_action_request_handle(session_id, requester_id, sequence)
+    }
+
+    /// Reissues the unique exact `0x15` request after restart without asking a
+    /// composition root to persist or guess its DSC1 sequence.
+    ///
+    /// The complete fixed payload is the lookup key in addition to the
+    /// session and requester. Multiple authenticated records matching that
+    /// key are treated as corrupt/equivocating state, never as an arbitrary
+    /// "latest" request.
+    pub fn resume_evm_action_request_exact(
+        &self,
+        session_id: [u8; 32],
+        requester_id: [u8; 32],
+        payload: [u8; EVM_ACTION_REQUEST_PAYLOAD_LEN],
+    ) -> Result<AcceptedEvmActionRequestV1, SessionStoreError> {
+        validate_evm_action_request_payload(&payload)?;
+        let _guard = self.operation_lock()?;
+        let mut sequence = None;
+        self.messages.scan_lexicographic(|name, node| {
+            if node.node_type != ExpectedNodeType::RegularFile || name.starts_with('.') {
+                return Err(LinuxCapabilityError::InvalidObject);
+            }
+            if !name.ends_with(".message") {
+                return Ok(());
+            }
+            let bytes = self.messages.read_bounded_file(
+                &ValidatedComponent::registered(name)?,
+                TRANSPORT_MESSAGE_MAX_LEN,
+            )?;
+            let record = TransportMessageRecordV1::from_bytes(&bytes)
+                .map_err(|_| LinuxCapabilityError::ExactBytesMismatch)?;
+            if record.message_type != 0x15 {
+                return Ok(());
+            }
+            let (envelope, _) = self
+                .authenticate_transport_record(name, &record)
+                .map_err(|_| LinuxCapabilityError::ExactBytesMismatch)?;
+            if envelope.session_id != session_id
+                || envelope.sender_id != requester_id
+                || envelope
+                    .payload(&record.signed_bytes)
+                    .map_err(|_| LinuxCapabilityError::ExactBytesMismatch)?
+                    != payload
+            {
+                return Ok(());
+            }
+            if record.equivocation || sequence.replace(envelope.sequence).is_some() {
+                return Err(LinuxCapabilityError::ExactBytesMismatch);
+            }
+            Ok(())
+        })?;
+        self.load_accepted_evm_action_request_handle(
+            session_id,
+            requester_id,
+            sequence.ok_or(SessionStoreError::SessionNotFound)?,
+        )
+    }
+
+    /// Reissues an accepted signed-action handle after restart from its exact
+    /// durable logical key. It never treats raw bytes as an execution grant.
+    pub fn resume_evm_signed_action(
+        &self,
+        session_id: [u8; 32],
+        signer_id: [u8; 32],
+        sequence: u64,
+    ) -> Result<AcceptedEvmSignedActionV1, SessionStoreError> {
+        let _guard = self.operation_lock()?;
+        self.load_accepted_evm_signed_action_handle(session_id, signer_id, sequence)
+    }
+
+    /// Reissues the unique accepted `0x16` response for an exact authenticated
+    /// `0x15` digest after restart, without caller-maintained sequence state.
+    ///
+    /// This is the durable handoff used by the production remote EVM signer
+    /// boundary. It returns only the same process-bound handle as the direct
+    /// accept path; raw bytes still require
+    /// [`Self::take_evm_signed_action_for_import`] before an actuator can see
+    /// them.
+    pub fn resume_evm_signed_action_for_request(
+        &self,
+        session_id: [u8; 32],
+        signer_id: [u8; 32],
+        request_message_digest: [u8; 32],
+    ) -> Result<AcceptedEvmSignedActionV1, SessionStoreError> {
+        if request_message_digest == [0; 32] {
+            return Err(SessionStoreError::Canonical);
+        }
+        let _guard = self.operation_lock()?;
+        let mut sequence = None;
+        self.messages.scan_lexicographic(|name, node| {
+            if node.node_type != ExpectedNodeType::RegularFile || name.starts_with('.') {
+                return Err(LinuxCapabilityError::InvalidObject);
+            }
+            if !name.ends_with(".message") {
+                return Ok(());
+            }
+            let bytes = self.messages.read_bounded_file(
+                &ValidatedComponent::registered(name)?,
+                TRANSPORT_MESSAGE_MAX_LEN,
+            )?;
+            let record = TransportMessageRecordV1::from_bytes(&bytes)
+                .map_err(|_| LinuxCapabilityError::ExactBytesMismatch)?;
+            if record.message_type != 0x16 {
+                return Ok(());
+            }
+            let (envelope, _) = self
+                .authenticate_transport_record(name, &record)
+                .map_err(|_| LinuxCapabilityError::ExactBytesMismatch)?;
+            let payload = envelope
+                .payload(&record.signed_bytes)
+                .map_err(|_| LinuxCapabilityError::ExactBytesMismatch)?;
+            validate_evm_signed_action_payload(payload)
+                .map_err(|_| LinuxCapabilityError::ExactBytesMismatch)?;
+            if envelope.session_id != session_id
+                || envelope.sender_id != signer_id
+                || copy_array::<32>(&payload[352..384])
+                    .map_err(|_| LinuxCapabilityError::ExactBytesMismatch)?
+                    != request_message_digest
+            {
+                return Ok(());
+            }
+            if record.equivocation || sequence.replace(envelope.sequence).is_some() {
+                return Err(LinuxCapabilityError::ExactBytesMismatch);
+            }
+            Ok(())
+        })?;
+        self.load_accepted_evm_signed_action_handle(
+            session_id,
+            signer_id,
+            sequence.ok_or(SessionStoreError::SessionNotFound)?,
+        )
+    }
+
+    /// Consumes an accepted response into the sole import authority issued by
+    /// this Store opening. The authority is not proof that the EVM transaction
+    /// is semantically valid: its accessor documents the mandatory actuator
+    /// checks, and no broadcast API exists in this crate.
+    pub fn take_evm_signed_action_for_import(
+        &self,
+        accepted: AcceptedEvmSignedActionV1,
+    ) -> Result<PreparedEvmSignedActionImportV1, SessionStoreError> {
+        let _guard = self.operation_lock()?;
+        if accepted.open_instance_id != self.open_instance_id {
+            return Err(SessionStoreError::InvalidTransition);
+        }
+        let durable = self.load_accepted_evm_signed_action_handle(
+            accepted.session_id,
+            accepted.signer_id,
+            accepted.sequence,
+        )?;
+        if durable.action_id != accepted.action_id
+            || durable.owner_id != accepted.owner_id
+            || durable.owner_epoch != accepted.owner_epoch
+            || durable.request_message_digest != accepted.request_message_digest
+            || durable.response_message_digest != accepted.response_message_digest
+            || durable.transaction_hash != accepted.transaction_hash
+            || durable.signed_raw_digest != accepted.signed_raw_digest
+            || durable.signed_raw_transaction != accepted.signed_raw_transaction
+            || durable.record_digest != accepted.record_digest
+        {
+            return Err(SessionStoreError::InvalidTransition);
+        }
+        let request = self.load_evm_action_request_by_digest(accepted.request_message_digest)?;
+        let mut issued = self
+            .process_evm_signed_action_imports
+            .lock()
+            .map_err(|_| SessionStoreError::Quarantined)?;
+        if !issued.insert(accepted.response_message_digest) {
+            return Err(SessionStoreError::InvalidTransition);
+        }
+        Ok(PreparedEvmSignedActionImportV1 {
+            session_id: accepted.session_id,
+            action_id: accepted.action_id,
+            owner_id: accepted.owner_id,
+            owner_epoch: accepted.owner_epoch,
+            request_payload: request.payload,
+            request_message_digest: accepted.request_message_digest,
+            response_message_digest: accepted.response_message_digest,
+            transaction_hash: accepted.transaction_hash,
+            signed_raw_digest: accepted.signed_raw_digest,
+            signed_raw_transaction: accepted.signed_raw_transaction,
+        })
+    }
+
+    fn load_evm_transport_record(
+        &self,
+        session_id: [u8; 32],
+        sender_id: [u8; 32],
+        sequence: u64,
+    ) -> Result<TransportMessageRecordV1, SessionStoreError> {
+        let name = transport_message_name(session_id, sender_id, sequence, false);
+        let bytes = self.messages.read_bounded_file(
+            &ValidatedComponent::registered(&name)?,
+            TRANSPORT_MESSAGE_MAX_LEN,
+        )?;
+        let record = TransportMessageRecordV1::from_bytes(&bytes)?;
+        self.authenticate_transport_record(&name, &record)?;
+        Ok(record)
+    }
+
+    fn require_bounded_evm_action_transport_edge(
+        &self,
+        current: &SessionRecordV1,
+        envelope: &ParsedTransportEnvelopeV1,
+        signed_bytes: &[u8],
+        direction: DirectionV1,
+        successor: &SessionRecordV1,
+    ) -> Result<(), SessionStoreError> {
+        let payload = envelope.payload(signed_bytes)?;
+        let roster = self.load_transport_roster(current.session_id())?;
+        if roster.chain_id != envelope.chain_id
+            || current.session_id() != envelope.session_id
+            || successor.phase() != current.phase()
+        {
+            return Err(SessionStoreError::InvalidTransition);
+        }
+        match envelope.message_type {
+            0x15 => {
+                validate_evm_action_request_payload(payload)?;
+                let requester_id = copy_array(&payload[248..280])?;
+                let signer_id = copy_array(&payload[280..312])?;
+                require_evm_action_participants(&roster, requester_id, signer_id)?;
+                require_evm_action_phase(payload[6], current.phase())?;
+                if envelope.sender_id != requester_id {
+                    return Err(SessionStoreError::InvalidTransition);
+                }
+                self.require_unique_evm_action_request(
+                    current.session_id(),
+                    copy_array(&payload[24..56])?,
+                    envelope.message_digest,
+                )?;
+            }
+            0x16 => {
+                validate_evm_signed_action_payload(payload)?;
+                let request_digest = copy_array(&payload[352..384])?;
+                let request = self.load_evm_action_request_by_digest(request_digest)?;
+                require_evm_response_matches_request(
+                    payload,
+                    &request.payload,
+                    &request.message_digest,
+                )?;
+                require_evm_action_participants(&roster, request.requester_id, request.signer_id)?;
+                require_evm_action_phase(request.payload[6], current.phase())?;
+                if request.chain_id != envelope.chain_id
+                    || request.session_id != envelope.session_id
+                    || envelope.sender_id != request.signer_id
+                {
+                    return Err(SessionStoreError::InvalidTransition);
+                }
+                self.require_unique_evm_signed_action(
+                    current.session_id(),
+                    request_digest,
+                    envelope.message_digest,
+                )?;
+            }
+            _ => return Err(SessionStoreError::InvalidTransition),
+        }
+        require_transport_successor(current, envelope, direction, successor)
+    }
+
+    fn require_unique_evm_action_request(
+        &self,
+        session_id: [u8; 32],
+        action_id: [u8; 32],
+        candidate_digest: [u8; 32],
+    ) -> Result<(), SessionStoreError> {
+        self.scan_evm_transport_records(|record, envelope, payload| {
+            if envelope.session_id == session_id
+                && envelope.message_type == 0x15
+                && payload[24..56] == action_id
+                && envelope.message_digest != candidate_digest
+            {
+                return Err(SessionStoreError::Conflict);
+            }
+            let _ = record;
+            Ok(())
+        })
+    }
+
+    fn require_unique_evm_signed_action(
+        &self,
+        session_id: [u8; 32],
+        request_digest: [u8; 32],
+        candidate_digest: [u8; 32],
+    ) -> Result<(), SessionStoreError> {
+        self.scan_evm_transport_records(|_, envelope, payload| {
+            if envelope.session_id == session_id
+                && envelope.message_type == 0x16
+                && payload[352..384] == request_digest
+                && envelope.message_digest != candidate_digest
+            {
+                return Err(SessionStoreError::Conflict);
+            }
+            Ok(())
+        })
+    }
+
+    fn scan_evm_transport_records<F>(&self, mut visit: F) -> Result<(), SessionStoreError>
+    where
+        F: FnMut(
+            &TransportMessageRecordV1,
+            &ParsedTransportEnvelopeV1,
+            &[u8],
+        ) -> Result<(), SessionStoreError>,
+    {
+        let mut failure = None;
+        self.messages
+            .scan_lexicographic(|name, node| {
+                if node.node_type != ExpectedNodeType::RegularFile || name.starts_with('.') {
+                    return Err(LinuxCapabilityError::InvalidObject);
+                }
+                if !name.ends_with(".message") {
+                    return Ok(());
+                }
+                let outcome = (|| {
+                    let bytes = self.messages.read_bounded_file(
+                        &ValidatedComponent::registered(name)?,
+                        TRANSPORT_MESSAGE_MAX_LEN,
+                    )?;
+                    let record = TransportMessageRecordV1::from_bytes(&bytes)?;
+                    let (envelope, _) = self.authenticate_transport_record(name, &record)?;
+                    if matches!(envelope.message_type, 0x15 | 0x16) {
+                        visit(&record, &envelope, envelope.payload(&record.signed_bytes)?)?;
+                    }
+                    Ok::<(), SessionStoreError>(())
+                })();
+                if let Err(error) = outcome {
+                    failure = Some(error);
+                    return Err(LinuxCapabilityError::ExactBytesMismatch);
+                }
+                Ok(())
+            })
+            .map_err(|error| failure.take().unwrap_or_else(|| error.into()))?;
+        Ok(())
+    }
+
     /// Reauthenticates a live Store-issued signing request immediately before
     /// the independent identity keystore uses its opaque key reference.
     pub fn revalidate_prepared_outbound_dsc1(
@@ -7918,6 +8852,8 @@ impl ContractsSessionStoreV1 {
             // spelled here at the same time as the enum variant.
             OutboundDsc1AuthorityClassV1::OperationalFinalClaimV2 => SessionPhaseV1::ClaimBroadcast,
             OutboundDsc1AuthorityClassV1::OperationalAbort => SessionPhaseV1::Aborted,
+            OutboundDsc1AuthorityClassV1::EvmActionRequest
+            | OutboundDsc1AuthorityClassV1::EvmSignedAction => predecessor.phase(),
             _ => return Err(SessionStoreError::InvalidTransition),
         };
         let transcript_hash = accepted_transport_transcript_hash(
@@ -8574,7 +9510,10 @@ impl ContractsSessionStoreV1 {
     /// five-digest 160-byte payload is persisted immutably. Reissue after a
     /// restart accepts only the same templates, statement and recovery
     /// capsule; it never replaces the frozen authority.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+    )]
     pub fn prepare_operational_template_transport_authority(
         &self,
         trusted_chain_id: TrustedChainIdV1,
@@ -9981,6 +10920,44 @@ impl ContractsSessionStoreV1 {
             .map_err(|_| SessionStoreError::Quarantined)
     }
 
+    /// Reserves the sole live process owner for one V2 issuance. A stale weak
+    /// entry means the previous move-only handle was dropped before crossing a
+    /// durable boundary and can be replaced safely; an upgradeable entry proves
+    /// that another live handle still exists and must be refused.
+    fn reserve_claim_signing_process_owner_v2(
+        &self,
+        issuance_id: [u8; 32],
+    ) -> Result<Arc<()>, SessionStoreError> {
+        let mut owners = self
+            .process_claim_signing_authorities_v2
+            .lock()
+            .map_err(|_| SessionStoreError::StoreBusy)?;
+        if owners.get(&issuance_id).and_then(Weak::upgrade).is_some() {
+            return Err(SessionStoreError::ClaimSigningAuthorityUnavailable);
+        }
+        let owner = Arc::new(());
+        owners.insert(issuance_id, Arc::downgrade(&owner));
+        Ok(owner)
+    }
+
+    fn require_claim_signing_process_owner_v2(
+        &self,
+        issuance_id: [u8; 32],
+        expected: &Arc<()>,
+    ) -> Result<(), SessionStoreError> {
+        let owner = self
+            .process_claim_signing_authorities_v2
+            .lock()
+            .map_err(|_| SessionStoreError::StoreBusy)?
+            .get(&issuance_id)
+            .and_then(Weak::upgrade)
+            .ok_or(SessionStoreError::ClaimSigningAuthorityUnavailable)?;
+        if !Arc::ptr_eq(&owner, expected) {
+            return Err(SessionStoreError::ClaimSigningAuthorityUnavailable);
+        }
+        Ok(())
+    }
+
     fn issue_outbound_dsc1_request_locked(
         &self,
         input: OutboundDsc1RequestIssueV1<'_>,
@@ -10352,6 +11329,8 @@ impl ContractsSessionStoreV1 {
                 Ok(SessionPhaseV1::ClaimBroadcast)
             }
             OutboundDsc1AuthorityClassV1::OperationalAbort => Ok(SessionPhaseV1::Aborted),
+            OutboundDsc1AuthorityClassV1::EvmActionRequest
+            | OutboundDsc1AuthorityClassV1::EvmSignedAction => Ok(predecessor.phase()),
             _ => Err(SessionStoreError::InvalidTransition),
         }
     }
@@ -10476,6 +11455,51 @@ impl ContractsSessionStoreV1 {
                 if authenticated.authority_record_digest != request.authority_digest
                     || authenticated.chain_id != request.chain_id
                     || request.payload != authenticated.abort_binding_digest
+                {
+                    return Err(SessionStoreError::InvalidTransition);
+                }
+            }
+            OutboundDsc1AuthorityClassV1::EvmActionRequest => {
+                validate_evm_action_request_payload(&request.payload)?;
+                let predecessor =
+                    self.load_session_revision(request.session_id, request.predecessor_revision)?;
+                let expected = evm_action_request_authority_digest(
+                    &self._store_id,
+                    &request.session_id,
+                    predecessor.digest(),
+                    request
+                        .payload
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| SessionStoreError::Quarantined)?,
+                );
+                let roster = self.load_transport_roster(request.session_id)?;
+                if request.authority_digest != expected
+                    || request.sender_id != request.payload[248..280]
+                    || request.chain_id != roster.chain_id
+                {
+                    return Err(SessionStoreError::InvalidTransition);
+                }
+                require_evm_action_participants(
+                    &roster,
+                    copy_array(&request.payload[248..280])?,
+                    copy_array(&request.payload[280..312])?,
+                )?;
+                require_evm_action_phase(request.payload[6], predecessor.phase())?;
+            }
+            OutboundDsc1AuthorityClassV1::EvmSignedAction => {
+                validate_evm_signed_action_payload(&request.payload)?;
+                let linked = self
+                    .load_evm_action_request_by_digest(copy_array(&request.payload[352..384])?)?;
+                require_evm_response_matches_request(
+                    &request.payload,
+                    &linked.payload,
+                    &linked.message_digest,
+                )?;
+                if request.authority_digest != linked.record_digest
+                    || request.session_id != linked.session_id
+                    || request.chain_id != linked.chain_id
+                    || request.sender_id != linked.signer_id
                 {
                     return Err(SessionStoreError::InvalidTransition);
                 }
@@ -10642,6 +11666,16 @@ impl ContractsSessionStoreV1 {
                     authenticated.predecessor_transcript_hash,
                 )
             }
+            OutboundDsc1AuthorityClassV1::EvmActionRequest
+            | OutboundDsc1AuthorityClassV1::EvmSignedAction => (
+                request.sender_id,
+                self.transport_sequence_at_revision(
+                    request.session_id,
+                    request.sender_id,
+                    current.revision(),
+                )?,
+                current.transcript_hash(),
+            ),
             _ => return Err(SessionStoreError::InvalidTransition),
         };
         if request.sender_id != expected.0
@@ -13238,6 +14272,15 @@ impl ContractsSessionStoreV1 {
                 Err(error) => return Err(error),
             }
         }
+        if matches!(envelope.message_type, 0x15 | 0x16) {
+            return self.require_bounded_evm_action_transport_edge(
+                current,
+                envelope,
+                signed_bytes,
+                direction,
+                successor,
+            );
+        }
         if envelope.message_type == 0x13 {
             let authenticated =
                 self.authenticate_operational_abort_transport_authority(current.session_id())?;
@@ -13389,11 +14432,14 @@ impl ContractsSessionStoreV1 {
         // silently refused `0x12` and left the whole class dead, so collapsing
         // it back into a range would reintroduce the defect this arm exists to
         // prevent.
-        #[allow(clippy::manual_range_patterns)]
+        #[expect(
+            clippy::manual_range_patterns,
+            reason = "the exhaustive list keeps every message type explicit; a range once hid a silently refused 0x12"
+        )]
         match envelope.message_type {
             0x0c | 0x0d | 0x0e | 0x0f => {}
             0x01 | 0x02 | 0x03 | 0x04 | 0x05 | 0x06 | 0x07 | 0x08 | 0x09 | 0x0a | 0x0b | 0x10
-            | 0x11 | 0x12 | 0x13 | 0x14 => {
+            | 0x11 | 0x12 | 0x13 | 0x14 | 0x15 | 0x16 => {
                 // Handled by an arm above when it is a durable successor at
                 // all; `0x14` is inaccessible by design and never is.
                 return Err(SessionStoreError::InvalidTransition);
@@ -17502,7 +18548,10 @@ impl ContractsSessionStoreV1 {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+    )]
     fn audit_funding_authorized_signing_prefix(
         &self,
         session_id: [u8; 32],
@@ -18691,6 +19740,7 @@ impl ContractsSessionStoreV1 {
     /// a contradiction between two durable records and quarantines. That makes
     /// the pass idempotent: a second opening finds the revision present and
     /// equal, and writes nothing.
+    #[cfg(test)]
     fn recover_operational_final_claim_exposures(&self) -> Result<(), SessionStoreError> {
         for successor in self.plan_operational_final_claim_exposures()? {
             self.persist_session_record(&successor)?;
@@ -19699,6 +20749,7 @@ impl ContractsSessionStoreV1 {
         Ok(())
     }
 
+    #[cfg(test)]
     fn audit_consumptions(&self) -> Result<(), SessionStoreError> {
         self.audit_consumptions_inner(None)
     }
@@ -23740,7 +24791,10 @@ impl PostAnchorClaimAuthorizationRecordV1 {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+    )]
     fn new(
         state: PostAnchorClaimAuthorizationStateV1,
         session_id: [u8; 32],
@@ -24388,6 +25442,7 @@ pub struct ClaimSigningAuthorizationV2 {
     receiver_direction: DirectionV1,
     origin_direction: DirectionV1,
     open_instance_id: [u8; 32],
+    process_owner: Arc<()>,
 }
 
 impl ClaimSigningAuthorizationV2 {
@@ -24599,6 +25654,7 @@ pub struct ConsumedClaimSigningAuthorizationV2 {
     receiver_direction: DirectionV1,
     origin_direction: DirectionV1,
     _open_instance_id: [u8; 32],
+    process_owner: Arc<()>,
 }
 
 impl ConsumedClaimSigningAuthorizationV2 {
@@ -24952,6 +26008,7 @@ impl PostAnchorClaimAuthorizationRecordV2 {
     fn issued_capability_v2(
         &self,
         open_instance_id: [u8; 32],
+        process_owner: Arc<()>,
     ) -> Result<ClaimSigningAuthorizationV2, SessionStoreError> {
         if self.state != PostAnchorClaimAuthorizationStateV2::Issued {
             return Err(SessionStoreError::ClaimSigningAuthorityUnavailable);
@@ -24989,6 +26046,7 @@ impl PostAnchorClaimAuthorizationRecordV2 {
             receiver_direction: self.receiver_direction,
             origin_direction: self.origin_direction,
             open_instance_id,
+            process_owner,
         })
     }
 
@@ -24996,6 +26054,7 @@ impl PostAnchorClaimAuthorizationRecordV2 {
         &self,
         issued: &Self,
         open_instance_id: [u8; 32],
+        process_owner: Arc<()>,
     ) -> Result<ConsumedClaimSigningAuthorizationV2, SessionStoreError> {
         if self.state != PostAnchorClaimAuthorizationStateV2::Consumed
             || issued.state != PostAnchorClaimAuthorizationStateV2::Issued
@@ -25038,6 +26097,7 @@ impl PostAnchorClaimAuthorizationRecordV2 {
             receiver_direction: self.receiver_direction,
             origin_direction: self.origin_direction,
             _open_instance_id: open_instance_id,
+            process_owner,
         })
     }
 
@@ -25680,15 +26740,13 @@ impl ContractsSessionStoreV1 {
         SessionStoreError,
     > {
         self.audit_post_anchor_claim_authorization_state_v2(authorization.session_id)?;
-        if authorization._open_instance_id != self.open_instance_id
-            || !self
-                .process_claim_signing_authorities
-                .lock()
-                .map_err(|_| SessionStoreError::StoreBusy)?
-                .contains(&authorization.issuance_id)
-        {
+        if authorization._open_instance_id != self.open_instance_id {
             return Err(SessionStoreError::ClaimSigningAuthorityUnavailable);
         }
+        self.require_claim_signing_process_owner_v2(
+            authorization.issuance_id,
+            &authorization.process_owner,
+        )?;
         let issued = self.load_post_anchor_claim_authorization_v2(
             authorization.session_id,
             PostAnchorClaimAuthorizationStateV2::Issued,
@@ -25728,6 +26786,59 @@ impl ContractsSessionStoreV1 {
         self.issue_post_anchor_dom_claim_signing_v2_evidence(evidence, random_nonzero()?)
     }
 
+    /// Issues a productive V2 post-anchor capability or recovers the exact
+    /// unconsumed issuance after a crash at the publication boundary.
+    ///
+    /// Recovery still consumes a fresh [`VerifiedF7AnchorAuthorizationV2`].
+    /// Under the Store operation lock, every verifier-derived field is
+    /// reauthenticated against the live M.8 graph and compared with the
+    /// immutable issuance. A consumed issuance, changed anchor observation,
+    /// changed session head, or already-live process capability is refused;
+    /// no caller-supplied session identifier or durable digest participates.
+    pub fn issue_or_resume_post_anchor_dom_claim_signing_v2(
+        &self,
+        verified_anchors: VerifiedF7AnchorAuthorizationV2,
+    ) -> Result<ClaimSigningAuthorizationV2, SessionStoreError> {
+        let evidence = PostAnchorDomClaimSigningEvidenceV2::consume_verified(verified_anchors)?;
+        let _guard = self.operation_lock()?;
+        self.issue_or_resume_post_anchor_dom_claim_signing_v2_evidence(evidence)
+    }
+
+    fn issue_or_resume_post_anchor_dom_claim_signing_v2_evidence(
+        &self,
+        evidence: PostAnchorDomClaimSigningEvidenceV2,
+    ) -> Result<ClaimSigningAuthorizationV2, SessionStoreError> {
+        self.audit_post_anchor_claim_authorization_state_v2(evidence.session_id)?;
+        if self.post_anchor_claim_consumption_v2_exists(evidence.session_id)? {
+            return Err(SessionStoreError::ClaimSigningAuthorityUnavailable);
+        }
+        let issued = match self.load_post_anchor_claim_authorization_v2(
+            evidence.session_id,
+            PostAnchorClaimAuthorizationStateV2::Issued,
+        ) {
+            Ok(issued) => issued,
+            Err(SessionStoreError::SessionNotFound) => {
+                return self
+                    .issue_post_anchor_dom_claim_signing_v2_evidence(evidence, random_nonzero()?);
+            }
+            Err(error) => return Err(error),
+        };
+        let (current, gate, m8_funding_issuance_digest, operational_funding_commit_digest) =
+            self.authenticate_post_anchor_claim_evidence_v2(&evidence)?;
+        self.authenticate_post_anchor_claim_record_v2(&issued)?;
+        require_post_anchor_claim_evidence_matches_record_v2(&evidence, &issued)?;
+        if issued.bound_session_revision != current.revision()
+            || issued.bound_session_record_digest != *current.digest()
+            || issued.m8_funding_gate_digest != gate.digest
+            || issued.m8_funding_issuance_digest != m8_funding_issuance_digest
+            || issued.operational_funding_commit_digest != operational_funding_commit_digest
+        {
+            return Err(SessionStoreError::ClaimSigningAuthorityUnavailable);
+        }
+        let process_owner = self.reserve_claim_signing_process_owner_v2(issued.issuance_id)?;
+        issued.issued_capability_v2(self.open_instance_id, process_owner)
+    }
+
     fn issue_post_anchor_dom_claim_signing_v2_evidence(
         &self,
         evidence: PostAnchorDomClaimSigningEvidenceV2,
@@ -25765,16 +26876,11 @@ impl ContractsSessionStoreV1 {
             evidence.session_id,
             PostAnchorClaimAuthorizationStateV2::Issued,
         )?;
-        if durable.bytes != record.bytes
-            || !self
-                .process_claim_signing_authorities
-                .lock()
-                .map_err(|_| SessionStoreError::StoreBusy)?
-                .insert(record.issuance_id)
-        {
+        if durable.bytes != record.bytes {
             return Err(SessionStoreError::ClaimSigningAuthorityUnavailable);
         }
-        durable.issued_capability_v2(self.open_instance_id)
+        let process_owner = self.reserve_claim_signing_process_owner_v2(record.issuance_id)?;
+        durable.issued_capability_v2(self.open_instance_id, process_owner)
     }
 
     /// Rebuilds the exact post-anchor V2 evidence from the durable M.8/F7 V2
@@ -25876,6 +26982,22 @@ impl ContractsSessionStoreV1 {
         self.issue_post_anchor_dom_claim_signing_v2_evidence(evidence, random_nonzero()?)
     }
 
+    /// Evidence-only coverage of the crash-recovery branch above. Production
+    /// policy refuses this harness before any durable lookup.
+    #[cfg(any(test, feature = "evidence-only"))]
+    pub fn issue_or_resume_post_anchor_dom_claim_signing_v2_from_evidence_only_anchor(
+        &self,
+        session_id: [u8; 32],
+        facts: EvidenceOnlyPostAnchorAnchorFactsV2,
+    ) -> Result<ClaimSigningAuthorizationV2, SessionStoreError> {
+        if self.policy.profile() != BudgetPolicyProfileV1::EvidenceOnly {
+            return Err(SessionStoreError::PolicyProfile);
+        }
+        let _guard = self.operation_lock()?;
+        let evidence = self.evidence_only_post_anchor_evidence_v2(session_id, &facts)?;
+        self.issue_or_resume_post_anchor_dom_claim_signing_v2_evidence(evidence)
+    }
+
     /// Evidence-only entry into the exact productive V2 projection
     /// revalidation path, with the same seeded-facts discipline.
     #[cfg(any(test, feature = "evidence-only"))]
@@ -25902,7 +27024,8 @@ impl ContractsSessionStoreV1 {
     ///
     /// No issuance identifier, revision or digest is reminted, and a second
     /// live process-local handle for the same retained Store is rejected.
-    pub fn resume_post_anchor_dom_claim_signing_v2(
+    #[cfg(test)]
+    fn resume_post_anchor_dom_claim_signing_v2(
         &self,
         session_id: [u8; 32],
     ) -> Result<ClaimSigningAuthorizationV2, SessionStoreError> {
@@ -25916,15 +27039,8 @@ impl ContractsSessionStoreV1 {
             return Err(SessionStoreError::ClaimSigningAuthorityUnavailable);
         }
         self.authenticate_post_anchor_claim_record_v2(&issued)?;
-        if !self
-            .process_claim_signing_authorities
-            .lock()
-            .map_err(|_| SessionStoreError::StoreBusy)?
-            .insert(issued.issuance_id)
-        {
-            return Err(SessionStoreError::ClaimSigningAuthorityUnavailable);
-        }
-        issued.issued_capability_v2(self.open_instance_id)
+        let process_owner = self.reserve_claim_signing_process_owner_v2(issued.issuance_id)?;
+        issued.issued_capability_v2(self.open_instance_id, process_owner)
     }
 
     /// Durably consumes a V2 issuance before any claim nonce may be reserved
@@ -25939,15 +27055,14 @@ impl ContractsSessionStoreV1 {
         let _guard = self.operation_lock()?;
         self.audit_post_anchor_claim_authorization_state_v2(authorization.session_id)?;
         if authorization.open_instance_id != self.open_instance_id
-            || !self
-                .process_claim_signing_authorities
-                .lock()
-                .map_err(|_| SessionStoreError::StoreBusy)?
-                .contains(&authorization.issuance_id)
             || self.post_anchor_claim_consumption_v2_exists(authorization.session_id)?
         {
             return Err(SessionStoreError::ClaimSigningAuthorityUnavailable);
         }
+        self.require_claim_signing_process_owner_v2(
+            authorization.issuance_id,
+            &authorization.process_owner,
+        )?;
         let issued = self.load_post_anchor_claim_authorization_v2(
             authorization.session_id,
             PostAnchorClaimAuthorizationStateV2::Issued,
@@ -25998,7 +27113,11 @@ impl ContractsSessionStoreV1 {
         if durable.bytes != consumed.bytes {
             return Err(SessionStoreError::Quarantined);
         }
-        durable.consumed_capability_v2(&issued, self.open_instance_id)
+        durable.consumed_capability_v2(
+            &issued,
+            self.open_instance_id,
+            Arc::clone(&authorization.process_owner),
+        )
     }
 
     /// Rehydrates the same consumed V2 authority after a crash between durable
@@ -26025,15 +27144,8 @@ impl ContractsSessionStoreV1 {
         self.audit_post_anchor_claim_authorization_v2(&issued, Some(&consumed))?;
         let current = self.load_session_locked(session_id)?;
         self.require_live_post_anchor_claim_session_v2(&issued, &current)?;
-        if !self
-            .process_claim_signing_authorities
-            .lock()
-            .map_err(|_| SessionStoreError::StoreBusy)?
-            .insert(issued.issuance_id)
-        {
-            return Err(SessionStoreError::ClaimSigningAuthorityUnavailable);
-        }
-        consumed.consumed_capability_v2(&issued, self.open_instance_id)
+        let process_owner = self.reserve_claim_signing_process_owner_v2(issued.issuance_id)?;
+        consumed.consumed_capability_v2(&issued, self.open_instance_id, process_owner)
     }
 
     /// Reauthenticates a live consumed productive V2 post-anchor capability.
@@ -29167,6 +30279,8 @@ enum OutboundDsc1AuthorityClassV1 {
     OperationalM8ReadyToFundV2 = 19,
     PostAnchorClaimPreSignatureV2 = 20,
     OperationalFinalClaimV2 = 21,
+    EvmActionRequest = 22,
+    EvmSignedAction = 23,
 }
 
 impl OutboundDsc1AuthorityClassV1 {
@@ -29191,6 +30305,8 @@ impl OutboundDsc1AuthorityClassV1 {
             Self::OperationalM8ReadyToFund | Self::OperationalM8ReadyToFundV2 => 0x11,
             Self::OperationalFinalClaimV2 => 0x12,
             Self::OperationalAbort => 0x13,
+            Self::EvmActionRequest => 0x15,
+            Self::EvmSignedAction => 0x16,
         }
     }
 
@@ -29280,6 +30396,8 @@ impl TryFrom<u8> for OutboundDsc1AuthorityClassV1 {
             19 => Ok(Self::OperationalM8ReadyToFundV2),
             20 => Ok(Self::PostAnchorClaimPreSignatureV2),
             21 => Ok(Self::OperationalFinalClaimV2),
+            22 => Ok(Self::EvmActionRequest),
+            23 => Ok(Self::EvmSignedAction),
             _ => Err(SessionStoreError::Quarantined),
         }
     }
@@ -30801,7 +31919,10 @@ impl ReconciledOutboundDsc1RecordV1 {
 }
 
 impl SigningSessionBindingRecordV1 {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+    )]
     fn new(
         trusted_chain_id: &TrustedChainIdV1,
         session: &SessionRecordV1,
@@ -31038,7 +32159,7 @@ impl ParsedTransportEnvelopeV1 {
         if bytes.len() < FIXED
             || bytes[..4] != *b"DSC1"
             || u16::from_le_bytes(copy_array(&bytes[4..6])?) != 1
-            || !(1..=0x14).contains(&bytes[6])
+            || !(1..=0x16).contains(&bytes[6])
             || bytes[7] != 0
         {
             return Err(SessionStoreError::Canonical);
@@ -31056,6 +32177,7 @@ impl ParsedTransportEnvelopeV1 {
         {
             return Err(SessionStoreError::Canonical);
         }
+        validate_evm_action_payload(bytes[6], &bytes[148..unsigned_len])?;
         let mut signature = [0; 65];
         signature.copy_from_slice(&bytes[unsigned_len..]);
         let chain_id = copy_array(&bytes[8..40])?;
@@ -31177,7 +32299,7 @@ impl TransportMessageRecordV1 {
             || &bytes[..8] != MESSAGE_RECORD_MAGIC
             || u16::from_le_bytes(copy_array(&bytes[8..10])?) != FORMAT_VERSION
             || bytes[10] > 1
-            || !(1..=0x14).contains(&bytes[11])
+            || !(1..=0x16).contains(&bytes[11])
             || bytes[13..16] != [0; 3]
             || bytes[200..208] != [0; 8]
         {
@@ -36094,7 +37216,6 @@ fn signing_payload_participant_index(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn derive_post_anchor_claim_pre_signature<B: SigningSemanticBindingAccessV1>(
     chain_id: &[u8; 32],
     session_id: [u8; 32],
@@ -36628,7 +37749,10 @@ fn validate_signing_roster_and_kernel_ancestry(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+)]
 fn validate_operational_signing_inputs(
     trusted_chain_id: &TrustedChainIdV1,
     session: &SessionRecordV1,
@@ -36684,7 +37808,10 @@ fn validate_operational_signing_inputs(
 // Eight arguments, each an independent authority this function cross-checks
 // against the others. Bundling them into a struct would move the checks off
 // the call sites without removing one of them.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+)]
 fn validate_post_anchor_signing_inputs(
     trusted_chain_id: &TrustedChainIdV1,
     session: &SessionRecordV1,
@@ -36738,7 +37865,8 @@ fn transport_transcript_hash(
 /// # This table shadows a closed registry that lives in another crate
 ///
 /// `dom-scriptless-transport` publishes `MessageTypeV1` — a closed
-/// `#[repr(u8)]` enum of the twenty Master 8.3 types `0x01..=0x14`, with its
+/// `#[repr(u8)]` enum of the legacy Master 8.3 types `0x01..=0x14` and the
+/// role-scoped EVM extension `0x15..=0x16`, with its
 /// own `payload_cap()` and `accepts_phase()`. This Store deliberately does not
 /// depend on that crate, so it carries `u8` at every message-type decision and
 /// four private tables shadow methods of that enum: this one,
@@ -36777,8 +37905,137 @@ fn transport_payload_cap(message_type: u8) -> Option<usize> {
         0x04 | 0x08 | 0x09 | 0x0b | 0x0d | 0x0e | 0x0f => Some(8 * 1024),
         0x0a => Some(16 * 1024),
         0x10 | 0x12 => Some(512 * 1024),
+        0x15 => Some(EVM_ACTION_REQUEST_PAYLOAD_LEN),
+        0x16 => Some(EVM_SIGNED_ACTION_PAYLOAD_PREFIX_LEN + EVM_SIGNED_ACTION_RAW_MAX_LEN),
         _ => None,
     }
+}
+
+fn validate_evm_action_payload(message_type: u8, payload: &[u8]) -> Result<(), SessionStoreError> {
+    match message_type {
+        0x15 => validate_evm_action_request_payload(payload),
+        0x16 => validate_evm_signed_action_payload(payload).map(|_| ()),
+        _ => Ok(()),
+    }
+}
+
+fn validate_evm_action_request_payload(payload: &[u8]) -> Result<(), SessionStoreError> {
+    if payload.len() != EVM_ACTION_REQUEST_PAYLOAD_LEN
+        || &payload[..4] != b"EVRQ"
+        || u16::from_le_bytes(copy_array(&payload[4..6])?) != 1
+        || !matches!(payload[6], 1..=3)
+        || !matches!(payload[7], 1..=2)
+        || (payload[6] == 2) != (payload[7] == 2)
+        || u64::from_le_bytes(copy_array(&payload[8..16])?) == 0
+        || u64::from_le_bytes(copy_array(&payload[16..24])?) == 0
+        || payload[24..312]
+            .chunks_exact(32)
+            .any(|value| value == [0; 32])
+        || payload[248..280] == payload[280..312]
+        || payload[312..332] == [0; 20]
+        || payload[332..352] == [0; 20]
+    {
+        return Err(SessionStoreError::Canonical);
+    }
+    Ok(())
+}
+
+fn validate_evm_signed_action_payload(payload: &[u8]) -> Result<&[u8], SessionStoreError> {
+    if payload.len() < EVM_SIGNED_ACTION_PAYLOAD_PREFIX_LEN
+        || payload.len() > EVM_SIGNED_ACTION_PAYLOAD_PREFIX_LEN + EVM_SIGNED_ACTION_RAW_MAX_LEN
+        || &payload[..4] != b"EVRS"
+    {
+        return Err(SessionStoreError::Canonical);
+    }
+    let mut request = [0; EVM_ACTION_REQUEST_PAYLOAD_LEN];
+    request[..4].copy_from_slice(b"EVRQ");
+    request[4..6].copy_from_slice(&payload[4..6]);
+    request[6..].copy_from_slice(&payload[6..352]);
+    validate_evm_action_request_payload(&request)?;
+    if payload[352..448]
+        .chunks_exact(32)
+        .any(|value| value == [0; 32])
+    {
+        return Err(SessionStoreError::Canonical);
+    }
+    let raw_len = u32::from_le_bytes(copy_array(&payload[448..452])?) as usize;
+    let expected = EVM_SIGNED_ACTION_PAYLOAD_PREFIX_LEN
+        .checked_add(raw_len)
+        .ok_or(SessionStoreError::Canonical)?;
+    if raw_len == 0 || expected != payload.len() {
+        return Err(SessionStoreError::Canonical);
+    }
+    let raw = &payload[EVM_SIGNED_ACTION_PAYLOAD_PREFIX_LEN..];
+    if payload[384..416] != tagged_hash("DOM:evm-signed-action-raw:v1", raw) {
+        return Err(SessionStoreError::Canonical);
+    }
+    Ok(raw)
+}
+
+fn require_evm_response_matches_request(
+    response: &[u8],
+    request: &[u8; EVM_ACTION_REQUEST_PAYLOAD_LEN],
+    request_message_digest: &[u8; 32],
+) -> Result<(), SessionStoreError> {
+    validate_evm_signed_action_payload(response)?;
+    if response[4..352] != request[4..352] || response[352..384] != *request_message_digest {
+        return Err(SessionStoreError::InvalidTransition);
+    }
+    Ok(())
+}
+
+fn require_evm_action_phase(action: u8, phase: SessionPhaseV1) -> Result<(), SessionStoreError> {
+    let valid = match action {
+        1 => matches!(
+            phase,
+            SessionPhaseV1::RefundSigned | SessionPhaseV1::FundingAuthorized
+        ),
+        2 => matches!(
+            phase,
+            SessionPhaseV1::FundingConfirmed | SessionPhaseV1::ClaimBroadcast
+        ),
+        3 => phase == SessionPhaseV1::RefundEligible,
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(SessionStoreError::InvalidTransition)
+    }
+}
+
+fn require_evm_action_participants(
+    roster: &TransportRosterRecordV1,
+    requester_id: [u8; 32],
+    signer_id: [u8; 32],
+) -> Result<(), SessionStoreError> {
+    if requester_id == signer_id
+        || !roster
+            .participants
+            .iter()
+            .any(|participant| participant.participant_id == requester_id)
+        || !roster
+            .participants
+            .iter()
+            .any(|participant| participant.participant_id == signer_id)
+    {
+        return Err(SessionStoreError::InvalidTransition);
+    }
+    Ok(())
+}
+
+fn evm_action_request_authority_digest(
+    store_id: &[u8; 32],
+    session_id: &[u8; 32],
+    predecessor_digest: &[u8; 32],
+    payload: &[u8; EVM_ACTION_REQUEST_PAYLOAD_LEN],
+) -> [u8; 32] {
+    let mut bytes = Vec::with_capacity(96 + payload.len());
+    bytes.extend_from_slice(store_id);
+    bytes.extend_from_slice(session_id);
+    bytes.extend_from_slice(predecessor_digest);
+    bytes.extend_from_slice(payload);
+    tagged_hash("DOM:contracts-evm-action-request-authority:v1", &bytes)
 }
 
 fn early_transport_expected_item(
@@ -37039,6 +38296,7 @@ fn derived_transport_phase(
         0x12 => SessionPhaseV1::ClaimBroadcast,
         0x13 => SessionPhaseV1::Aborted,
         0x14 => current.phase(),
+        0x15 | 0x16 => current.phase(),
         _ => return Err(SessionStoreError::Canonical),
     };
     Ok(phase)
@@ -37205,6 +38463,16 @@ fn transport_message_accepts_phase(message_type: u8, phase: SessionPhaseV1) -> b
         0x12 => phase == SessionPhaseV1::ClaimBroadcast,
         0x13 => phase == SessionPhaseV1::Aborted,
         0x14 => true,
+        0x15 | 0x16 => matches!(
+            phase,
+            SessionPhaseV1::RefundSigned
+                | SessionPhaseV1::FundingAuthorized
+                | SessionPhaseV1::FundingBroadcast
+                | SessionPhaseV1::FundingConfirmed
+                | SessionPhaseV1::ClaimBroadcast
+                | SessionPhaseV1::RefundEligible
+                | SessionPhaseV1::RefundBroadcast
+        ),
         _ => false,
     }
 }
@@ -37215,6 +38483,9 @@ fn transport_phase_movement(
     message_type: u8,
 ) -> bool {
     if message_type == 0x14 {
+        return current == next;
+    }
+    if matches!(message_type, 0x15 | 0x16) {
         return current == next;
     }
     if message_type == 0x13 {
@@ -37468,7 +38739,7 @@ fn early_transport_context_commitment(
 fn encode_canonical_unsigned_dsc1(
     fields: &OutboundDsc1UnsignedFieldsV1<'_>,
 ) -> Result<Vec<u8>, SessionStoreError> {
-    if !(1..=0x14).contains(&fields.message_type)
+    if !(1..=0x16).contains(&fields.message_type)
         || fields.chain_id == [0; 32]
         || fields.session_id == [0; 32]
         || fields.sender_id == [0; 32]
@@ -37863,7 +39134,10 @@ pub(crate) mod evidence_only_staging {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+    )]
     pub(super) fn transport_signed_bytes(
         key: &SecretKey,
         chain_id: [u8; 32],
@@ -40392,7 +41666,10 @@ mod tests {
             })
         }
 
-        #[allow(clippy::too_many_arguments)]
+        #[expect(
+            clippy::too_many_arguments,
+            reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+        )]
         fn alternate_reveal(
             &self,
             context_commitment: [u8; 32],
@@ -40821,6 +42098,53 @@ mod tests {
     }
 
     #[test]
+    fn prepared_resumed_production_open_is_binding_and_root_name_strict(
+    ) -> Result<(), Box<dyn Error>> {
+        let temporary = TestDirectory::create()?;
+        let production = policy(BudgetPolicyProfileV1::ProductionRatified)?;
+        drop(ContractsSessionStoreV1::resume_create_production(
+            temporary.capability()?,
+            "contracts",
+            production.clone(),
+            RESUMABLE_CREATION_BINDING,
+        )?);
+
+        drop(
+            ContractsSessionStoreV1::prepare_open_resumed_production(
+                temporary.capability()?,
+                "contracts",
+                production.clone(),
+                RESUMABLE_CREATION_BINDING,
+            )?
+            .finish()?,
+        );
+        assert!(matches!(
+            ContractsSessionStoreV1::prepare_open_resumed_production(
+                temporary.capability()?,
+                "contracts",
+                production.clone(),
+                [0x92; 32],
+            ),
+            Err(SessionStoreError::Quarantined)
+        ));
+
+        fs::rename(
+            temporary.path().join("contracts"),
+            temporary.path().join("transplanted"),
+        )?;
+        assert!(matches!(
+            ContractsSessionStoreV1::prepare_open_resumed_production(
+                temporary.capability()?,
+                "transplanted",
+                production,
+                RESUMABLE_CREATION_BINDING,
+            ),
+            Err(SessionStoreError::Quarantined)
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn production_resume_recovers_every_published_creation_write() -> Result<(), Box<dyn Error>> {
         let production = policy(BudgetPolicyProfileV1::ProductionRatified)?;
         for cut in [
@@ -41041,9 +42365,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn prepared_open_many_stable_finals_keeps_finish_fd_usage_bounded() -> Result<(), Box<dyn Error>>
-    {
+    fn assert_prepared_open_many_stable_finals_keeps_finish_fd_usage_bounded(
+    ) -> Result<(), Box<dyn Error>> {
         use super::super::FILE_MODE;
         use std::sync::atomic::Ordering;
 
@@ -41103,8 +42426,40 @@ mod tests {
     }
 
     #[test]
+    fn prepared_open_many_stable_finals_keeps_finish_fd_usage_bounded() -> Result<(), Box<dyn Error>>
+    {
+        // `/proc/self/fd` is process-global. Measuring it in the main parallel
+        // test process makes unrelated Store tests look like descriptors
+        // retained by `PreparedContractsSessionStoreOpenV1`. Use a dedicated
+        // process so the bound measures only this opening and its harness.
+        let output = Command::new(std::env::current_exe()?)
+            .arg("--ignored")
+            .arg("--exact")
+            .arg("--nocapture")
+            .arg("runtime::linux::session_store::tests::prepared_open_many_stable_finals_fd_child")
+            .output()?;
+        if !output.status.success() {
+            return Err(Box::new(std::io::Error::other(format!(
+                "isolated prepared-open FD bound failed: status={:?}, stdout=<<{}>>, stderr=<<{}>>",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            ))));
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "isolated subprocess helper for the process-global FD census"]
+    fn prepared_open_many_stable_finals_fd_child() -> Result<(), Box<dyn Error>> {
+        assert_prepared_open_many_stable_finals_keeps_finish_fd_usage_bounded()
+    }
+
+    #[test]
     fn prepared_open_refuses_staging_path_swap_before_recovery_apply() -> Result<(), Box<dyn Error>>
     {
+        use super::super::FILE_MODE;
+
         let temporary = TestDirectory::create()?;
         let production = policy(BudgetPolicyProfileV1::ProductionRatified)?;
         drop(ContractsSessionStoreV1::resume_create_production(
@@ -41118,18 +42473,29 @@ mod tests {
         let staging = records.join(format!(".{final_name}.staging"));
         let displaced = records.join("displaced-staging");
         let planted_path = records.join("planted-staging");
-        let original = b"exact-retained-staging";
+        // A prepared opening only retains a staging source that could have
+        // been emitted by the Store. Use a canonical crash-cut session record;
+        // arbitrary bytes are correctly quarantined during preparation and
+        // cannot establish the TOCTOU precondition this test needs.
+        let original =
+            record_with_session_and_terms_hash([0x81; 32], SessionPhaseV1::Created, [0x82; 32])?
+                .as_bytes()
+                .to_vec();
         let planted = b"same-uid-planted-staging";
-        std::fs::write(&staging, original)?;
-        std::fs::write(&planted_path, planted)?;
-        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o400))?;
-        std::fs::set_permissions(&planted_path, std::fs::Permissions::from_mode(0o400))?;
+        std::fs::write(&staging, &original)?;
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(FILE_MODE))?;
 
         let prepared = ContractsSessionStoreV1::prepare_open_production(
             temporary.capability()?,
             "contracts",
             production,
         )?;
+        // Plant the replacement only after the prepared opening has captured
+        // and authenticated the canonical staging inode. An unregistered file
+        // present before `prepare_open` is correctly rejected by the inventory
+        // gate and would not exercise the intended post-prepare path swap.
+        std::fs::write(&planted_path, planted)?;
+        std::fs::set_permissions(&planted_path, std::fs::Permissions::from_mode(FILE_MODE))?;
         std::fs::rename(&staging, &displaced)?;
         std::fs::rename(&planted_path, &staging)?;
         assert!(matches!(
@@ -41502,7 +42868,7 @@ mod tests {
     #[test]
     fn transport_payload_caps_match_the_closed_message_registry() {
         // (type, cap in dom-scriptless-transport::MessageTypeV1::payload_cap)
-        let registry: [(u8, usize); 20] = [
+        let registry: [(u8, usize); 22] = [
             (0x01, 8 * 1024),   // Offer
             (0x02, 8 * 1024),   // Accept
             (0x03, 4 * 1024),   // ShareCommit
@@ -41523,6 +42889,11 @@ mod tests {
             (0x12, 512 * 1024), // FinalClaim
             (0x13, 32),         // Abort == ABORT_PAYLOAD_LEN_V1
             (0x14, 4 * 1024),   // Ack
+            (0x15, EVM_ACTION_REQUEST_PAYLOAD_LEN),
+            (
+                0x16,
+                EVM_SIGNED_ACTION_PAYLOAD_PREFIX_LEN + EVM_SIGNED_ACTION_RAW_MAX_LEN,
+            ),
         ];
         for (message_type, expected) in registry {
             assert_eq!(
@@ -41531,8 +42902,8 @@ mod tests {
                 "payload cap for message type {message_type:#04x} left the registry"
             );
         }
-        // The registry is closed at twenty types, and so is this table.
-        for message_type in [0x00_u8, 0x15, 0x7f, 0xff] {
+        // The registry is closed at twenty-two types, and so is this table.
+        for message_type in [0x00_u8, 0x17, 0x7f, 0xff] {
             assert_eq!(transport_payload_cap(message_type), None);
         }
         // The abort ceiling and the exact-length rule the acceptance paths
@@ -47286,9 +48657,27 @@ mod tests {
                 PostAnchorClaimAuthorizationStateV2::Issued,
             )?;
             if cut == "post-anchor-claim-v2-after-issuance-persist" {
-                // Reissue is byte-identical and no second issuance is minted.
-                let resumed = reopened.resume_post_anchor_dom_claim_signing_v2(session_id)?;
-                assert_eq!(resumed.issuance_record_digest(), &durable_issued.digest);
+                // A complete F7 retry recovers the byte-identical issuance;
+                // it does not require a caller-shaped session/digest and does
+                // not mint a replacement. This is the Store half of the
+                // composition-root retry that also receives a fresh BTC pair
+                // from the same newly verified aggregate.
+                let recovered = reopened
+                    .issue_or_resume_post_anchor_dom_claim_signing_v2_from_evidence_only_anchor(
+                        session_id,
+                        crypto_real_post_anchor_v2_anchor_facts(100),
+                    )?;
+                assert_eq!(recovered.issuance_record_digest(), &durable_issued.digest);
+                assert_eq!(recovered.session_id(), &session_id);
+                assert_eq!(
+                    reopened
+                        .issue_or_resume_post_anchor_dom_claim_signing_v2_from_evidence_only_anchor(
+                            session_id,
+                            crypto_real_post_anchor_v2_anchor_facts(100),
+                        )
+                        .err(),
+                    Some(SessionStoreError::ClaimSigningAuthorityUnavailable)
+                );
                 assert_eq!(
                     reopened
                         .issue_post_anchor_dom_claim_signing_v2_from_evidence_only_anchor(
@@ -47312,6 +48701,15 @@ mod tests {
             assert_eq!(
                 reopened
                     .resume_post_anchor_dom_claim_signing_v2(session_id)
+                    .err(),
+                Some(SessionStoreError::ClaimSigningAuthorityUnavailable)
+            );
+            assert_eq!(
+                reopened
+                    .issue_or_resume_post_anchor_dom_claim_signing_v2_from_evidence_only_anchor(
+                        session_id,
+                        crypto_real_post_anchor_v2_anchor_facts(100),
+                    )
                     .err(),
                 Some(SessionStoreError::ClaimSigningAuthorityUnavailable)
             );
@@ -47512,6 +48910,48 @@ mod tests {
         assert_eq!(advanced.revision(), current.revision() + 1);
         assert_eq!(advanced.chain().tip_height, 101);
         store.revalidate_consumed_post_anchor_dom_claim_signing_v2(&consumed)?;
+        Ok(())
+    }
+
+    #[test]
+    fn post_anchor_v2_dropped_process_handle_can_be_recovered_without_duplication(
+    ) -> Result<(), Box<dyn Error>> {
+        let temporary = TestDirectory::create()?;
+        let evidence_policy = policy(BudgetPolicyProfileV1::EvidenceOnly)?;
+        let CryptoRealPostAnchorV2BaseFixture {
+            store, confirmed, ..
+        } = crypto_real_post_anchor_v2_base_fixture(&temporary, &evidence_policy)?;
+        let session_id = confirmed.session_id();
+        let first = store
+            .issue_or_resume_post_anchor_dom_claim_signing_v2_from_evidence_only_anchor(
+                session_id,
+                crypto_real_post_anchor_v2_anchor_facts(100),
+            )?;
+        let issuance_record_digest = *first.issuance_record_digest();
+
+        // While the first process owner is alive, a fresh verifier result
+        // cannot create a second handle.
+        assert_eq!(
+            store
+                .issue_or_resume_post_anchor_dom_claim_signing_v2_from_evidence_only_anchor(
+                    session_id,
+                    crypto_real_post_anchor_v2_anchor_facts(100),
+                )
+                .err(),
+            Some(SessionStoreError::ClaimSigningAuthorityUnavailable)
+        );
+
+        // Dropping the sole handle leaves only a non-upgradeable weak slot. A
+        // fresh verifier result recovers the byte-identical durable issuance;
+        // it does not mint a replacement or require a process restart.
+        drop(first);
+        let recovered = store
+            .issue_or_resume_post_anchor_dom_claim_signing_v2_from_evidence_only_anchor(
+                session_id,
+                crypto_real_post_anchor_v2_anchor_facts(100),
+            )?;
+        assert_eq!(recovered.issuance_record_digest(), &issuance_record_digest);
+        assert_eq!(recovered.session_id(), &session_id);
         Ok(())
     }
 
@@ -51421,13 +52861,13 @@ mod tests {
             "sessions",
             evidence_policy,
         )?;
-        assert!(matches!(
+        // Once a valid conflict has been durably retained, redelivering the
+        // original must not recreate ACK authority. The Store reports the
+        // terminal equivocation on every later opening.
+        assert_eq!(
             reopened.accept_transport_message_derived(&accepted)?,
-            DurableTransportOutcomeV1::Accepted(DurableTransportReceiptV1 {
-                duplicate: true,
-                ..
-            })
-        ));
+            DurableTransportOutcomeV1::EquivocationPersisted
+        );
         assert!(reopened
             .prepare_operational_bp_transport_authority(
                 fixture.trusted_chain_id,
@@ -51754,13 +53194,12 @@ mod tests {
             "sessions",
             evidence_policy,
         )?;
-        assert!(matches!(
+        // Equivocation is terminal across restart: the original message stays
+        // authenticated evidence, but it cannot regain duplicate-ACK power.
+        assert_eq!(
             reopened.accept_transport_message_derived(&accepted)?,
-            DurableTransportOutcomeV1::Accepted(DurableTransportReceiptV1 {
-                duplicate: true,
-                ..
-            })
-        ));
+            DurableTransportOutcomeV1::EquivocationPersisted
+        );
         assert!(reopened
             .prepare_operational_template_transport_authority(
                 fixture.trusted_chain_id,
@@ -58246,7 +59685,10 @@ mod tests {
         // CONTAINS — the retained directory and lock handles — and the reopen
         // below fails if those are still held. Removing it would leave the
         // store alive to the end of scope and break the test it belongs to.
-        #[allow(clippy::drop_non_drop)]
+        #[expect(
+            clippy::drop_non_drop,
+            reason = "the explicit drop releases the retained directory and lock handles before the reopen"
+        )]
         {
             drop(durable);
             drop(store);
@@ -58287,7 +59729,10 @@ mod tests {
         ));
         // Same as above: dropping releases the contained handles, which is
         // what the reopen requires.
-        #[allow(clippy::drop_non_drop)]
+        #[expect(
+            clippy::drop_non_drop,
+            reason = "the explicit drop releases the retained directory and lock handles before the reopen"
+        )]
         drop(custody);
         drop(reopened);
 
@@ -58329,7 +59774,10 @@ mod tests {
         ));
         // Same as above: dropping releases the contained handles, which is
         // what the reopen requires.
-        #[allow(clippy::drop_non_drop)]
+        #[expect(
+            clippy::drop_non_drop,
+            reason = "the explicit drop releases the retained directory and lock handles before the reopen"
+        )]
         drop(_durable);
         drop(store);
 
@@ -58604,6 +60052,204 @@ mod tests {
         )
     }
 
+    fn evm_action_request_payload(
+        requester_id: [u8; 32],
+        signer_id: [u8; 32],
+    ) -> [u8; EVM_ACTION_REQUEST_PAYLOAD_LEN] {
+        let mut payload = [0; EVM_ACTION_REQUEST_PAYLOAD_LEN];
+        payload[..4].copy_from_slice(b"EVRQ");
+        payload[4..6].copy_from_slice(&1_u16.to_le_bytes());
+        payload[6] = 1;
+        payload[7] = 1;
+        payload[8..16].copy_from_slice(&7_u64.to_le_bytes());
+        payload[16..24].copy_from_slice(&11_155_111_u64.to_le_bytes());
+        for (range, value) in [
+            (24..56, [0x41; 32]),
+            (56..88, [0x42; 32]),
+            (88..120, [0x43; 32]),
+            (120..152, [0x44; 32]),
+            (152..184, [0x45; 32]),
+            (184..216, [0x46; 32]),
+            (216..248, [0x47; 32]),
+            (248..280, requester_id),
+            (280..312, signer_id),
+        ] {
+            payload[range].copy_from_slice(&value);
+        }
+        payload[312..332].copy_from_slice(&[0x48; 20]);
+        payload[332..352].copy_from_slice(&[0x49; 20]);
+        payload
+    }
+
+    fn evm_signed_action_payload(
+        request: &[u8; EVM_ACTION_REQUEST_PAYLOAD_LEN],
+        request_message_digest: [u8; 32],
+        raw: &[u8],
+    ) -> Result<Vec<u8>, SessionStoreError> {
+        let raw_len = u32::try_from(raw.len()).map_err(|_| SessionStoreError::Canonical)?;
+        let mut payload = vec![0; EVM_SIGNED_ACTION_PAYLOAD_PREFIX_LEN + raw.len()];
+        payload[..4].copy_from_slice(b"EVRS");
+        payload[4..352].copy_from_slice(&request[4..352]);
+        payload[352..384].copy_from_slice(&request_message_digest);
+        payload[384..416].copy_from_slice(&tagged_hash("DOM:evm-signed-action-raw:v1", raw));
+        payload[416..448].copy_from_slice(&[0x4a; 32]);
+        payload[448..452].copy_from_slice(&raw_len.to_le_bytes());
+        payload[452..].copy_from_slice(raw);
+        validate_evm_signed_action_payload(&payload)?;
+        Ok(payload)
+    }
+
+    #[test]
+    fn evm_action_request_and_signed_response_are_durable_exact_and_restartable(
+    ) -> Result<(), Box<dyn Error>> {
+        let requester_directory = TestDirectory::create()?;
+        let signer_directory = TestDirectory::create()?;
+        let evidence_policy = policy(BudgetPolicyProfileV1::EvidenceOnly)?;
+        let (requester_store, initial, requester_fixture) = operational_abort_store(
+            &requester_directory,
+            &evidence_policy,
+            SessionPhaseV1::RefundSigned,
+        )?;
+        let (signer_store, _, signer_fixture) = operational_abort_store(
+            &signer_directory,
+            &evidence_policy,
+            SessionPhaseV1::RefundSigned,
+        )?;
+        let requester_id = requester_fixture.participant_ids[0];
+        let signer_id = requester_fixture.participant_ids[1];
+        assert_eq!(
+            signer_fixture.participant_ids,
+            requester_fixture.participant_ids
+        );
+        requester_store.bind_local_transport_signer(initial.session_id(), [0x31; 32])?;
+        signer_store.bind_local_transport_signer(initial.session_id(), [0x32; 32])?;
+
+        let request_payload = evm_action_request_payload(requester_id, signer_id);
+        let request = requester_store
+            .prepare_evm_action_request_dsc1_signing_request(initial.session_id(), request_payload)?
+            .ok_or(SessionStoreError::Quarantined)?;
+        assert_eq!(request.message_type(), 0x15);
+        let request_signed = sign_store_issued_request(&requester_fixture, &request)?;
+        let request_digest = *request.unsigned_message_digest();
+        let committed_request =
+            requester_store.commit_prepared_outbound_dsc1(request, &request_signed)?;
+        assert_eq!(committed_request.message_digest(), &request_digest);
+        let accepted_request =
+            signer_store.accept_evm_action_request_transport_message(&request_signed)?;
+        assert_eq!(accepted_request.message_digest(), &request_digest);
+
+        let response_payload =
+            evm_signed_action_payload(&request_payload, request_digest, &[0x02, 0x81, 0x01, 0x80])?;
+        let response = signer_store
+            .prepare_evm_signed_action_dsc1_signing_request(&accepted_request, &response_payload)?
+            .ok_or(SessionStoreError::Quarantined)?;
+        assert_eq!(response.message_type(), 0x16);
+        let response_sequence = response.sequence();
+        let response_signed = sign_store_issued_request(&signer_fixture, &response)?;
+        let committed_response =
+            signer_store.commit_prepared_outbound_dsc1(response, &response_signed)?;
+        let accepted_response =
+            requester_store.accept_evm_signed_action_transport_message(&response_signed)?;
+        assert_eq!(
+            accepted_response.signed_raw_transaction(),
+            [0x02, 0x81, 0x01, 0x80]
+        );
+        assert_eq!(
+            accepted_response.response_message_digest(),
+            committed_response.message_digest()
+        );
+        let response_digest = *accepted_response.response_message_digest();
+
+        let duplicate =
+            requester_store.accept_evm_signed_action_transport_message(&response_signed)?;
+        assert_eq!(duplicate.response_message_digest(), &response_digest);
+        let import = requester_store.take_evm_signed_action_for_import(accepted_response)?;
+        assert_eq!(import.response_message_digest(), &response_digest);
+        assert_eq!(import.request_payload(), &request_payload);
+        assert!(matches!(
+            requester_store.take_evm_signed_action_for_import(duplicate),
+            Err(SessionStoreError::InvalidTransition)
+        ));
+        drop(requester_store);
+        drop(signer_store);
+
+        let reopened_requester = ContractsSessionStoreV1::open_evidence_only(
+            requester_directory.capability()?,
+            "sessions",
+            evidence_policy.clone(),
+        )?;
+        let reopened_signer = ContractsSessionStoreV1::open_evidence_only(
+            signer_directory.capability()?,
+            "sessions",
+            evidence_policy,
+        )?;
+        let resumed_request =
+            reopened_signer.resume_evm_action_request(initial.session_id(), requester_id, 0)?;
+        assert_eq!(resumed_request.message_digest(), &request_digest);
+        let resumed_request_without_sequence = reopened_signer.resume_evm_action_request_exact(
+            initial.session_id(),
+            requester_id,
+            request_payload,
+        )?;
+        assert_eq!(
+            resumed_request_without_sequence.message_digest(),
+            &request_digest
+        );
+        let resumed_response = reopened_requester.resume_evm_signed_action(
+            initial.session_id(),
+            signer_id,
+            response_sequence,
+        )?;
+        assert_eq!(
+            resumed_response.signed_raw_transaction(),
+            [0x02, 0x81, 0x01, 0x80]
+        );
+        let resumed_response_without_sequence = reopened_requester
+            .resume_evm_signed_action_for_request(
+                initial.session_id(),
+                signer_id,
+                request_digest,
+            )?;
+        assert_eq!(
+            resumed_response_without_sequence.response_message_digest(),
+            committed_response.message_digest()
+        );
+        assert!(matches!(
+            reopened_requester.resume_evm_signed_action_for_request(
+                initial.session_id(),
+                signer_id,
+                [0x7f; 32],
+            ),
+            Err(SessionStoreError::SessionNotFound)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn evm_action_transplants_wrong_owner_epoch_and_oversized_raw_fail_closed(
+    ) -> Result<(), Box<dyn Error>> {
+        let mut request = evm_action_request_payload([0x51; 32], [0x52; 32]);
+        request[8..16].copy_from_slice(&0_u64.to_le_bytes());
+        assert_eq!(
+            validate_evm_action_request_payload(&request),
+            Err(SessionStoreError::Canonical)
+        );
+        let valid = evm_action_request_payload([0x51; 32], [0x52; 32]);
+        let mut response = evm_signed_action_payload(&valid, [0x53; 32], &[0x02, 0x01])?;
+        response[24] ^= 1;
+        assert_eq!(
+            require_evm_response_matches_request(&response, &valid, &[0x53; 32]),
+            Err(SessionStoreError::InvalidTransition)
+        );
+        assert!(evm_signed_action_payload(
+            &valid,
+            [0x53; 32],
+            &vec![0x02; EVM_SIGNED_ACTION_RAW_MAX_LEN + 1],
+        )
+        .is_err());
+        Ok(())
+    }
+
     #[test]
     fn store_issued_early_outbound_advances_and_reconciliation_skips_acknowledged_commits(
     ) -> Result<(), Box<dyn Error>> {
@@ -58831,8 +60477,9 @@ mod tests {
             }
         }
         // Deliberately exact: adding any outbound authority class must break
-        // this census until the new class is reviewed against 0x14.
-        assert_eq!(registered, (1_u8..=21).collect::<BTreeSet<_>>());
+        // this census until the new class is reviewed against 0x14 and the
+        // role-scoped EVM request/response classes.
+        assert_eq!(registered, (1_u8..=23).collect::<BTreeSet<_>>());
 
         let temporary = TestDirectory::create()?;
         let evidence_policy = policy(BudgetPolicyProfileV1::EvidenceOnly)?;

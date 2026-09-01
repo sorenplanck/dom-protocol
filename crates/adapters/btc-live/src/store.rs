@@ -19,6 +19,8 @@ use blake2::Blake2bMac;
 #[cfg(target_os = "linux")]
 use cap_std::fs::Dir;
 #[cfg(target_os = "linux")]
+use subtle::ConstantTimeEq;
+#[cfg(target_os = "linux")]
 use zeroize::Zeroizing;
 
 #[cfg(target_os = "linux")]
@@ -70,6 +72,13 @@ pub(crate) enum StageKind {
     FundingSummary = 4,
     FreshAuthority = 5,
     FreshTemplates = 6,
+    FreshFaceEvidence = 7,
+    FreshClaimIntent = 8,
+    FreshClaimPrepared = 9,
+    FreshClaimExtractionIntent = 10,
+    FreshClaimExtractionComplete = 11,
+    FreshClaimFinalizationIntent = 12,
+    FreshClaimFinalized = 13,
 }
 
 impl StageKind {
@@ -82,6 +91,13 @@ impl StageKind {
             Self::FundingSummary => "funding-summary.v1",
             Self::FreshAuthority => "fresh-authority.v1",
             Self::FreshTemplates => "fresh-templates.v1",
+            Self::FreshFaceEvidence => "fresh-face-evidence.v1",
+            Self::FreshClaimIntent => "fresh-claim-intent.v1",
+            Self::FreshClaimPrepared => "fresh-claim-prepared.v1",
+            Self::FreshClaimExtractionIntent => "fresh-claim-extraction-intent.v1",
+            Self::FreshClaimExtractionComplete => "fresh-claim-extraction-complete.v1",
+            Self::FreshClaimFinalizationIntent => "fresh-claim-finalization-intent.v1",
+            Self::FreshClaimFinalized => "fresh-claim-finalized.v1",
         }
     }
 
@@ -94,6 +110,13 @@ impl StageKind {
             Self::FundingSummary => ".funding-summary.v1.staging",
             Self::FreshAuthority => ".fresh-authority.v1.staging",
             Self::FreshTemplates => ".fresh-templates.v1.staging",
+            Self::FreshFaceEvidence => ".fresh-face-evidence.v1.staging",
+            Self::FreshClaimIntent => ".fresh-claim-intent.v1.staging",
+            Self::FreshClaimPrepared => ".fresh-claim-prepared.v1.staging",
+            Self::FreshClaimExtractionIntent => ".fresh-claim-extraction-intent.v1.staging",
+            Self::FreshClaimExtractionComplete => ".fresh-claim-extraction-complete.v1.staging",
+            Self::FreshClaimFinalizationIntent => ".fresh-claim-finalization-intent.v1.staging",
+            Self::FreshClaimFinalized => ".fresh-claim-finalized.v1.staging",
         }
     }
 }
@@ -116,6 +139,20 @@ impl core::fmt::Debug for DurableStageStoreV1 {
 impl DurableStageStoreV1 {
     #[cfg(target_os = "linux")]
     pub(crate) fn open_or_create(path: &Path) -> Result<Self, LiveBitcoinError> {
+        Self::open_with_mode(path, true)
+    }
+
+    /// Opens an already provisioned authority without creating its directory,
+    /// process lock, or authentication key.  A production consumer uses this
+    /// path after the fresh-route producer has completed refund arming; absence
+    /// is therefore a refusal, never permission to mint replacement custody.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn open_existing(path: &Path) -> Result<Self, LiveBitcoinError> {
+        Self::open_with_mode(path, false)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn open_with_mode(path: &Path, create: bool) -> Result<Self, LiveBitcoinError> {
         if !path.is_absolute() {
             return Err(LiveBitcoinError::StoreUnavailable);
         }
@@ -129,19 +166,21 @@ impl DurableStageStoreV1 {
         {
             return Err(LiveBitcoinError::StoreUnavailable);
         }
-        match DirBuilder::new().mode(DIRECTORY_MODE).create(path) {
-            Ok(()) => {
-                File::open(path)
-                    .and_then(|directory| directory.sync_all())
-                    .map_err(|_| LiveBitcoinError::StoreUnavailable)?;
-                if let Some(parent) = path.parent() {
-                    File::open(parent)
+        if create {
+            match DirBuilder::new().mode(DIRECTORY_MODE).create(path) {
+                Ok(()) => {
+                    File::open(path)
                         .and_then(|directory| directory.sync_all())
                         .map_err(|_| LiveBitcoinError::StoreUnavailable)?;
+                    if let Some(parent) = path.parent() {
+                        File::open(parent)
+                            .and_then(|directory| directory.sync_all())
+                            .map_err(|_| LiveBitcoinError::StoreUnavailable)?;
+                    }
                 }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(_) => return Err(LiveBitcoinError::StoreUnavailable),
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(_) => return Err(LiveBitcoinError::StoreUnavailable),
         }
         let metadata =
             std::fs::symlink_metadata(path).map_err(|_| LiveBitcoinError::StoreUnavailable)?;
@@ -158,7 +197,11 @@ impl DurableStageStoreV1 {
         let root = Dir::open_ambient_dir(path, cap_std::ambient_authority())
             .map_err(|_| LiveBitcoinError::StoreUnavailable)?;
         validate_directory(&root)?;
-        let (lock_descriptor, created) = open_existing_or_create(&root, LOCK_NAME, true)?;
+        let (lock_descriptor, created) = if create {
+            open_existing_or_create(&root, LOCK_NAME, true)?
+        } else {
+            (open_existing(&root, LOCK_NAME, OFlags::RDWR)?, false)
+        };
         if created {
             fchmod(lock_descriptor.as_fd(), Mode::from_raw_mode(FILE_MODE))
                 .map_err(|_| LiveBitcoinError::StoreUnavailable)?;
@@ -172,7 +215,11 @@ impl DurableStageStoreV1 {
         .map_err(|_| LiveBitcoinError::StoreUnavailable)?;
         let lock = File::from(lock_descriptor);
         require_named_file_identity(&root, LOCK_NAME, &lock)?;
-        let key = load_or_create_auth_key(&root)?;
+        let key = if create {
+            load_or_create_auth_key(&root)?
+        } else {
+            load_existing_auth_key(&root)?
+        };
         Ok(Self {
             root,
             _lock: lock,
@@ -182,6 +229,11 @@ impl DurableStageStoreV1 {
 
     #[cfg(not(target_os = "linux"))]
     pub(crate) fn open_or_create(_path: &Path) -> Result<Self, LiveBitcoinError> {
+        Err(LiveBitcoinError::StoreUnavailable)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn open_existing(_path: &Path) -> Result<Self, LiveBitcoinError> {
         Err(LiveBitcoinError::StoreUnavailable)
     }
 
@@ -411,6 +463,32 @@ fn load_or_create_auth_key(root: &Dir) -> Result<Zeroizing<[u8; 32]>, LiveBitcoi
 }
 
 #[cfg(target_os = "linux")]
+fn load_existing_auth_key(root: &Dir) -> Result<Zeroizing<[u8; 32]>, LiveBitcoinError> {
+    if let Some(bytes) = read_named(root, AUTH_KEY_NAME)? {
+        let key = decode_key(&bytes)?;
+        remove_named_if_present(root, AUTH_KEY_STAGING)?;
+        return Ok(key);
+    }
+    let staging = read_named(root, AUTH_KEY_STAGING)?.ok_or(LiveBitcoinError::StoreUnavailable)?;
+    let key = decode_key(&staging)?;
+    renameat_with(
+        root.as_fd(),
+        AUTH_KEY_STAGING,
+        root.as_fd(),
+        AUTH_KEY_NAME,
+        RenameFlags::NOREPLACE,
+    )
+    .map_err(|_| LiveBitcoinError::StoreUnavailable)?;
+    sync_directory(root)?;
+    let exact = read_named(root, AUTH_KEY_NAME)?.ok_or(LiveBitcoinError::StoreUnavailable)?;
+    let reopened = decode_key(&exact)?;
+    if !bool::from(reopened[..].ct_eq(&key[..])) {
+        return Err(LiveBitcoinError::CorruptRecord);
+    }
+    Ok(reopened)
+}
+
+#[cfg(target_os = "linux")]
 fn decode_key(bytes: &[u8]) -> Result<Zeroizing<[u8; 32]>, LiveBitcoinError> {
     if bytes.len() != KEY_RECORD_LEN
         || &bytes[..8] != KEY_MAGIC
@@ -506,6 +584,18 @@ fn open_existing_or_create(
         RESOLVE_FLAGS,
     )
     .map(|descriptor| (descriptor, true))
+    .map_err(|_| LiveBitcoinError::StoreUnavailable)
+}
+
+#[cfg(target_os = "linux")]
+fn open_existing(root: &Dir, name: &str, flags: OFlags) -> Result<OwnedFd, LiveBitcoinError> {
+    openat2(
+        root.as_fd(),
+        name,
+        flags | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+        RESOLVE_FLAGS,
+    )
     .map_err(|_| LiveBitcoinError::StoreUnavailable)
 }
 
@@ -686,6 +776,138 @@ mod tests {
     }
 
     #[test]
+    fn production_open_existing_never_mints_missing_authority() -> Result<(), LiveBitcoinError> {
+        let _guard = TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let path = root("existing-refuses-missing")?;
+        assert_eq!(
+            DurableStageStoreV1::open_existing(&path).map(|_| ()),
+            Err(LiveBitcoinError::StoreUnavailable)
+        );
+        assert!(!path.exists());
+
+        io(std::fs::create_dir(&path))?;
+        io(std::fs::set_permissions(
+            &path,
+            std::fs::Permissions::from_mode(DIRECTORY_MODE),
+        ))?;
+        assert_eq!(
+            DurableStageStoreV1::open_existing(&path).map(|_| ()),
+            Err(LiveBitcoinError::StoreUnavailable)
+        );
+        assert_eq!(
+            io(std::fs::read_dir(&path))?.count(),
+            0,
+            "open_existing must not create a lock or authentication key"
+        );
+
+        let lock = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(FILE_MODE)
+            .open(path.join(LOCK_NAME));
+        drop(io(lock)?);
+        assert_eq!(
+            DurableStageStoreV1::open_existing(&path).map(|_| ()),
+            Err(LiveBitcoinError::StoreUnavailable)
+        );
+        assert!(path.join(LOCK_NAME).is_file());
+        assert!(!path.join(AUTH_KEY_NAME).exists());
+        assert!(!path.join(AUTH_KEY_STAGING).exists());
+        cleanup(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn production_open_existing_reuses_and_recovers_only_existing_custody(
+    ) -> Result<(), LiveBitcoinError> {
+        let _guard = TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let path = root("existing-complete")?;
+        {
+            let store = DurableStageStoreV1::open_or_create(&path)?;
+            store.publish(StageKind::Prepared, b"already-provisioned")?;
+        }
+        let reopened = DurableStageStoreV1::open_existing(&path)?;
+        assert_eq!(
+            reopened.read(StageKind::Prepared)?,
+            Some(b"already-provisioned".to_vec())
+        );
+        drop(reopened);
+
+        io(std::fs::rename(
+            path.join(AUTH_KEY_NAME),
+            path.join(AUTH_KEY_STAGING),
+        ))?;
+        let recovered = DurableStageStoreV1::open_existing(&path)?;
+        assert_eq!(
+            recovered.read(StageKind::Prepared)?,
+            Some(b"already-provisioned".to_vec())
+        );
+        assert!(path.join(AUTH_KEY_NAME).is_file());
+        assert!(!path.join(AUTH_KEY_STAGING).exists());
+        drop(recovered);
+        cleanup(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn production_open_existing_preserves_single_physical_owner() -> Result<(), LiveBitcoinError> {
+        let _guard = TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let path = root("existing-single-owner")?;
+        let retained = DurableStageStoreV1::open_or_create(&path)?;
+        retained.publish(StageKind::Prepared, b"single-owner")?;
+        assert_eq!(
+            DurableStageStoreV1::open_existing(&path).map(|_| ()),
+            Err(LiveBitcoinError::StoreUnavailable)
+        );
+        assert_eq!(
+            retained.read(StageKind::Prepared)?,
+            Some(b"single-owner".to_vec())
+        );
+        drop(retained);
+
+        let reopened = DurableStageStoreV1::open_existing(&path)?;
+        assert_eq!(
+            reopened.read(StageKind::Prepared)?,
+            Some(b"single-owner".to_vec())
+        );
+        drop(reopened);
+        cleanup(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn production_open_existing_recovers_authenticated_stage_publish(
+    ) -> Result<(), LiveBitcoinError> {
+        let _guard = TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let path = root("existing-stage-recovery")?;
+        {
+            let store = DurableStageStoreV1::open_or_create(&path)?;
+            store.write_staging_for_test(StageKind::Prepared, b"durable-before-rename")?;
+        }
+        assert!(!path.join(StageKind::Prepared.file_name()).exists());
+        assert!(path.join(StageKind::Prepared.staging_name()).is_file());
+
+        let reopened = DurableStageStoreV1::open_existing(&path)?;
+        assert_eq!(
+            reopened.read(StageKind::Prepared)?,
+            Some(b"durable-before-rename".to_vec())
+        );
+        assert!(path.join(StageKind::Prepared.file_name()).is_file());
+        assert!(!path.join(StageKind::Prepared.staging_name()).exists());
+        drop(reopened);
+        cleanup(&path);
+        Ok(())
+    }
+
+    #[test]
     fn record_tamper_and_cross_stage_substitution_fail_closed() -> Result<(), LiveBitcoinError> {
         let _guard = TEST_MUTEX
             .lock()
@@ -709,6 +931,32 @@ mod tests {
         let reopened = DurableStageStoreV1::open_or_create(&path)?;
         assert_eq!(
             reopened.read(StageKind::Refund),
+            Err(LiveBitcoinError::CorruptRecord)
+        );
+        drop(reopened);
+        cleanup(&path);
+
+        let path = root("fresh-face-substitution")?;
+        let templates_envelope = {
+            let store = DurableStageStoreV1::open_or_create(&path)?;
+            store.publish(StageKind::FreshTemplates, b"fresh-templates")?;
+            io(std::fs::read(
+                path.join(StageKind::FreshTemplates.file_name()),
+            ))?
+        };
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true).mode(0o600);
+        let mut substituted =
+            io(options.open(path.join(StageKind::FreshFaceEvidence.file_name())))?;
+        io(std::io::Write::write_all(
+            &mut substituted,
+            &templates_envelope,
+        ))?;
+        io(substituted.sync_all())?;
+        drop(substituted);
+        let reopened = DurableStageStoreV1::open_or_create(&path)?;
+        assert_eq!(
+            reopened.read(StageKind::FreshFaceEvidence),
             Err(LiveBitcoinError::CorruptRecord)
         );
         drop(reopened);

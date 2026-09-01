@@ -41,7 +41,7 @@ pub use settlement::{
 
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::Read;
+use std::io::{Read, Write};
 #[cfg(target_os = "linux")]
 use std::os::fd::AsFd;
 #[cfg(target_os = "linux")]
@@ -69,6 +69,9 @@ const PRODUCTION_APPLICATION_ID: i64 = 0x444f_4d56;
 const DIRECTORY_MODE: u32 = 0o700;
 const FILE_MODE: u32 = 0o600;
 const PRODUCTION_PROFILE_OPAQUE_AUTHORITY: i64 = 1;
+const PREPARED_AUTHORITY_MAGIC_V1: &[u8; 8] = b"DOMSTPR1";
+const PREPARED_AUTHORITY_VERSION_V1: u16 = 1;
+const PREPARED_AUTHORITY_BYTES_V1: usize = 8 + 2 + 32;
 const PRODUCTION_AUTHORITY_SCHEMA: &str = "CREATE TABLE production_authority (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     profile INTEGER NOT NULL CHECK(profile = 1),
@@ -461,10 +464,20 @@ fn process_lock_path(database: &Path) -> PathBuf {
     sidecar_path(database, ".lock")
 }
 
+fn prepared_authority_path(database: &Path) -> PathBuf {
+    sidecar_path(database, ".prepare")
+}
+
+fn prepared_authority_staging_path(database: &Path) -> PathBuf {
+    sidecar_path(database, ".prepare.new")
+}
+
 fn require_create_prefix_absent(path: &Path) -> Result<()> {
     for candidate in [
         path.to_path_buf(),
         process_lock_path(path),
+        prepared_authority_path(path),
+        prepared_authority_staging_path(path),
         sidecar_path(path, "-wal"),
         sidecar_path(path, "-shm"),
         sidecar_path(path, "-journal"),
@@ -1008,6 +1021,106 @@ impl Store {
         configure_production_connection(&connection, false)?;
         let store = Self::from_production_parts(path, connection, database, lock, binding);
         store.audit_production_authority()?;
+        Ok(store)
+    }
+
+    /// Durably prepares the only prefix from which a later authenticated
+    /// binding may create a production store.
+    ///
+    /// This is intentionally narrower than [`Self::create_production`]: it
+    /// publishes only the empty owner-only process-lock file and never opens
+    /// or initializes a database.  An external provisioning journal must
+    /// durably record this step before it may call
+    /// [`Self::open_or_resume_prepared_production`].  This split is required
+    /// when the final store binding is learned from a durable authenticated
+    /// message after the process has already provisioned its transport.
+    pub fn prepare_resume_create_production(
+        path: &Path,
+        preparation_binding: ProductionStoreBindingV1,
+    ) -> Result<()> {
+        require_linux()?;
+        validate_parent(path)?;
+        require_database_absent_for_preparation(path)?;
+        let preparation_path = prepared_authority_path(path);
+        let preparation_staging_path = prepared_authority_staging_path(path);
+        let preparation_present = match fs::symlink_metadata(&preparation_path) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(_) => return Err(StoreError::InvalidStorageAuthority),
+        };
+        let lock_present = match fs::symlink_metadata(process_lock_path(path)) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(_) => return Err(StoreError::InvalidStorageAuthority),
+        };
+        if preparation_present && !lock_present {
+            return Err(StoreError::InvalidStorageAuthority);
+        }
+        let lock = acquire_process_lock(path, !lock_present)?;
+        validate_open_file_identity(&lock, &process_lock_path(path))?;
+        validate_empty_lock(&lock)?;
+        if preparation_present {
+            require_path_absent(&preparation_staging_path)?;
+            validate_prepared_authority(&preparation_path, preparation_binding)?;
+        } else {
+            recover_or_write_prepared_authority_staging(
+                &preparation_staging_path,
+                preparation_binding,
+            )?;
+            fs::rename(&preparation_staging_path, &preparation_path)
+                .map_err(|_| StoreError::InvalidStorageAuthority)?;
+            sync_parent(path)?;
+            validate_prepared_authority(&preparation_path, preparation_binding)?;
+        }
+        drop(lock);
+        require_database_absent_with_prepared_lock(path, preparation_binding)
+    }
+
+    /// Opens an exact initialized production authority or completes the
+    /// prepared creation prefix under the now-authenticated binding.
+    ///
+    /// Unlike [`Self::resume_create_production`], an already initialized
+    /// authority may contain economic state: that is the necessary restart
+    /// case after a lazily bound authority has processed messages.  The
+    /// retained prepared lock must exist, and an initialized database must
+    /// authenticate the exact supplied binding before it is exposed.  Missing
+    /// locks, foreign schemas/bindings, sidecars, identities and concurrent
+    /// owners all fail closed.
+    pub fn open_or_resume_prepared_production(
+        path: &Path,
+        preparation_binding: ProductionStoreBindingV1,
+        binding: ProductionStoreBindingV1,
+    ) -> Result<Self> {
+        require_linux()?;
+        validate_parent(path)?;
+        require_path_absent(&prepared_authority_staging_path(path))?;
+        validate_prepared_authority(&prepared_authority_path(path), preparation_binding)?;
+        let lock = acquire_process_lock(path, false)?;
+        let database = match fs::symlink_metadata(path) {
+            Ok(_) => {
+                validate_owner_file(path)?;
+                validate_sqlite_sidecars(path)?;
+                open_database_authority(path)?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                require_sqlite_sidecars_absent(path)?;
+                create_database_authority(path)?
+            }
+            Err(_) => return Err(StoreError::InvalidStorageAuthority),
+        };
+        let connection = open_database_connection(path)?;
+        match classify_production_database(&connection, binding)? {
+            ProductionDatabaseStateV1::Pristine => {
+                configure_production_connection(&connection, true)?;
+                initialize_production_schema(&connection, binding)?;
+            }
+            ProductionDatabaseStateV1::Initialized => {
+                configure_production_connection(&connection, false)?;
+            }
+        }
+        let store = Self::from_production_parts(path, connection, database, lock, binding);
+        store.audit_production_authority()?;
+        sync_parent(path)?;
         Ok(store)
     }
 
@@ -1672,4 +1785,118 @@ impl Store {
         self.audit_production_physical_authority()?;
         Ok(value)
     }
+}
+
+fn require_database_absent_for_preparation(path: &Path) -> Result<()> {
+    for candidate in [
+        path.to_path_buf(),
+        sidecar_path(path, "-wal"),
+        sidecar_path(path, "-shm"),
+        sidecar_path(path, "-journal"),
+    ] {
+        match fs::symlink_metadata(candidate) {
+            Ok(_) => return Err(StoreError::InvalidStorageAuthority),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(StoreError::InvalidStorageAuthority),
+        }
+    }
+    Ok(())
+}
+
+fn require_path_absent(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err(StoreError::InvalidStorageAuthority),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(StoreError::InvalidStorageAuthority),
+    }
+}
+
+fn require_database_absent_with_prepared_lock(
+    path: &Path,
+    preparation_binding: ProductionStoreBindingV1,
+) -> Result<()> {
+    require_database_absent_for_preparation(path)?;
+    let lock_path = process_lock_path(path);
+    validate_owner_file(&lock_path)?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|_| StoreError::InvalidStorageAuthority)?;
+    validate_open_file_identity(&lock, &lock_path)?;
+    validate_empty_lock(&lock)?;
+    validate_prepared_authority(&prepared_authority_path(path), preparation_binding)
+}
+
+fn prepared_authority_bytes(
+    binding: ProductionStoreBindingV1,
+) -> [u8; PREPARED_AUTHORITY_BYTES_V1] {
+    let mut bytes = [0_u8; PREPARED_AUTHORITY_BYTES_V1];
+    bytes[..8].copy_from_slice(PREPARED_AUTHORITY_MAGIC_V1);
+    bytes[8..10].copy_from_slice(&PREPARED_AUTHORITY_VERSION_V1.to_be_bytes());
+    bytes[10..].copy_from_slice(&binding.digest());
+    bytes
+}
+
+fn recover_or_write_prepared_authority_staging(
+    path: &Path,
+    binding: ProductionStoreBindingV1,
+) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_file()
+                || validate_owner_file(path).is_err()
+                || validate_prepared_authority(path, binding).is_err()
+            {
+                if !metadata.file_type().is_file() || validate_owner_file(path).is_err() {
+                    return Err(StoreError::InvalidStorageAuthority);
+                }
+                fs::remove_file(path).map_err(|_| StoreError::InvalidStorageAuthority)?;
+                sync_parent(path)?;
+                write_prepared_authority_staging(path, binding)?;
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            write_prepared_authority_staging(path, binding)
+        }
+        Err(_) => Err(StoreError::InvalidStorageAuthority),
+    }
+}
+
+fn write_prepared_authority_staging(path: &Path, binding: ProductionStoreBindingV1) -> Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(target_os = "linux")]
+    options.mode(FILE_MODE);
+    let mut file = options
+        .open(path)
+        .map_err(|_| StoreError::InvalidStorageAuthority)?;
+    file.write_all(&prepared_authority_bytes(binding))
+        .and_then(|()| file.sync_all())
+        .map_err(|_| StoreError::InvalidStorageAuthority)?;
+    validate_open_file_identity(&file, path)?;
+    validate_owner_file(path)
+}
+
+fn validate_prepared_authority(path: &Path, binding: ProductionStoreBindingV1) -> Result<()> {
+    validate_owner_file(path)?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .open(path)
+        .map_err(|_| StoreError::InvalidStorageAuthority)?;
+    validate_open_file_identity(&file, path)?;
+    let mut bytes = [0_u8; PREPARED_AUTHORITY_BYTES_V1];
+    file.read_exact(&mut bytes)
+        .map_err(|_| StoreError::InvalidStorageAuthority)?;
+    let mut trailing = [0_u8; 1];
+    if file
+        .read(&mut trailing)
+        .map_err(|_| StoreError::InvalidStorageAuthority)?
+        != 0
+        || bytes != prepared_authority_bytes(binding)
+    {
+        return Err(StoreError::InvalidStorageAuthority);
+    }
+    validate_open_file_identity(&file, path)
 }

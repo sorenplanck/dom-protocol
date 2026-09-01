@@ -190,15 +190,15 @@ impl RouteFrameV2 {
             return Err(RouteFrameErrorV2::FlowBindingMismatch);
         }
         let chunk = bytes[ROUTE_FRAME_HEADER_LEN_V2..].to_vec();
-        let expected_chunk_digest = chunk_digest_v2(
-            &binding_digest,
-            &message_digest,
+        let expected_chunk_digest = chunk_digest_v2(ChunkDigestFieldsV2 {
+            binding_digest: &binding_digest,
+            message_digest: &message_digest,
             index,
             count,
             total_len,
             offset,
-            &chunk,
-        )?;
+            chunk: &chunk,
+        })?;
         if chunk_digest != expected_chunk_digest {
             return Err(RouteFrameErrorV2::ChunkDigestMismatch);
         }
@@ -466,15 +466,15 @@ pub(crate) fn encode_frame(
     if chunk.is_empty() || chunk.len() > MAX_ROUTE_FRAME_CHUNK_BYTES_V2 {
         return Err(RouteFrameErrorV2::NonCanonicalLayout);
     }
-    let chunk_digest = chunk_digest_v2(
-        &binding_digest,
-        &message_digest,
+    let chunk_digest = chunk_digest_v2(ChunkDigestFieldsV2 {
+        binding_digest: &binding_digest,
+        message_digest: &message_digest,
         index,
         count,
         total_len,
         offset,
         chunk,
-    )?;
+    })?;
     let mut bytes = Vec::with_capacity(ROUTE_FRAME_HEADER_LEN_V2 + chunk.len());
     bytes.extend_from_slice(&ROUTE_FRAME_MAGIC_V2);
     bytes.extend_from_slice(&ROUTE_FRAME_VERSION_V2.to_be_bytes());
@@ -526,29 +526,30 @@ pub(crate) fn binding_digest_v2(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn chunk_digest_v2(
-    binding_digest: &Digest32,
-    message_digest: &Digest32,
+struct ChunkDigestFieldsV2<'a> {
+    binding_digest: &'a Digest32,
+    message_digest: &'a Digest32,
     index: u16,
     count: u16,
     total_len: u32,
     offset: u32,
-    chunk: &[u8],
-) -> Result<Digest32, RouteFrameErrorV2> {
+    chunk: &'a [u8],
+}
+
+fn chunk_digest_v2(fields: ChunkDigestFieldsV2<'_>) -> Result<Digest32, RouteFrameErrorV2> {
     let chunk_len =
-        u32::try_from(chunk.len()).map_err(|_| RouteFrameErrorV2::NonCanonicalLayout)?;
+        u32::try_from(fields.chunk.len()).map_err(|_| RouteFrameErrorV2::NonCanonicalLayout)?;
     digest_parts(
         CHUNK_DOMAIN_V2,
         &[
-            binding_digest.as_slice(),
-            message_digest.as_slice(),
-            &index.to_be_bytes(),
-            &count.to_be_bytes(),
-            &total_len.to_be_bytes(),
-            &offset.to_be_bytes(),
+            fields.binding_digest.as_slice(),
+            fields.message_digest.as_slice(),
+            &fields.index.to_be_bytes(),
+            &fields.count.to_be_bytes(),
+            &fields.total_len.to_be_bytes(),
+            &fields.offset.to_be_bytes(),
             &chunk_len.to_be_bytes(),
-            chunk,
+            fields.chunk,
         ],
     )
 }

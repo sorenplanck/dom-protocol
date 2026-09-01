@@ -451,6 +451,305 @@ pub struct EvmActuatorLeaseV1 {
     pub(crate) lease_until_unix_ms: u64,
 }
 
+/// Immutable bindings of one authenticated remote EVM signing request.
+///
+/// This value is public metadata, not an account-wide nonce authority. The
+/// durable actuator derives a route/action-scoped custody identity from every
+/// field before it will retain or broadcast a remote signature.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RemoteEvmActionRequestV1 {
+    pub(crate) kind: EvmOperationKindV1,
+    pub(crate) role: EvmSignerRoleV1,
+    pub(crate) owner_id: Digest32,
+    pub(crate) owner_epoch: u64,
+    pub(crate) action_id: Digest32,
+    pub(crate) route_id: Digest32,
+    pub(crate) settlement_id: Digest32,
+    pub(crate) composition_binding_digest: Digest32,
+    pub(crate) execution_plan_digest: Digest32,
+    pub(crate) unsigned_call_digest: Digest32,
+    pub(crate) request_message_digest: Digest32,
+    pub(crate) requester_id: Digest32,
+    pub(crate) signer_id: Digest32,
+    pub(crate) chain_id: u64,
+    pub(crate) contract: EvmAddressV1,
+    pub(crate) signer_account: EvmAddressV1,
+}
+
+/// Named inputs for one remote EVM signing request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RemoteEvmActionRequestInputV1 {
+    /// Economic action authorized by the request.
+    pub kind: EvmOperationKindV1,
+    /// Exact counterparty role that signed the transaction.
+    pub role: EvmSignerRoleV1,
+    /// Durable route owner identity.
+    pub owner_id: Digest32,
+    /// Non-zero durable route owner epoch.
+    pub owner_epoch: u64,
+    /// Stable one-shot action identity.
+    pub action_id: Digest32,
+    /// Route identity.
+    pub route_id: Digest32,
+    /// Settlement-leg identity.
+    pub settlement_id: Digest32,
+    /// Composition binding commitment.
+    pub composition_binding_digest: Digest32,
+    /// Frozen execution-plan commitment.
+    pub execution_plan_digest: Digest32,
+    /// Canonical immutable unsigned-call commitment.
+    pub unsigned_call_digest: Digest32,
+    /// Exact accepted DSC1 request-message digest.
+    pub request_message_digest: Digest32,
+    /// Requesting participant identity.
+    pub requester_id: Digest32,
+    /// Signing participant identity.
+    pub signer_id: Digest32,
+    /// EIP-155 chain identifier.
+    pub chain_id: u64,
+    /// Exact settlement contract.
+    pub contract: EvmAddressV1,
+    /// Account whose signature must be recovered.
+    pub signer_account: EvmAddressV1,
+}
+
+/// Authenticated public bindings used to recover custody of an already
+/// imported remote operation after process loss.
+///
+/// The raw transaction, calldata and unsigned-call digest are intentionally
+/// absent. The actuator resolves them from its audited operation/custody rows
+/// and refuses unless every independently supplied route, economic and
+/// deployment commitment matches those durable rows exactly.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RemoteEvmOperationCustodyResumeInputV1 {
+    /// Stable actuator operation identity retained in the coordinator plan.
+    pub operation_id: Digest32,
+    /// Durable route owner identity committed by the original `0x15` request.
+    pub owner_id: Digest32,
+    /// Route owner epoch committed by the original `0x15` request.
+    pub owner_epoch: u64,
+    /// Route identity.
+    pub route_id: Digest32,
+    /// Settlement-leg identity.
+    pub settlement_id: Digest32,
+    /// Composition binding commitment.
+    pub composition_binding_digest: Digest32,
+    /// Coordinator effect identity.
+    pub effect_id: Digest32,
+    /// Canonical semantic action digest.
+    pub semantic_digest: Digest32,
+    /// Frozen settlement terms digest.
+    pub terms_digest: Digest32,
+    /// Deployment registry commitment.
+    pub registry_digest: Digest32,
+    /// Adapter profile commitment.
+    pub profile_digest: Digest32,
+    /// Exact deployment commitment.
+    pub deployment_digest: Digest32,
+    /// Economic operation kind.
+    pub kind: EvmOperationKindV1,
+    /// Exact remote signer role.
+    pub role: EvmSignerRoleV1,
+    /// EIP-155 chain identifier.
+    pub chain_id: u64,
+    /// Exact settlement contract.
+    pub contract: EvmAddressV1,
+    /// Account recovered from the remote signature.
+    pub signer_account: EvmAddressV1,
+    /// Exact transaction identity retained in the coordinator plan.
+    pub transaction_hash: Digest32,
+}
+
+impl RemoteEvmActionRequestV1 {
+    /// Validates all public request bindings before custody acquisition.
+    pub fn new(input: RemoteEvmActionRequestInputV1) -> Result<Self> {
+        crate::transaction::validate_remote_action_request(input)
+    }
+
+    /// Stable action identity.
+    pub const fn action_id(&self) -> Digest32 {
+        self.action_id
+    }
+
+    /// Route identity.
+    pub const fn route_id(&self) -> Digest32 {
+        self.route_id
+    }
+
+    /// Exact request-message digest.
+    pub const fn request_message_digest(&self) -> Digest32 {
+        self.request_message_digest
+    }
+
+    /// Expected remote signing account.
+    pub const fn signer_account(&self) -> EvmAddressV1 {
+        self.signer_account
+    }
+
+    /// Canonical immutable unsigned-call digest.
+    pub const fn unsigned_call_digest(&self) -> Digest32 {
+        self.unsigned_call_digest
+    }
+}
+
+/// Route/action-scoped local custody fence for a remote signer response.
+///
+/// Unlike [`EvmActuatorLeaseV1`], this capability conveys no account-global
+/// authority and never reserves, advances or owns the remote account nonce.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RemoteEvmActionCustodyV1 {
+    pub(crate) custody_id: Digest32,
+    pub(crate) owner_id: Digest32,
+    pub(crate) owner_epoch: u64,
+    pub(crate) action_id: Digest32,
+    pub(crate) route_id: Digest32,
+    pub(crate) chain_id: u64,
+    pub(crate) signer_account: EvmAddressV1,
+    pub(crate) fencing_epoch: u64,
+    pub(crate) lease_until_unix_ms: u64,
+}
+
+impl RemoteEvmActionCustodyV1 {
+    /// Deterministic route/action-scoped custody identity.
+    pub const fn custody_id(self) -> Digest32 {
+        self.custody_id
+    }
+    /// Durable route owner identity.
+    pub const fn owner_id(self) -> Digest32 {
+        self.owner_id
+    }
+    /// Durable route owner epoch.
+    pub const fn owner_epoch(self) -> u64 {
+        self.owner_epoch
+    }
+    /// Stable remote action identity.
+    pub const fn action_id(self) -> Digest32 {
+        self.action_id
+    }
+    /// Local custody fencing generation.
+    pub const fn fencing_epoch(self) -> u64 {
+        self.fencing_epoch
+    }
+    /// Exclusive custody deadline.
+    pub const fn lease_until_unix_ms(self) -> u64 {
+        self.lease_until_unix_ms
+    }
+}
+
+/// Custody acquisition result for one remote action.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RemoteEvmActionCustodyAcquireOutcomeV1 {
+    /// A new custody fence was committed.
+    Acquired(RemoteEvmActionCustodyV1),
+    /// The exact live owner/action custody already existed.
+    AlreadyOwned(RemoteEvmActionCustodyV1),
+}
+
+impl RemoteEvmActionCustodyAcquireOutcomeV1 {
+    /// Returns the custody capability in either successful case.
+    pub const fn custody(self) -> RemoteEvmActionCustodyV1 {
+        match self {
+            Self::Acquired(value) | Self::AlreadyOwned(value) => value,
+        }
+    }
+}
+
+/// CAS request for importing or advancing one remote-signed action.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RemoteEvmActionMutationRequestV1 {
+    pub(crate) custody: RemoteEvmActionCustodyV1,
+    pub(crate) mutation_id: Digest32,
+    pub(crate) operation_id: Digest32,
+    pub(crate) expected_revision: u64,
+    pub(crate) now_unix_ms: u64,
+}
+
+/// CAS request for one RPC-derived remote-custody observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RemoteEvmObservationMutationRequestV1 {
+    pub(crate) custody: RemoteEvmActionCustodyV1,
+    pub(crate) mutation_id: Digest32,
+    pub(crate) expected_revision: u64,
+    pub(crate) now_unix_ms: u64,
+    pub(crate) valid_for_ms: u64,
+}
+
+impl RemoteEvmObservationMutationRequestV1 {
+    /// Binds observation CAS and validity to one exact remote action custody.
+    pub const fn new(
+        custody: RemoteEvmActionCustodyV1,
+        mutation_id: Digest32,
+        expected_revision: u64,
+        now_unix_ms: u64,
+        valid_for_ms: u64,
+    ) -> Self {
+        Self {
+            custody,
+            mutation_id,
+            expected_revision,
+            now_unix_ms,
+            valid_for_ms,
+        }
+    }
+}
+
+impl RemoteEvmActionMutationRequestV1 {
+    /// Binds mutation and operation CAS to one live route/action custody.
+    pub const fn new(
+        custody: RemoteEvmActionCustodyV1,
+        mutation_id: Digest32,
+        operation_id: Digest32,
+        expected_revision: u64,
+        now_unix_ms: u64,
+    ) -> Self {
+        Self {
+            custody,
+            mutation_id,
+            operation_id,
+            expected_revision,
+            now_unix_ms,
+        }
+    }
+}
+
+/// Move-only exact remote type-2 transaction returned for one request.
+///
+/// Raw bytes are zeroized on drop and omitted from `Debug`/serialization.
+pub struct RemoteEvmSignedActionV1 {
+    pub(crate) request_message_digest: Digest32,
+    pub(crate) signed_raw_digest: Digest32,
+    pub(crate) transaction_hash: Digest32,
+    pub(crate) raw_transaction: Zeroizing<Vec<u8>>,
+}
+
+impl RemoteEvmSignedActionV1 {
+    /// Imports exact bounded response bytes and their authenticated public
+    /// commitments. Full type-2 decoding and signer recovery occur only at the
+    /// durable actuator boundary.
+    pub fn new(
+        request_message_digest: Digest32,
+        signed_raw_digest: Digest32,
+        transaction_hash: Digest32,
+        raw_transaction: Vec<u8>,
+    ) -> Result<Self> {
+        let raw_transaction = Zeroizing::new(raw_transaction);
+        if request_message_digest == ZERO_DIGEST
+            || signed_raw_digest == ZERO_DIGEST
+            || transaction_hash == ZERO_DIGEST
+            || raw_transaction.is_empty()
+            || raw_transaction.len() > crate::transaction::MAX_RAW_TRANSACTION_BYTES_V1
+        {
+            return Err(EvmActuatorErrorV1::InvalidTransaction);
+        }
+        Ok(Self {
+            request_message_digest,
+            signed_raw_digest,
+            transaction_hash,
+            raw_transaction,
+        })
+    }
+}
+
 impl core::fmt::Debug for EvmActuatorLeaseV1 {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter

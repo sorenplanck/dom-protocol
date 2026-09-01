@@ -136,6 +136,134 @@ fn production_empty_authority_refuses_any_retained_record() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn prepared_production_authority_survives_activation_state_and_restart() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempdir().expect("production owner root");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("owner-only production root");
+    let path = dir.path().join("lazy-authority.sqlite3");
+    let preparation =
+        ProductionStoreBindingV1::new([0xa1; 32]).expect("nonzero preparation binding");
+    let binding = ProductionStoreBindingV1::new([0xb1; 32]).expect("nonzero store binding");
+
+    Store::prepare_resume_create_production(&path, preparation).expect("first preparation commits");
+    Store::prepare_resume_create_production(&path, preparation)
+        .expect("exact preparation replay is idempotent");
+    assert!(!path.exists(), "preparation must not create a database");
+
+    let mut activated = Store::open_or_resume_prepared_production(&path, preparation, binding)
+        .expect("authenticated activation");
+    activated
+        .put_opaque(b"stage7-test", b"key", b"economic-state")
+        .expect("post-activation state");
+    assert!(matches!(
+        Store::open_or_resume_prepared_production(&path, preparation, binding),
+        Err(StoreError::ProcessLocked)
+    ));
+    drop(activated);
+
+    let reopened = Store::open_or_resume_prepared_production(&path, preparation, binding)
+        .expect("initialized nonempty authority reopens after restart");
+    assert_eq!(
+        reopened.opaque(b"stage7-test", b"key").unwrap(),
+        Some(b"economic-state".to_vec())
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn prepared_production_authority_refuses_missing_or_transplanted_bindings() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempdir().expect("production owner root");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("owner-only production root");
+    let missing = dir.path().join("missing-preparation.sqlite3");
+    let path = dir.path().join("bound-preparation.sqlite3");
+    let preparation =
+        ProductionStoreBindingV1::new([0xa2; 32]).expect("nonzero preparation binding");
+    let other_preparation =
+        ProductionStoreBindingV1::new([0xa3; 32]).expect("nonzero preparation binding");
+    let binding = ProductionStoreBindingV1::new([0xb2; 32]).expect("nonzero store binding");
+    let other_binding = ProductionStoreBindingV1::new([0xb3; 32]).expect("nonzero store binding");
+
+    assert!(matches!(
+        Store::open_or_resume_prepared_production(&missing, preparation, binding),
+        Err(StoreError::InvalidStorageAuthority)
+    ));
+    assert!(!missing.exists(), "refusal must not create a database");
+
+    Store::prepare_resume_create_production(&path, preparation).expect("prepare authority");
+    assert!(Store::prepare_resume_create_production(&path, other_preparation).is_err());
+    assert!(Store::open_or_resume_prepared_production(&path, other_preparation, binding).is_err());
+    assert!(
+        !path.exists(),
+        "preparation transplant must not create a database"
+    );
+
+    let mut activated = Store::open_or_resume_prepared_production(&path, preparation, binding)
+        .expect("activate exact authority");
+    activated
+        .put_opaque(b"stage7-test", b"key", b"preserved")
+        .expect("post-activation state");
+    drop(activated);
+
+    assert!(Store::open_or_resume_prepared_production(&path, preparation, other_binding).is_err());
+    let reopened = Store::open_or_resume_prepared_production(&path, preparation, binding)
+        .expect("wrong final binding leaves exact authority intact");
+    assert_eq!(
+        reopened.opaque(b"stage7-test", b"key").unwrap(),
+        Some(b"preserved".to_vec())
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn prepared_production_authority_recovers_exact_and_torn_staging_boundaries() {
+    use std::ffi::OsString;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fn sidecar(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+        let mut value = OsString::from(path.as_os_str());
+        value.push(suffix);
+        value.into()
+    }
+
+    let dir = tempdir().expect("production owner root");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("owner-only production root");
+    let path = dir.path().join("preparation-crash.sqlite3");
+    let preparation =
+        ProductionStoreBindingV1::new([0xa4; 32]).expect("nonzero preparation binding");
+    let binding = ProductionStoreBindingV1::new([0xb4; 32]).expect("nonzero store binding");
+    let published = sidecar(&path, ".prepare");
+    let staging = sidecar(&path, ".prepare.new");
+
+    Store::prepare_resume_create_production(&path, preparation).expect("prepare authority");
+    std::fs::rename(&published, &staging).expect("simulate crash before publish rename");
+    Store::prepare_resume_create_production(&path, preparation)
+        .expect("exact staged record is promoted");
+    assert!(published.exists());
+    assert!(!staging.exists());
+
+    std::fs::rename(&published, &staging).expect("restore staged boundary");
+    std::fs::write(&staging, b"torn").expect("simulate torn staging write");
+    std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600))
+        .expect("retain owner-only staging authority");
+    Store::prepare_resume_create_production(&path, preparation)
+        .expect("torn owner-only staging is rebuilt before publication");
+    assert!(published.exists());
+    assert!(!staging.exists());
+
+    drop(
+        Store::open_or_resume_prepared_production(&path, preparation, binding)
+            .expect("recovered preparation activates"),
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn production_monotonic_high_water_is_idempotent_persistent_and_rejects_rollback() {
     use std::os::unix::fs::PermissionsExt as _;
 

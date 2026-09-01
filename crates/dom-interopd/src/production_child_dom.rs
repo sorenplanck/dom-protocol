@@ -6,6 +6,7 @@
 //! attempted, and every stable result is committed to the control Store's
 //! port-call journal before it is returned.
 
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use adapter_dom_real::{RealDomClaimVerifierV1, RealDomError, RealDomRpcRuntimeV1};
@@ -26,6 +27,9 @@ use dom_scriptless_chain_adapter::ChainAdapterError;
 use dom_scriptless_identity_store::IdentityStoreError;
 use dom_scriptless_store::{
     ConsumedClaimSigningAuthorizationV2, DomTransactionValidationContextV1, SessionStoreError,
+};
+use f7_anchor_authority::{
+    F7AnchorAuthorityError, F7AnchorValidationRequestV2, VerifiedF7RouteAnchorAuthorizationsV2,
 };
 use kaystra_core::state::EvidenceRefV1;
 use kaystra_core::types::ChainId;
@@ -56,6 +60,7 @@ use crate::production_contracts::{
     ProductionDomFinalClaimTransportRecoveryV1,
 };
 use crate::production_inputs::AuthenticatedProductionInputsV1;
+use crate::production_plan_source::ProductionDomPublicSecretConsumerAuthorityV1;
 use crate::relay_worker::RelayWorkerOutboundErrorV1;
 
 const ZERO_DIGEST: Digest32 = [0; 32];
@@ -91,7 +96,18 @@ impl ProductionDomChildClockV1 for SystemProductionDomChildClockV1 {
 /// DOM Stores under the live participant lease.
 pub(crate) struct AuthenticatedDomDispatchCallV1 {
     binding: DomSettlementChildBindingV1,
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
     coordinator_attempt_id: Digest32,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "retained surface not yet wired by the stage-7 composition root"
+        )
+    )]
     request_digest: Digest32,
     refund_context: Option<DomTransactionValidationContextV1>,
 }
@@ -107,10 +123,21 @@ impl AuthenticatedDomDispatchCallV1 {
         &self.binding
     }
 
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
     pub(crate) const fn coordinator_attempt_id(&self) -> Digest32 {
         self.coordinator_attempt_id
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "retained surface not yet wired by the stage-7 composition root"
+        )
+    )]
     pub(crate) const fn request_digest(&self) -> Digest32 {
         self.request_digest
     }
@@ -124,7 +151,18 @@ impl AuthenticatedDomDispatchCallV1 {
 /// Move-only proof for an exact reconciliation request.
 pub(crate) struct AuthenticatedDomReconciliationCallV1 {
     binding: DomSettlementChildBindingV1,
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
     coordinator_attempt_id: Digest32,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "retained surface not yet wired by the stage-7 composition root"
+        )
+    )]
     request_digest: Digest32,
     refund_context: Option<DomTransactionValidationContextV1>,
 }
@@ -140,10 +178,21 @@ impl AuthenticatedDomReconciliationCallV1 {
         &self.binding
     }
 
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
     pub(crate) const fn coordinator_attempt_id(&self) -> Digest32 {
         self.coordinator_attempt_id
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "retained surface not yet wired by the stage-7 composition root"
+        )
+    )]
     pub(crate) const fn request_digest(&self) -> Digest32 {
         self.request_digest
     }
@@ -165,25 +214,27 @@ impl AuthenticatedDomReconciliationCallV1 {
 pub(crate) trait ProductionDomActionAuthorityV1 {
     fn externalize(
         &mut self,
-        contracts: &DomContractsActuatorV1<'_>,
-        control: &mut DomActuatorStoreV1,
-        lease: DomLeaseV1,
-        trusted_chain_id: &TrustedChainIdV1,
-        runtime: &RealDomRpcRuntimeV1,
+        context: ProductionDomActionContextV1<'_, '_>,
         call: AuthenticatedDomDispatchCallV1,
-        now_unix_ms: u64,
     ) -> Result<ProductionDomActionResultV1, ChildAuthorityRefusalV1>;
 
     fn reconcile(
         &mut self,
-        contracts: &DomContractsActuatorV1<'_>,
-        control: &mut DomActuatorStoreV1,
-        lease: DomLeaseV1,
-        trusted_chain_id: &TrustedChainIdV1,
-        runtime: &RealDomRpcRuntimeV1,
+        context: ProductionDomActionContextV1<'_, '_>,
         call: AuthenticatedDomReconciliationCallV1,
-        now_unix_ms: u64,
     ) -> Result<ProductionDomActionResultV1, ChildAuthorityRefusalV1>;
+}
+
+/// Exact borrowed authority set for one DOM child action. Keeping these
+/// capabilities together prevents callers from mixing a Store lease, chain
+/// identity, RPC runtime, or observation time across sessions.
+pub(crate) struct ProductionDomActionContextV1<'call, 'store> {
+    contracts: &'call DomContractsActuatorV1<'store>,
+    control: &'call mut DomActuatorStoreV1,
+    lease: DomLeaseV1,
+    trusted_chain_id: &'call TrustedChainIdV1,
+    runtime: &'call RealDomRpcRuntimeV1,
+    now_unix_ms: u64,
 }
 
 /// Receipt-free result from the sole concrete DOM action authority.
@@ -193,13 +244,13 @@ pub(crate) trait ProductionDomActionAuthorityV1 {
 /// claim `ProvenNotExternalized`.
 pub(crate) enum ProductionDomActionResultV1 {
     Externalized,
-    FinalClaimAdmitted(DomFinalClaimAdmissionBundleV2),
+    FinalClaimAdmitted(Box<DomFinalClaimAdmissionBundleV2>),
     FinalClaimTransportStarted,
     Unknown,
 }
 
 enum CompletedDomCapabilityV1 {
-    Current(DomActuatorCapabilityV1),
+    Current(Box<DomActuatorCapabilityV1>),
     NeedsRefence,
 }
 
@@ -250,7 +301,7 @@ impl ConcreteProductionDomActionAuthorityV1 {
             now_unix_ms,
         ) {
             Ok((capability, DomOperationDispositionV1::AlreadyCompleted)) => {
-                Ok(CompletedDomCapabilityV1::Current(capability))
+                Ok(CompletedDomCapabilityV1::Current(Box::new(capability)))
             }
             Ok(_) => Err(ChildAuthorityRefusalV1::Conflict),
             Err(DomActuatorError::ReconciliationRequired) => {
@@ -274,15 +325,18 @@ impl ConcreteProductionDomActionAuthorityV1 {
 
     fn execute(
         &mut self,
-        contracts: &DomContractsActuatorV1<'_>,
-        control: &mut DomActuatorStoreV1,
-        lease: DomLeaseV1,
-        trusted_chain_id: &TrustedChainIdV1,
-        runtime: &RealDomRpcRuntimeV1,
+        context: ProductionDomActionContextV1<'_, '_>,
         binding: &DomSettlementChildBindingV1,
         refund_context: Option<DomTransactionValidationContextV1>,
-        now_unix_ms: u64,
     ) -> Result<ProductionDomActionResultV1, ChildAuthorityRefusalV1> {
+        let ProductionDomActionContextV1 {
+            contracts,
+            control,
+            lease,
+            trusted_chain_id,
+            runtime,
+            now_unix_ms,
+        } = context;
         let scope = binding.request().scope();
         match scope.action() {
             DomActionV1::BroadcastFunding => {
@@ -295,7 +349,7 @@ impl ConcreteProductionDomActionAuthorityV1 {
                             .resume_persisted_funding_broadcast(
                                 control,
                                 lease,
-                                capability,
+                                *capability,
                                 now_unix_ms,
                             ),
                         CompletedDomCapabilityV1::NeedsRefence => contracts
@@ -318,7 +372,7 @@ impl ConcreteProductionDomActionAuthorityV1 {
                             .resume_persisted_refund_broadcast(
                                 control,
                                 lease,
-                                capability,
+                                *capability,
                                 current_context,
                                 now_unix_ms,
                             ),
@@ -361,7 +415,9 @@ impl ConcreteProductionDomActionAuthorityV1 {
                                 now_unix_ms,
                             )
                             .map_err(map_actuator_error)?;
-                        Ok(ProductionDomActionResultV1::FinalClaimAdmitted(bundle))
+                        Ok(ProductionDomActionResultV1::FinalClaimAdmitted(Box::new(
+                            bundle,
+                        )))
                     }
                     DomClaimCustodyClassificationV1::PotentiallyExposed => {
                         let authorization =
@@ -396,9 +452,9 @@ impl ConcreteProductionDomActionAuthorityV1 {
                             receipt,
                             now_unix_ms,
                         ) {
-                            Ok(bundle) => {
-                                Ok(ProductionDomActionResultV1::FinalClaimAdmitted(bundle))
-                            }
+                            Ok(bundle) => Ok(ProductionDomActionResultV1::FinalClaimAdmitted(
+                                Box::new(bundle),
+                            )),
                             Err(error)
                                 if map_actuator_error(error)
                                     == ChildAuthorityRefusalV1::Unavailable =>
@@ -421,46 +477,18 @@ impl ConcreteProductionDomActionAuthorityV1 {
 impl ProductionDomActionAuthorityV1 for ConcreteProductionDomActionAuthorityV1 {
     fn externalize(
         &mut self,
-        contracts: &DomContractsActuatorV1<'_>,
-        control: &mut DomActuatorStoreV1,
-        lease: DomLeaseV1,
-        trusted_chain_id: &TrustedChainIdV1,
-        runtime: &RealDomRpcRuntimeV1,
+        context: ProductionDomActionContextV1<'_, '_>,
         call: AuthenticatedDomDispatchCallV1,
-        now_unix_ms: u64,
     ) -> Result<ProductionDomActionResultV1, ChildAuthorityRefusalV1> {
-        self.execute(
-            contracts,
-            control,
-            lease,
-            trusted_chain_id,
-            runtime,
-            call.binding(),
-            call.refund_context(),
-            now_unix_ms,
-        )
+        self.execute(context, call.binding(), call.refund_context())
     }
 
     fn reconcile(
         &mut self,
-        contracts: &DomContractsActuatorV1<'_>,
-        control: &mut DomActuatorStoreV1,
-        lease: DomLeaseV1,
-        trusted_chain_id: &TrustedChainIdV1,
-        runtime: &RealDomRpcRuntimeV1,
+        context: ProductionDomActionContextV1<'_, '_>,
         call: AuthenticatedDomReconciliationCallV1,
-        now_unix_ms: u64,
     ) -> Result<ProductionDomActionResultV1, ChildAuthorityRefusalV1> {
-        self.execute(
-            contracts,
-            control,
-            lease,
-            trusted_chain_id,
-            runtime,
-            call.binding(),
-            call.refund_context(),
-            now_unix_ms,
-        )
+        self.execute(context, call.binding(), call.refund_context())
     }
 }
 
@@ -470,7 +498,7 @@ pub(crate) struct ProductionDomChildPortV1<C, A> {
     sessions: [ProductionDomChildSessionV1<A>; 2],
     lease: DomLeaseV1,
     trusted_chain_id: TrustedChainIdV1,
-    runtime: RealDomRpcRuntimeV1,
+    runtime: Arc<RealDomRpcRuntimeV1>,
     clock: C,
     route_terms_digest: Digest32,
     materialization_scope: ProductionDomMaterializationScopeV1,
@@ -537,7 +565,7 @@ struct ProductionDomChildSessionV1<A> {
     settlement_id: Digest32,
     binding: DomSessionBindingV1,
     contracts: ProductionDomChildStoreAuthorityV1,
-    claim_verifier: RealDomClaimVerifierV1,
+    claim_verifier: Arc<RealDomClaimVerifierV1>,
     actions: A,
 }
 
@@ -559,17 +587,91 @@ pub(crate) struct ProductionDomChildBindingsV1 {
     pub(crate) materialization_scope: ProductionDomMaterializationScopeV1,
 }
 
+/// Sole production result of composing the DOM child authorities.
+///
+/// Consuming `split` yields exactly one child port and exactly one public
+/// consumer authority per leg.  There is no production constructor that can
+/// build the child alone and strand or recreate the shared verifier runtime.
+pub(crate) struct ProductionDomChildCompositionV1 {
+    child: AuthenticatedDomChildPortV1,
+    public_secret_consumers: [ProductionDomPublicSecretConsumerAuthorityV1; 2],
+    f7_scanner: ProductionDomF7ScannerAuthorityV1,
+}
+
+/// Read-only F7 purpose handle to the exact runtime retained by the DOM child.
+///
+/// It owns only an `Arc` to that runtime, exposes neither the HTTP adapter nor
+/// a generic scanner callback, and has no constructor outside DOM child
+/// composition. Funding, observation and F7 therefore share one physical
+/// authenticated node client without a clone or reopen of that client.
+#[must_use = "the DOM child runtime must remain available for post-funding F7"]
+pub(crate) struct ProductionDomF7ScannerAuthorityV1 {
+    runtime: Arc<RealDomRpcRuntimeV1>,
+}
+
+impl core::fmt::Debug for ProductionDomF7ScannerAuthorityV1 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("ProductionDomF7ScannerAuthorityV1([authority redacted])")
+    }
+}
+
+impl ProductionDomF7ScannerAuthorityV1 {
+    fn from_child_runtime(runtime: &Arc<RealDomRpcRuntimeV1>) -> Self {
+        Self {
+            runtime: Arc::clone(runtime),
+        }
+    }
+
+    /// Runs the only productive F7 V2 verifier against the child-owned
+    /// runtime after both funding transactions have canonical anchors.
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
+    pub(crate) fn verify_f7_route_anchor_authority_v2(
+        &self,
+        request: F7AnchorValidationRequestV2<'_>,
+    ) -> Result<VerifiedF7RouteAnchorAuthorizationsV2, F7AnchorAuthorityError> {
+        self.runtime.verify_f7_route_anchor_authority_v2(request)
+    }
+
+    fn shares_runtime(&self, runtime: &Arc<RealDomRpcRuntimeV1>) -> bool {
+        Arc::ptr_eq(&self.runtime, runtime)
+    }
+}
+
+impl core::fmt::Debug for ProductionDomChildCompositionV1 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("ProductionDomChildCompositionV1([authorities redacted])")
+    }
+}
+
+impl ProductionDomChildCompositionV1 {
+    pub(crate) fn split(
+        self,
+    ) -> (
+        AuthenticatedDomChildPortV1,
+        [ProductionDomPublicSecretConsumerAuthorityV1; 2],
+        ProductionDomF7ScannerAuthorityV1,
+    ) {
+        (self.child, self.public_secret_consumers, self.f7_scanner)
+    }
+}
+
 /// Compose the owned concrete DOM child port from the sole retained Store
 /// authorities and the registry-bound node/verifier bundle.
 ///
-/// The returned trait object is owned and `'static` without reopening either
-/// Store: its Contracts authority is an `Rc` handoff from
-/// `ProductionContractsV1`, so the type remains deliberately `!Send + !Sync`.
+/// The returned owner is owned and `'static` without reopening either Store:
+/// its Contracts authority is an `Rc` handoff from `ProductionContractsV1`,
+/// so the child remains deliberately `!Send + !Sync`.  Runtime and verifier
+/// objects are each constructed exactly once; only purpose-limited `Arc`
+/// handles are shared between child observation, public-secret recovery and
+/// post-funding F7 verification.
 pub(crate) fn compose_production_dom_child_port_v1(
     control: DomActuatorStoreV1,
     bindings: ProductionDomChildBindingsV1,
-) -> Result<AuthenticatedDomChildPortV1, ChildAuthorityRefusalV1> {
-    let port = ProductionDomChildPortV1::new(
+) -> Result<ProductionDomChildCompositionV1, ChildAuthorityRefusalV1> {
+    let (port, public_secret_consumers) = ProductionDomChildPortV1::compose_shared(
         control,
         bindings,
         SystemProductionDomChildClockV1,
@@ -578,7 +680,15 @@ pub(crate) fn compose_production_dom_child_port_v1(
             ConcreteProductionDomActionAuthorityV1::new(),
         ],
     )?;
-    Ok(ProductionSettlementChildRouterV1::authenticate_dom(port))
+    let f7_scanner = ProductionDomF7ScannerAuthorityV1::from_child_runtime(&port.runtime);
+    if !f7_scanner.shares_runtime(&port.runtime) {
+        return Err(ChildAuthorityRefusalV1::Conflict);
+    }
+    Ok(ProductionDomChildCompositionV1 {
+        child: ProductionSettlementChildRouterV1::authenticate_dom(port),
+        public_secret_consumers,
+        f7_scanner,
+    })
 }
 
 impl<C, A> core::fmt::Debug for ProductionDomChildPortV1<C, A> {
@@ -592,12 +702,13 @@ where
     C: ProductionDomChildClockV1,
     A: ProductionDomActionAuthorityV1,
 {
-    pub(crate) fn new(
+    fn compose_shared(
         control: DomActuatorStoreV1,
         bindings: ProductionDomChildBindingsV1,
         clock: C,
         actions: [A; 2],
-    ) -> Result<Self, ChildAuthorityRefusalV1> {
+    ) -> Result<(Self, [ProductionDomPublicSecretConsumerAuthorityV1; 2]), ChildAuthorityRefusalV1>
+    {
         let ProductionDomChildBindingsV1 {
             sessions,
             lease,
@@ -608,6 +719,7 @@ where
         } = bindings;
         let [upstream, downstream] = sessions;
         let [upstream_actions, downstream_actions] = actions;
+        let runtime = Arc::new(runtime);
         if upstream.leg != SettlementLegV1::Upstream
             || downstream.leg != SettlementLegV1::Downstream
             || upstream.settlement_id == ZERO_DIGEST
@@ -626,8 +738,7 @@ where
             || materialization_scope.role_plan_digest == ZERO_DIGEST
             || materialization_scope
                 .source_scope_digests
-                .iter()
-                .any(|digest| *digest == ZERO_DIGEST)
+                .contains(&ZERO_DIGEST)
             || lease.participant_id() != upstream.binding.participant().participant_id()
             || lease.fencing_epoch() == 0
             || lease.lease_until_unix_ms() == 0
@@ -652,15 +763,42 @@ where
                 return Err(ChildAuthorityRefusalV1::Conflict);
             }
         }
-        let upstream_claim_verifier = upstream
-            .contracts
-            .build_claim_verifier(&trusted_chain_id)
-            .map_err(map_actuator_error)?;
-        let downstream_claim_verifier = downstream
-            .contracts
-            .build_claim_verifier(&trusted_chain_id)
-            .map_err(map_actuator_error)?;
-        Ok(Self {
+        let upstream_claim_verifier = Arc::new(
+            upstream
+                .contracts
+                .build_claim_verifier(&trusted_chain_id)
+                .map_err(map_actuator_error)?,
+        );
+        let downstream_claim_verifier = Arc::new(
+            downstream
+                .contracts
+                .build_claim_verifier(&trusted_chain_id)
+                .map_err(map_actuator_error)?,
+        );
+        let composition_digest = materialization_scope.composition_digest;
+        let public_secret_consumers = [
+            ProductionDomPublicSecretConsumerAuthorityV1::authenticate(
+                composition_digest,
+                upstream.leg,
+                upstream.settlement_id,
+                upstream.binding,
+                trusted_chain_id,
+                Arc::clone(&runtime),
+                Arc::clone(&upstream_claim_verifier),
+            )
+            .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+            ProductionDomPublicSecretConsumerAuthorityV1::authenticate(
+                composition_digest,
+                downstream.leg,
+                downstream.settlement_id,
+                downstream.binding,
+                trusted_chain_id,
+                Arc::clone(&runtime),
+                Arc::clone(&downstream_claim_verifier),
+            )
+            .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
+        ];
+        let port = Self {
             control,
             sessions: [
                 ProductionDomChildSessionV1 {
@@ -686,7 +824,8 @@ where
             clock,
             route_terms_digest,
             materialization_scope,
-        })
+        };
+        Ok((port, public_secret_consumers))
     }
 
     fn session_index(
@@ -1238,16 +1377,22 @@ where
         request: ProductionChildMaterializationRequestV1,
         public_scalar: Option<&route_composer::RouteScalar>,
     ) -> Result<SettlementChildPlanV1, ChildAuthorityRefusalV1> {
-        let scalar_shape_is_valid = match (request.action, request.exposure, public_scalar) {
+        let scalar_shape_is_valid = matches!(
+            (request.action, request.exposure, public_scalar),
             (
                 SettlementActionV1::Funding | SettlementActionV1::Refund,
                 ChildExposureV1::NonSecret,
                 None,
+            ) | (
+                SettlementActionV1::Claim,
+                ChildExposureV1::FirstSecretExposure,
+                None
+            ) | (
+                SettlementActionV1::Claim,
+                ChildExposureV1::UsesPublicSecret,
+                Some(_)
             )
-            | (SettlementActionV1::Claim, ChildExposureV1::FirstSecretExposure, None)
-            | (SettlementActionV1::Claim, ChildExposureV1::UsesPublicSecret, Some(_)) => true,
-            _ => false,
-        };
+        );
         if !scalar_shape_is_valid
             || request.route_id == ZERO_DIGEST
             || request.effect_id == ZERO_DIGEST
@@ -1410,13 +1555,15 @@ where
         let session = &mut self.sessions[validated.session_index];
         let contracts = session.contracts.bind().map_err(map_actuator_error)?;
         let returned = session.actions.externalize(
-            &contracts,
-            &mut self.control,
-            self.lease,
-            &self.trusted_chain_id,
-            &self.runtime,
+            ProductionDomActionContextV1 {
+                contracts: &contracts,
+                control: &mut self.control,
+                lease: self.lease,
+                trusted_chain_id: &self.trusted_chain_id,
+                runtime: &self.runtime,
+                now_unix_ms: now,
+            },
             call,
-            now,
         )?;
         let returned = stage_final_claim_transport_v1(
             &mut session.contracts,
@@ -1469,13 +1616,15 @@ where
         let session = &mut self.sessions[validated.session_index];
         let contracts = session.contracts.bind().map_err(map_actuator_error)?;
         let returned = session.actions.reconcile(
-            &contracts,
-            &mut self.control,
-            self.lease,
-            &self.trusted_chain_id,
-            &self.runtime,
+            ProductionDomActionContextV1 {
+                contracts: &contracts,
+                control: &mut self.control,
+                lease: self.lease,
+                trusted_chain_id: &self.trusted_chain_id,
+                runtime: &self.runtime,
+                now_unix_ms: now,
+            },
             call,
-            now,
         )?;
         let returned = stage_final_claim_transport_v1(
             &mut session.contracts,
@@ -1745,7 +1894,7 @@ fn stage_final_claim_transport_v1(
     match result {
         ProductionDomActionResultV1::FinalClaimAdmitted(bundle) => {
             contracts
-                .stage_final_claim_admission_bundle(bundle)
+                .stage_final_claim_admission_bundle(*bundle)
                 .map_err(map_contracts_outbound_error)?;
             Ok(ProductionDomActionResultV1::Externalized)
         }
@@ -2108,10 +2257,18 @@ fn fresh_dom_time<C: ProductionDomChildClockV1>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    use dom_scriptless_chain_adapter::{
+        BearerTokenV1, DomHttpChainAdapterV1, ExpectedDomIdentityV1,
+    };
     use static_assertions::assert_not_impl_any;
 
     assert_not_impl_any!(AuthenticatedDomDispatchCallV1: Clone, Copy);
     assert_not_impl_any!(AuthenticatedDomReconciliationCallV1: Clone, Copy);
+    assert_not_impl_any!(ProductionDomChildCompositionV1: Clone, Copy);
+    assert_not_impl_any!(ProductionDomF7ScannerAuthorityV1: Clone, Copy);
+    assert_not_impl_any!(ProductionDomPublicSecretConsumerAuthorityV1: Clone, Copy);
     assert_not_impl_any!(ProductionDomChildStoreAuthorityV1: Clone, Send, Sync);
 
     const fn digest(tag: u8) -> Digest32 {
@@ -2171,6 +2328,55 @@ mod tests {
             dom_exposure(ChildExposureV1::FirstSecretExposure),
             DomSettlementChildExposureV1::FirstSecretExposure
         );
+    }
+
+    fn identity_runtime() -> RealDomRpcRuntimeV1 {
+        let genesis =
+            dom_core::startup_genesis_hash_for_network_magic(dom_core::NETWORK_MAGIC_REGTEST)
+                .expect("compiled regtest genesis");
+        let adapter = DomHttpChainAdapterV1::new(
+            "http://127.0.0.1:1",
+            ExpectedDomIdentityV1 {
+                network: "regtest".to_owned(),
+                network_magic: dom_core::NETWORK_MAGIC_REGTEST,
+                chain_id: *dom_consensus::derive_chain_id(
+                    dom_core::NETWORK_MAGIC_REGTEST,
+                    &genesis,
+                )
+                .as_bytes(),
+                genesis_hash: *genesis.as_bytes(),
+                protocol_version: dom_core::PROTOCOL_VERSION,
+                range_proof_serialization_version: dom_crypto::RANGE_PROOF_SERIALIZATION_VERSION,
+            },
+            BearerTokenV1::new("runtime-identity-test".to_owned()).expect("bounded bearer"),
+            Duration::from_millis(50),
+            Duration::from_millis(50),
+        )
+        .expect("authenticated loopback client");
+        RealDomRpcRuntimeV1::new(adapter, 16).expect("bounded runtime")
+    }
+
+    #[test]
+    fn child_retained_runtime_is_the_exact_f7_runtime_identity() {
+        let child_runtime = Arc::new(identity_runtime());
+        let scanner = ProductionDomF7ScannerAuthorityV1::from_child_runtime(&child_runtime);
+        assert!(scanner.shares_runtime(&child_runtime));
+
+        // Equal public chain identity is insufficient: another physical
+        // runtime/client must never satisfy the F7 purpose handle.
+        let second_runtime = Arc::new(identity_runtime());
+        assert_eq!(
+            child_runtime.expected_identity(),
+            second_runtime.expected_identity()
+        );
+        assert!(!scanner.shares_runtime(&second_runtime));
+    }
+
+    #[test]
+    fn action_results_retain_large_authorities_behind_owned_pointers() {
+        let two_words = 2 * core::mem::size_of::<usize>();
+        assert!(core::mem::size_of::<ProductionDomActionResultV1>() <= two_words);
+        assert!(core::mem::size_of::<CompletedDomCapabilityV1>() <= two_words);
     }
 
     #[test]

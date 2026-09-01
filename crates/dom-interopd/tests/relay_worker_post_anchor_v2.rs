@@ -77,7 +77,7 @@ use relay::{ParticipantId, SenderRoleV1, TimelockSpec};
 use route_transport::{
     BridgeRefusal, DurableFrameReassemblerConfigV2, DurableInboxConfigV1, DurablePayloadCommitV1,
     DurablePayloadDispositionV1, DurableRelaySenderConfigV1, DurableRelaySenderV1,
-    F6PayloadDeliveryV1, F6TransportPortV1, FramedContractsTransportErrorV2, RelayQueueV1,
+    F6PayloadDeliveryV1, F6TransportPortV1, FramedContractsTransportErrorV2, RelaySubmitQueueV1,
     RouteDispatchErrorV1, RouteWireContextV1, MAX_ROUTE_TRANSPORT_PAYLOAD_BYTES,
 };
 use static_assertions::assert_not_impl_any;
@@ -364,15 +364,9 @@ struct AncestryQueue {
     relay: ProductionRelayV1,
 }
 
-impl RelayQueueV1 for AncestryQueue {
+impl RelaySubmitQueueV1 for AncestryQueue {
     fn queue_submit(&mut self, raw: &[u8]) -> Result<AckV1, BridgeRefusal> {
         self.relay.submit(raw).map_err(BridgeRefusal::DurableRelay)
-    }
-
-    fn queue_deliver(&self, recipient: &ParticipantId) -> Result<Vec<Vec<u8>>, BridgeRefusal> {
-        self.relay
-            .deliver(recipient)
-            .map_err(BridgeRefusal::DurableRelay)
     }
 }
 
@@ -466,7 +460,7 @@ fn worker_config_for(local_initiator: bool, peers: AncestryPeers) -> RelayWorker
         peers.responder
     };
     let sender = sender_config_for(local_initiator, peers);
-    let inbox = DurableInboxConfigV1::new([discriminator + 2; 32], wire(), local, 128)
+    let inbox = DurableInboxConfigV1::new([discriminator + 2; 32], [0xd1; 32], wire(), local, 128)
         .expect("valid inbox config");
     let frames = DurableFrameReassemblerConfigV2::new(
         [discriminator + 3; 32],
@@ -732,7 +726,7 @@ fn post_anchor_v2_evidence_only_ancestry_installs_accepts_take_and_reinstall(
     // Negative: the edge arrives with no capability installed. The generic
     // derived path must not promote an unseen `0x0f`.
     submit_signed_dsc1(&mut peer, &mut relay, &honest)?;
-    assert_eq!(worker.ingest_mailbox(&relay, now())?.accepted, 1);
+    assert_eq!(worker.ingest_mailbox(&mut relay.relay, now())?.accepted, 1);
     let before = snapshot_store_tree(&contracts_root)?;
     let unprepared = worker
         .dispatch_inbound()
@@ -822,7 +816,7 @@ fn post_anchor_v2_evidence_only_ancestry_reissues_across_worker_and_store_restar
         PreparedContractsIngressV1::post_anchor_claim_pre_signature_v2(prepared),
     )?;
     submit_signed_dsc1(&mut peer, &mut relay, &honest)?;
-    assert_eq!(worker.ingest_mailbox(&relay, now())?.accepted, 1);
+    assert_eq!(worker.ingest_mailbox(&mut relay.relay, now())?.accepted, 1);
     worker.dispatch_inbound()?;
     let accepted = worker.contracts_session_status()?;
     let after_accept = snapshot_store_tree(&contracts_root)?;
@@ -892,7 +886,7 @@ fn post_anchor_v2_evidence_only_ancestry_exact_duplicate_adds_no_revision(
     // Positive: the first delivery is the real edge and moves the head once.
     let before = worker.contracts_session_status()?.revision;
     submit_signed_dsc1(&mut peer, &mut relay, &honest)?;
-    assert_eq!(worker.ingest_mailbox(&relay, now())?.accepted, 1);
+    assert_eq!(worker.ingest_mailbox(&mut relay.relay, now())?.accepted, 1);
     worker.dispatch_inbound()?;
     let accepted = worker.contracts_session_status()?.revision;
     assert_eq!(accepted, before + 1);
@@ -903,7 +897,7 @@ fn post_anchor_v2_evidence_only_ancestry_exact_duplicate_adds_no_revision(
     // by the Contracts layer on the exact inner bytes and not by the relay
     // dropping it.
     submit_signed_dsc1(&mut peer, &mut relay, &honest)?;
-    assert_eq!(worker.ingest_mailbox(&relay, now())?.accepted, 1);
+    assert_eq!(worker.ingest_mailbox(&mut relay.relay, now())?.accepted, 1);
     worker.dispatch_inbound()?;
     assert_eq!(worker.contracts_session_status()?.revision, accepted);
     assert_eq!(snapshot_store_tree(&contracts_root)?, after_accept);
@@ -963,14 +957,14 @@ fn post_anchor_v2_evidence_only_ancestry_equivocation_fails_closed() -> Result<(
     // attributable to the second message and not to a graph that was already
     // unusable.
     submit_signed_dsc1(&mut peer, &mut relay, &honest)?;
-    assert_eq!(worker.ingest_mailbox(&relay, now())?.accepted, 1);
+    assert_eq!(worker.ingest_mailbox(&mut relay.relay, now())?.accepted, 1);
     worker.dispatch_inbound()?;
     let accepted = worker.contracts_session_status()?;
     assert_ne!(accepted.phase, SessionPhaseV1::FailedClosed);
 
     // The equivocation is persisted and the session is terminal afterwards.
     submit_signed_dsc1(&mut peer, &mut relay, &conflicting)?;
-    assert_eq!(worker.ingest_mailbox(&relay, now())?.accepted, 1);
+    assert_eq!(worker.ingest_mailbox(&mut relay.relay, now())?.accepted, 1);
     worker.dispatch_inbound()?;
     let failed = worker.contracts_session_status()?;
     assert_eq!(failed.phase, SessionPhaseV1::FailedClosed);
@@ -981,7 +975,7 @@ fn post_anchor_v2_evidence_only_ancestry_equivocation_fails_closed() -> Result<(
     // the terminal state byte-identical.
     for message in [&honest, &conflicting] {
         submit_signed_dsc1(&mut peer, &mut relay, message)?;
-        assert_eq!(worker.ingest_mailbox(&relay, now())?.accepted, 1);
+        assert_eq!(worker.ingest_mailbox(&mut relay.relay, now())?.accepted, 1);
         let _ = worker.dispatch_inbound();
         assert_eq!(
             worker.contracts_session_status()?.phase,

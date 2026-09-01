@@ -51,7 +51,13 @@ fn wire() -> RouteWireContextV1 {
 }
 
 fn config() -> Result<DurableInboxConfigV1, Box<dyn Error>> {
-    Ok(DurableInboxConfigV1::new(INBOX, wire(), SOLVER, 64)?)
+    Ok(DurableInboxConfigV1::new(
+        INBOX,
+        [0x91; 32],
+        wire(),
+        SOLVER,
+        64,
+    )?)
 }
 
 fn expiry() -> TimelockSpec {
@@ -170,7 +176,12 @@ fn production_resume_refuses_inbox_traffic_transplant_and_unknown_entry(
     let mut relay = RelayV1::new();
     sender()?.send(&mut relay, b"economic".to_vec(), expiry(), [3; 32])?;
     let mut inbox = DurableRelayInboxV1::create(&economic, config()?, &rosters())?;
-    assert_eq!(inbox.ingest(&relay, &rosters(), now())?.accepted, 1);
+    assert_eq!(
+        inbox
+            .ingest_ephemeral_v1(&relay, &rosters(), now())?
+            .accepted,
+        1
+    );
     drop(inbox);
     assert!(matches!(
         DurableRelayInboxV1::resume_create_production(&economic, config()?, &rosters()),
@@ -552,7 +563,7 @@ fn accepted_envelope_survives_restart_and_contracts_receipt_loss() -> Result<(),
     let temporary = secure_tempdir()?;
     let root = temporary.path().join("inbox");
     let mut inbox = DurableRelayInboxV1::create(&root, config()?, &rosters())?;
-    let first = inbox.ingest(&relay, &rosters(), now())?;
+    let first = inbox.ingest_ephemeral_v1(&relay, &rosters(), now())?;
     assert_eq!(
         (first.accepted, first.duplicates, first.refused.len()),
         (1, 0, 0)
@@ -587,7 +598,7 @@ fn accepted_envelope_survives_restart_and_contracts_receipt_loss() -> Result<(),
 
     // Relay remains at-least-once forever; another pull is an inbox duplicate,
     // not a second Contracts delivery.
-    let duplicate = recovered.ingest(&relay, &rosters(), now())?;
+    let duplicate = recovered.ingest_ephemeral_v1(&relay, &rosters(), now())?;
     assert_eq!((duplicate.accepted, duplicate.duplicates), (0, 1));
     assert_eq!(recovered.dispatch_routes(&mut contracts)?.applied, 0);
     Ok(())
@@ -608,7 +619,7 @@ fn one_transcript_orders_interleaved_f6_and_route_consumers() -> Result<(), Box<
     let root = temporary.path().join("inbox");
     let mut inbox = DurableRelayInboxV1::create(&root, config()?, &rosters())
         .map_err(|error| format!("create inbox: {error:?}"))?;
-    let ingested = inbox.ingest(&relay, &rosters(), now())?;
+    let ingested = inbox.ingest_ephemeral_v1(&relay, &rosters(), now())?;
     assert_eq!(ingested.accepted, 3);
     assert!(ingested.refused.is_empty());
     assert_eq!(
@@ -639,8 +650,8 @@ fn one_transcript_orders_interleaved_f6_and_route_consumers() -> Result<(), Box<
 }
 
 #[test]
-fn production_relay_implements_the_same_queue_and_replays_ack_after_restart(
-) -> Result<(), Box<dyn Error>> {
+fn production_relay_pages_one_item_persists_inbox_then_acks_and_gcs() -> Result<(), Box<dyn Error>>
+{
     let temporary = secure_tempdir()?;
     let relay_root = temporary.path().join("relay");
     let relay_config = RelayDatabaseConfigV1::new(RelayDatabaseIdV1::new([0x91; 32])?, 64)?;
@@ -660,8 +671,11 @@ fn production_relay_implements_the_same_queue_and_replays_ack_after_restart(
 
     let inbox_root = temporary.path().join("inbox");
     let mut inbox = DurableRelayInboxV1::create(&inbox_root, config()?, &rosters())?;
-    let ingest = inbox.ingest(&relay, &rosters(), now())?;
+    let ingest = inbox.ingest(&mut relay, &rosters(), now())?;
     assert_eq!((ingest.accepted, ingest.refused.len()), (1, 0));
+    assert_eq!(relay.len()?, 0, "Relay GC follows the durable inbox commit");
+    let empty = inbox.ingest(&mut relay, &rosters(), now())?;
+    assert_eq!((empty.accepted, empty.duplicates), (0, 0));
     let mut contracts = RestartSafeContractsPort::default();
     assert_eq!(inbox.dispatch_routes(&mut contracts)?.applied, 1);
     assert_eq!(contracts.payloads, vec![b"production-dsc1".to_vec()]);
@@ -678,7 +692,12 @@ fn real_contracts_store_commit_is_redelivered_as_duplicate_after_both_restarts(
     sender()?.send(&mut relay, signed_dsc1, expiry(), [5; 32])?;
     let inbox_root = temporary.path().join("inbox");
     let mut inbox = DurableRelayInboxV1::create(&inbox_root, config()?, &rosters())?;
-    assert_eq!(inbox.ingest(&relay, &rosters(), now())?.accepted, 1);
+    assert_eq!(
+        inbox
+            .ingest_ephemeral_v1(&relay, &rosters(), now())?
+            .accepted,
+        1
+    );
 
     let mut port = RealContractsStorePort {
         store,
@@ -735,7 +754,12 @@ fn truncating_even_the_last_inbox_row_is_detected_on_reopen() -> Result<(), Box<
     let temporary = secure_tempdir()?;
     let root = temporary.path().join("inbox");
     let mut inbox = DurableRelayInboxV1::create(&root, config()?, &rosters())?;
-    assert_eq!(inbox.ingest(&relay, &rosters(), now())?.accepted, 1);
+    assert_eq!(
+        inbox
+            .ingest_ephemeral_v1(&relay, &rosters(), now())?
+            .accepted,
+        1
+    );
     drop(inbox);
 
     let connection = rusqlite::Connection::open(root.join("route-inbox-v1.sqlite3"))?;

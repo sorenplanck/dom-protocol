@@ -279,6 +279,10 @@ impl SettlementChildObserverV1 for BoxedChildPortAuthorityV1 {
 /// Compatibility composition for callers whose dispatch and observation
 /// implementations are separate values.  It is still one owned child port in
 /// the bridge and holds no `RefCell`/lock across chain RPC.
+#[expect(
+    dead_code,
+    reason = "retained surface not yet wired by the stage-7 composition root"
+)]
 struct SplitSettlementChildPortV1<C, O> {
     authority: C,
     observer: O,
@@ -381,6 +385,10 @@ impl core::fmt::Debug for ProductionSettlementAuthoritiesV1 {
 }
 
 /// Assembles the crate-private production bridge with the system clock.
+#[expect(
+    dead_code,
+    reason = "retained surface not yet wired by the stage-7 composition root"
+)]
 pub(crate) fn assemble_production_settlement_authorities_v1<P, I, C, O>(
     coordinator: DurableSettlementCoordinatorV1,
     config: ProductionSettlementBridgeConfigV1,
@@ -458,6 +466,10 @@ where
     )
 }
 
+#[expect(
+    dead_code,
+    reason = "retained surface not yet wired by the stage-7 composition root"
+)]
 struct ProductionSettlementBridgePartsV1<P, I, C, O, K> {
     coordinator: DurableSettlementCoordinatorV1,
     config: ProductionSettlementBridgeConfigV1,
@@ -468,6 +480,10 @@ struct ProductionSettlementBridgePartsV1<P, I, C, O, K> {
     clock: K,
 }
 
+#[expect(
+    dead_code,
+    reason = "retained surface not yet wired by the stage-7 composition root"
+)]
 fn assemble_production_settlement_authorities_with_clock_v1<P, I, C, O, K>(
     parts: ProductionSettlementBridgePartsV1<P, I, C, O, K>,
 ) -> ProductionSettlementAuthoritiesV1
@@ -862,7 +878,6 @@ impl ProductionSettlementBridgeCoreV1 {
                     Ok(fresh_now)
                 })
                 .map_err(map_coordinator_error)?;
-            drop(authority);
             validate_deferred_materialization_transition(&prior_view, &materialized)?;
             let post_materialization_now = clock.now_unix_ms()?;
             if capability_expires_at < post_materialization_now {
@@ -1836,7 +1851,7 @@ fn domain_digest(domain: &[u8], parts: &[&[u8]]) -> Result<Digest32, AuthorityRe
     Ok(output)
 }
 
-fn map_coordinator_error(error: CoordinatorErrorV1) -> AuthorityRefusalV1 {
+pub(crate) fn map_coordinator_error(error: CoordinatorErrorV1) -> AuthorityRefusalV1 {
     match error {
         CoordinatorErrorV1::StorageUnavailable
         | CoordinatorErrorV1::LeaseHeld

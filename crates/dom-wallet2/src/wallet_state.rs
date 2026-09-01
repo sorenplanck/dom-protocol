@@ -24,7 +24,10 @@ use serde::{Deserialize, Serialize};
 
 /// Payload schema version (design §2.3 `schema_version`). An on-disk value this
 /// build does not understand is rejected by [`crate::persist::load_wallet_state`].
-pub const SCHEMA_VERSION: u16 = 2;
+pub const SCHEMA_VERSION: u16 = 3;
+
+/// Last payload schema that predates durable payout pins.
+pub(crate) const LEGACY_SCHEMA_VERSION_V2: u16 = 2;
 
 /// The complete wallet v2 state — the persisted payload (design §2.3).
 ///

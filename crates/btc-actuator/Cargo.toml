@@ -30,7 +30,7 @@ thiserror = { workspace = true }
 zeroize = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rustix = { version = "=1.1.4", default-features = false, features = ["fs", "process"] }
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process"] }
 
 [dev-dependencies]
 kaystra-core = { path = "../kaystra-core" }

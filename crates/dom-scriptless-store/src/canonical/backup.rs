@@ -30,7 +30,10 @@ pub struct BackupManifestV1 {
 impl BackupManifestV1 {
     /// Constructs the exact signed P1-002 backup-manifest bytes.
     #[cfg(any(test, feature = "evidence-only"))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+    )]
     pub fn new(
         contract_wallet_id: [u8; 32],
         source_vault_id: [u8; 32],
@@ -140,7 +143,10 @@ pub struct BackupBundleV1 {
 impl BackupBundleV1 {
     /// Constructs the exact 180-byte bundle preimage in signed field order.
     #[cfg(any(test, feature = "evidence-only"))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+    )]
     pub fn new(
         backup_id: [u8; 32],
         backup_generation: u64,

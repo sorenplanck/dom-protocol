@@ -9,6 +9,10 @@
 mod admission;
 mod driver;
 #[cfg(feature = "production")]
+mod production_bitcoin_prebroadcast;
+#[cfg(feature = "production")]
+mod production_chain_services;
+#[cfg(feature = "production")]
 mod production_chain_signers;
 #[cfg(feature = "production")]
 mod production_child_btc;
@@ -21,14 +25,32 @@ mod production_child_evm;
 #[cfg(feature = "production")]
 mod production_child_router;
 #[cfg(feature = "production")]
+mod production_evm_remote_signer;
+#[cfg(feature = "production")]
+mod production_evm_signer;
+#[cfg(feature = "production")]
 pub mod production_f6;
+#[cfg(feature = "production")]
+mod production_f6_activation;
+#[cfg(feature = "production")]
+mod production_f6_factory;
+#[cfg(feature = "production")]
+mod production_f6_lifecycle;
+#[cfg(feature = "production")]
+mod production_f7_m8;
 // `config-only` compiles this module for its own codec/golden tests without
 // the production graph; it deliberately re-exports nothing (see below), so its
 // public items are unused in that build alone.
+#[cfg(feature = "production")]
+mod production_composite_loop;
 #[cfg(any(feature = "production", feature = "config-only"))]
 mod production_config;
 #[cfg(feature = "production")]
 pub(crate) mod production_contracts;
+#[cfg(feature = "production")]
+mod production_contracts_bootstrap;
+#[cfg(feature = "production")]
+mod production_contracts_session_bootstrap;
 #[cfg(feature = "production")]
 mod production_inputs;
 #[cfg(feature = "production")]
@@ -39,13 +61,25 @@ mod production_materializer;
 #[cfg(any(feature = "production", feature = "config-only"))]
 mod production_node;
 #[cfg(feature = "production")]
+mod production_noise_relay;
+#[cfg(feature = "production")]
+mod production_plan_persistence;
+#[cfg(feature = "production")]
 mod production_plan_source;
 #[cfg(feature = "production")]
 mod production_provisioning;
 #[cfg(feature = "production")]
 pub mod production_refund_arming;
 #[cfg(feature = "production")]
+mod production_relay_network_config;
+#[cfg(feature = "production")]
+mod production_relay_network_runtime;
+#[cfg(feature = "production")]
+mod production_relay_stage12;
+#[cfg(feature = "production")]
 mod production_run;
+#[cfg(feature = "production")]
+mod production_runner;
 #[cfg(feature = "production")]
 pub(crate) mod production_settlement;
 #[cfg(feature = "production")]
@@ -78,19 +112,49 @@ pub use driver::{
     RouteDriverAuthoritiesV1, RouteDriverErrorV1,
 };
 #[cfg(feature = "production")]
+pub use production_chain_services::{
+    load_production_chain_services_v1, ProductionChainServicesConfigV1,
+    ProductionChainServicesErrorV1, MAX_PRODUCTION_CHAIN_SERVICES_CONFIG_BYTES_V1,
+    PRODUCTION_CHAIN_SERVICES_CONFIG_FILE_V1,
+};
+#[cfg(feature = "production")]
 pub use production_config::{
-    load_production_create_bootstrap_v1, load_production_create_bootstrap_v2,
-    load_production_create_bootstrap_v3, load_production_reopen_bootstrap_v1,
-    load_production_reopen_bootstrap_v2, load_production_reopen_bootstrap_v3,
-    ProductionBootstrapConfigV1, ProductionBootstrapModeV1, ProductionConfigErrorV1,
-    ProductionPathKindV1, ProductionPathReferencesV1, ProductionPathRoleV1, ProductionRoutePinsV1,
+    bitcoin_prebroadcast_script_digest_v7, load_production_create_bootstrap_v1,
+    load_production_create_bootstrap_v10, load_production_create_bootstrap_v2,
+    load_production_create_bootstrap_v3, load_production_create_bootstrap_v4,
+    load_production_create_bootstrap_v5, load_production_create_bootstrap_v6,
+    load_production_create_bootstrap_v7, load_production_create_bootstrap_v8,
+    load_production_create_bootstrap_v9, load_production_reopen_bootstrap_v1,
+    load_production_reopen_bootstrap_v10, load_production_reopen_bootstrap_v2,
+    load_production_reopen_bootstrap_v3, load_production_reopen_bootstrap_v4,
+    load_production_reopen_bootstrap_v5, load_production_reopen_bootstrap_v6,
+    load_production_reopen_bootstrap_v7, load_production_reopen_bootstrap_v8,
+    load_production_reopen_bootstrap_v9, production_f6_authority_bundle_digest_v8,
+    ProductionBitcoinPrebroadcastPinsV7, ProductionBootstrapConfigV1, ProductionBootstrapModeV1,
+    ProductionConfigErrorV1, ProductionContractsBootstrapPinsV5, ProductionF6PathReferencesV4,
+    ProductionF6PathReferencesV8, ProductionF6PathRoleV4, ProductionF6PathRoleV8,
+    ProductionFamilyInputsV10, ProductionFamilyInputsV5, ProductionFamilyInputsV6,
+    ProductionFamilyInputsV7, ProductionFamilyInputsV8, ProductionFamilyInputsV9,
+    ProductionOperationalPoliciesV10, ProductionPathKindV1, ProductionPathReferencesV1,
+    ProductionPathRoleV1, ProductionRelayAuthorityPinsV6, ProductionRoutePinsV1,
     ProductionRuntimeBoundsV1, ValidatedProductionBootstrapV1, ValidatedProductionLayoutV1,
-    MAX_PRODUCTION_BOOTSTRAP_BYTES_V1, MAX_PRODUCTION_RELATIVE_PATH_BYTES_V1,
-    PRODUCTION_CREATE_CONFIG_FILE_V1, PRODUCTION_CREATE_CONFIG_FILE_V2,
-    PRODUCTION_CREATE_CONFIG_FILE_V3, PRODUCTION_NODE_CONFIG_FILE_V1,
-    PRODUCTION_PATH_ROLE_COUNT_V1, PRODUCTION_PATH_ROLE_COUNT_V2, PRODUCTION_PATH_ROLE_COUNT_V3,
-    PRODUCTION_REOPEN_CONFIG_FILE_V1, PRODUCTION_REOPEN_CONFIG_FILE_V2,
-    PRODUCTION_REOPEN_CONFIG_FILE_V3,
+    MAX_PRODUCTION_BOOTSTRAP_BYTES_V1, MAX_PRODUCTION_F6_AUTHORITY_BUNDLE_BYTES_V8,
+    MAX_PRODUCTION_RELATIVE_PATH_BYTES_V1, PRODUCTION_CREATE_CONFIG_FILE_V1,
+    PRODUCTION_CREATE_CONFIG_FILE_V10, PRODUCTION_CREATE_CONFIG_FILE_V2,
+    PRODUCTION_CREATE_CONFIG_FILE_V3, PRODUCTION_CREATE_CONFIG_FILE_V4,
+    PRODUCTION_CREATE_CONFIG_FILE_V5, PRODUCTION_CREATE_CONFIG_FILE_V6,
+    PRODUCTION_CREATE_CONFIG_FILE_V7, PRODUCTION_CREATE_CONFIG_FILE_V8,
+    PRODUCTION_CREATE_CONFIG_FILE_V9, PRODUCTION_F6_PATH_ROLE_COUNT_V4,
+    PRODUCTION_F6_PATH_ROLE_COUNT_V8, PRODUCTION_NODE_CONFIG_FILE_V1,
+    PRODUCTION_PATH_ROLE_COUNT_V1, PRODUCTION_PATH_ROLE_COUNT_V10, PRODUCTION_PATH_ROLE_COUNT_V2,
+    PRODUCTION_PATH_ROLE_COUNT_V3, PRODUCTION_PATH_ROLE_COUNT_V4, PRODUCTION_PATH_ROLE_COUNT_V5,
+    PRODUCTION_PATH_ROLE_COUNT_V6, PRODUCTION_PATH_ROLE_COUNT_V7, PRODUCTION_PATH_ROLE_COUNT_V8,
+    PRODUCTION_PATH_ROLE_COUNT_V9, PRODUCTION_REOPEN_CONFIG_FILE_V1,
+    PRODUCTION_REOPEN_CONFIG_FILE_V10, PRODUCTION_REOPEN_CONFIG_FILE_V2,
+    PRODUCTION_REOPEN_CONFIG_FILE_V3, PRODUCTION_REOPEN_CONFIG_FILE_V4,
+    PRODUCTION_REOPEN_CONFIG_FILE_V5, PRODUCTION_REOPEN_CONFIG_FILE_V6,
+    PRODUCTION_REOPEN_CONFIG_FILE_V7, PRODUCTION_REOPEN_CONFIG_FILE_V8,
+    PRODUCTION_REOPEN_CONFIG_FILE_V9, REFUND_ARMING_DATABASE_FILE_V1,
 };
 #[cfg(feature = "production")]
 pub use production_inputs::{
@@ -105,15 +169,25 @@ pub use production_inputs::{
 };
 #[cfg(feature = "production")]
 pub use production_node::{
-    load_production_node_config_v1, read_production_secrets_from_stdin, DomNodeEndpointV1,
-    ProductionNodeBoundsV1, ProductionNodeConfigV1, ProductionSecretsV1,
-    MAX_DOM_NODE_BEARER_BYTES_V1, MAX_DOM_NODE_ENDPOINT_BYTES_V1, MAX_DOM_NODE_NETWORK_BYTES_V1,
+    load_production_node_config_v1, read_production_secrets_from_stdin,
+    read_production_secrets_v2_from_stdin, read_production_secrets_v3_from_stdin,
+    DomNodeEndpointV1, ProductionNodeBoundsV1, ProductionNodeConfigV1, ProductionSecretsV1,
+    ProductionSecretsV2, ProductionSecretsV2ErrorV1, ProductionSecretsV3,
+    ProductionSecretsV3ErrorV1, MAX_DOM_NODE_BEARER_BYTES_V1, MAX_DOM_NODE_ENDPOINT_BYTES_V1,
+    MAX_DOM_NODE_NETWORK_BYTES_V1, MAX_PRODUCTION_F6_HSM_CREDENTIALS_PER_LEG_V3,
     MAX_PRODUCTION_NODE_CONFIG_BYTES_V1,
+};
+#[cfg(feature = "production")]
+pub use production_relay_network_config::{
+    load_production_relay_network_config_v1, ProductionRelayEndpointModeV1,
+    ProductionRelayLinkPositionV1, ProductionRelayNetworkConfigErrorV1,
+    ProductionRelayNetworkConfigV1, ProductionRelayNetworkLinkV1,
+    MAX_PRODUCTION_RELAY_NETWORK_CONFIG_BYTES_V1, PRODUCTION_RELAY_NETWORK_CONFIG_FILE_V1,
 };
 #[cfg(feature = "production")]
 pub use production_run::{
     run_production_v1, ProductionRunErrorV1, ProductionRunModeV1, ProductionRunOptionsV1,
-    UnavailableRunnerAuthorityV1, MISSING_PRODUCTION_PARTS_V1,
+    PRODUCTION_KNOWN_LIMITS_V1,
 };
 #[cfg(feature = "production")]
 pub use production_signal::{

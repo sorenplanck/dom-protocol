@@ -26557,6 +26557,1594 @@ Nenhum `allow` ou `expect` será adicionado para mascarar esses diagnósticos. O
 
 O push autorizado é um checkpoint de preservação “through stage 6”, não um release. O escrivão volta a ficar congelado após este registro.
 
+### 2026-08-31T14:19:10-03:00 — Checkpoint Etapa 6 publicado em `mainnetswap`
+
+O commit de código é `b77695b95abd888ed32b8ea9bd77765afbacebd0`, parent remoto `fc1774a50ee4ebddb0a67d77d10f44ba5c0e7374`, subject `feat(interop): integrate durable execution through stage 6`.
+
+Autor e committer foram verificados como `Soren Planck <sorenplanck@tutamail.com>`, sem trailers. O push normal, sem force, foi aceito: `fc1774a..b77695b HEAD -> mainnetswap` em `https://github.com/sorenplanck/dom-protocol.git`.
+
+O fetch pós-push confirmou o remoto. A branch local foi renomeada para `mainnetswap` e rastreia `origin/mainnetswap`.
+
+Esta publicação é um checkpoint “through Stage 6”, não um release global. A Etapa 7 ainda não foi iniciada. Este registro será publicado em um segundo commit documental atômico.
+
+O escrivão volta a ficar congelado após este registro.
+
+### 2026-08-31T14:26:22-03:00 — Etapa 7 iniciada; publicação documental cancelada
+
+O commit documental `7de637e` não foi publicado por ordem do operador. `origin/mainnetswap` permanece em `b77695b`.
+
+A branch local `mainnetswap` foi reconstruída sobre `origin/mainnetswap`; o conteúdo documental permanece no worktree sem commit para acompanhar a Etapa 7.
+
+A Etapa 7 iniciou. O root atua no composition root; a frente F6 trabalha em `production_run`/node/main/lib; Stage 11 atua nos lints estruturais dos child ports, settlement e supervisor. Os escopos não se sobrepõem.
+
+Nenhum push futuro está autorizado sem nova ordem explícita do operador. O escrivão volta ao modo contínuo e registrará cada checkpoint material antes deste sentinel.
+
+### 2026-08-31T14:35:06-03:00 — Etapa 7: lock único preservado e config/signers divididos
+
+A branch local `mainnetswap` continua alinhada ao origin em `b77695b`; a atualização documental existe apenas no worktree, sem commit ou push.
+
+F6 confirmou que o lock process-wide já é o `_lock: File` retido por `DurableProductionProvisioningJournalV1`: `provisioning.lock` valida uid, mode, nlink e inode, além de manter `flock`. Criar outro lock seria duplicar o owner físico e foi corretamente rejeitado.
+
+O gap real está em node/secrets V1, que cobre somente DOM e oito secrets: ainda faltam RPCs EVM/BTC e um signer EVM produtivo. O root assumiu um novo módulo signer EIP-1559; F6 assumiu node/secrets V2 e clients explícitos, sem defaults ou env implícito.
+
+Stage7-B mapeou os lints estruturais e começou a aplicar hunks sem `allow`.
+
+### 2026-08-31T14:54:02-03:00 — Etapa 7-B: lints estruturais corrigidos em cinco arquivos
+
+Em escopo exclusivo, `production_child_dom` recebeu context tipado para authority, boxing dos dois enums grandes, `contains`/`matches` e teste de size/boxing. `production_child_evm` recebeu input move-only tipado em `new_materializing` e `matches`; `production_child_btc` também usa `matches`; `production_settlement` removeu `drop_non_drop`; `supervisor` removeu cinco `Ok(?)` desnecessários.
+
+Não foram adicionados `allow` ou `expect`. O dead code foi preservado para ser eliminado pelo wiring real, não escondido.
+
+Antes de um patch concorrente, `cargo check` production all-targets passou em aproximadamente 65 s; o clippy estrutural com `-A dead-code -D warnings` passou em 47,20 s. O full test será rerodado após freeze porque `production_chain_services` estava sendo alterado concorrentemente.
+
+### 2026-08-31T14:57:22-03:00 — Etapa 7: finding de custody EVM e wire path ausente
+
+O port EVM atual exige simultaneamente signers locais de funder e beneficiary, embora o daemon autentique um único participante. Hotspots: `production_child_evm.rs:62-67,160-186,195-275,466-480,628-660`.
+
+O signer local correto já é fortemente pinado por role/account em `production_evm_signer.rs:94-200`, portanto não pode ser reutilizado para a contraparte nem fabricado. Relay fecha em kind `0x0005` e DSC1 fecha em `0x14`; não existe wire path legítimo para assinatura EVM remota.
+
+O desenho proposto separa authority local single-role de uma authority remota move-only via Contracts/Relay, com capability de signed tx durável `Pending/Ready` e import verificado no actuator. Isso exige ratificação explícita de `EvmActionRequest`/`EvmSignedAction`, propostos como `0x15/0x16`; piggyback ou weakening são proibidos.
+
+O auditor não realizou edits nem Cargo; a lacuna permanece aberta.
+
+### 2026-08-31T15:03:49-03:00 — Etapa 7-C: desenho DSC1 EVM 0x15/0x16 iniciado
+
+`0x15` será um request DSC1 fixed, sem raw transaction nem scalar. `0x16` carregará o raw assinado exato, bounded e ligado ao digest do request.
+
+As duas mensagens pertencem à mesma phase, avançam o transcript e usam inbox/outbox duráveis do Store. Handles são move-only e ligados a open instance/owner epoch; roster, sequence, replay e equivocation são verificados de ponta a ponta. A faixa `0x00–0x14` permanece inalterada.
+
+Cargo só será executado depois de static-ready.
+
+### 2026-08-31T15:04:30-03:00 — Etapa 7: protocolo auxiliar EVM ratificado
+
+Foi ratificada a implementação DSC1 same-phase `0x15 EvmActionRequest` / `0x16 EvmSignedAction` sobre Relay `0x0005`. Ack `0x14` continua único e sem avanço de phase.
+
+O request fixed/canonical contém apenas IDs, digests, action, role, chain, account e owner epoch, sem raw ou scalar. A response ecoa o binding e request digest, além de raw signed bounded, seu digest e txhash. O Store terá handles move-only/open-instance e APIs outbound/ingress para request/response com transcript, replay, equivocation e epoch.
+
+Depois dessa camada virão import verificado no actuator e custody Local/Remote no child port.
+
+O signer local permanece stateless porque `DurableEvmActuator` é o journal único: Prepared é persistido antes da chamada; o one-shot é derivado/recomputado; recovery e low-s são verificados; a assinatura é persistida antes do broadcast; duplicate pós-commit não chama o signer. Um segundo journal foi rejeitado para evitar cross-store gap.
+
+### 2026-08-31T15:18:49-03:00 — Etapa 7: exclusividade EVM remota exige delegation
+
+As leases de account do actuator são locais e não provam exclusividade global da conta da contraparte. O composition root não pode adquirir duas leases ou duas chaves como se possuísse ambos os roles.
+
+O role Remote deve delegar nonce e assinatura ao daemon dono por `0x15/0x16`. O lado local permanece Pending até receber a resposta e só então importa/verifica o raw sob capability; sucesso fabricado é proibido.
+
+A resposta `0x16` precisa estar ligada ao request `0x15` durável e validar transaction type 2, chain, account, `to`, value, calldata, fee e txhash.
+
+### 2026-08-31T15:27:22-03:00 — Etapa 7: Route Store custody-only audit e credencial EVM local
+
+Foi adicionado `DurableRouteStoreV1::audit_external_custody_only_v1`. O método executa `verify_replay`, inspeciona todo o journal `CommitAction`/`Reauthorize` e recusa qualquer `RunnerPayload` histórico como `CorruptState`.
+
+O filtro Cargo passou dois testes e zero falhas, com 17 filtrados: positivo custody-only e negativo com runner já concluído depois de reopen.
+
+Também foi criado o seam `ProductionEvmLocalCredentialV1` para import/account/bind e XOR de role, sem expor nem copiar o scalar.
+
+### 2026-08-31T15:33:24-03:00 — Etapa 7-C: transporte EVM fatia 1 static-ready
+
+O request DSC1 `0x15` tem encoding fixo de 352 bytes e não contém raw nem scalar. A response `0x16` tem prefixo de 452 bytes mais raw assinado limitado a 8 KiB, ligado exatamente a request digest, owner epoch, action, route, settlement, role e account commitments.
+
+O Store usa o journal existente para inbox/outbox/recovery. Handles são move-only e ligados à open instance; import da response aceita é one-shot por abertura e permite retry exato após restart.
+
+A validação completa do raw no actuator ainda é obrigatória. `rustfmt` e `git diff --check` estão verdes; Cargo permanece pendente. Arquivos: transport lib, Store `session_store` e três reexports. Quatro testes novos foram adicionados e aguardam execução.
+
+### 2026-08-31T15:38:58-03:00 — Etapa 7-C: compile incremental e focused gates
+
+O check incremental da production lib terminou com exit 0, ainda emitindo 444 warnings de dead code porque o wiring da Etapa 7 não está montado.
+
+Os testes focados do transporte EVM passaram 2/2. Os testes focados do Store EVM também passaram 2/2, com 412 filtrados.
+
+O único warning novo é `AuthenticatedEvmActionRequest.sequence` não usado; foi encaminhado para remoção sem `allow`. A suíte completa anterior de RouteExecutor está verde 41/41.
+
+### 2026-08-31T15:42:56-03:00 — Etapa 7-C: clippy transport verde; Store com um finding
+
+O strict clippy all-targets de `dom-scriptless-transport` terminou verde.
+
+O strict clippy de `dom-scriptless-store` ficou vermelho por um único `drop_non_drop` em teste, causado por `drop(accepted_request)`. A correção estrutural foi encaminhada; nenhum `allow` será usado.
+
+### 2026-08-31T15:44:44-03:00 — Etapa 7-C: slice DSC1 0x15/0x16 totalmente verde
+
+Após remover os `drop` de tipos non-Drop, o strict clippy all-targets de `dom-scriptless-store` terminou verde. O strict clippy all-targets de RouteExecutor também passou; sua suíte completa permanece verde 41/41.
+
+Com transport e Store focused tests já verdes, o slice DSC1 `0x15/0x16` está agora verde em testes focados e strict clippy.
+
+### 2026-08-31T15:47:09-03:00 — Etapa 7: políticas RPC timeout static-ready
+
+Os três clientes agora possuem policies tipadas e bounded de connect/request, com constructors explícitos. Constructors antigos delegam para defaults exatos.
+
+Valores: EVM 5/20 s, máximos 30/120; `btc-actuator` 5/30 s, máximos 30/300; `btc-live` 3/60 s, máximos 30/300. Todos exigem valores nonzero e `connect <= request`.
+
+`rustfmt` e `git diff --check` estão verdes. Cargo ainda não foi executado e nenhum arquivo do daemon foi editado por essa frente.
+
+### 2026-08-31T15:58:17-03:00 — Etapa 7: retomada pós-compactação e checkpoint F6
+
+O trabalho foi retomado após compactação diretamente do checkpoint, sem reinício.
+
+O focused de timeout EVM passou 1/1. A tabela F6 confirmou `DurableRelayInbox` pending como fonte de RFQ e identificou lacunas reais ainda abertas: ingress de status/time, bond signer, terms authority e role-plan/scopes.
+
+A Etapa 7 continua. Nenhum commit foi criado.
+
+### 2026-08-31T16:03:32-03:00 — Etapa 7: RPC timeout gates verdes nos três clientes
+
+Os focused de timeout EVM, `btc-actuator` e `btc-live` passaram 1/1 cada. O strict clippy all-targets dos três crates também terminou verde.
+
+O único vermelho intermediário foi um import ausente do tipo no teste de `btc-actuator`; ele foi corrigido estruturalmente e o teste rerodou verde.
+
+Stage 11 foi liberada para implementar import remoto EIP-1559 verificado, com escopo exclusivo em `evm-actuator`.
+
+### 2026-08-31T16:09:12-03:00 — Etapa 7: F6 `AwaitingAuthenticatedInputs` static-ready
+
+Foi criado `crates/dom-interopd/src/production_f6_lifecycle.rs`, com apenas o `mod production_f6_lifecycle` adicional em `lib.rs`.
+
+`DurableRelayInbox` continua owner do RFQ pending. Restart ou transplant de RFQ não marcam a entrega como delivered/failed. Uma factory purpose-limited recebe capability move-only exata e devolve authority pending tipada ou `ProductionSolverF6Authority` concreto, que recebe a mesma delivery.
+
+As variantes pending cobrem activation, RFQ, status, time, bond, terms, role-plan e remote-EVM. `rustfmt` e `git diff --check` estão verdes, sem `allow`/`unwrap`/`expect` produtivos.
+
+Cargo ainda não foi executado por freeze central. `production_chain_services` não foi tocado e permanece sob ownership do root.
+
+### 2026-08-31T16:11:28-03:00 — Etapa 7: proposta de import EVM remoto assinado
+
+Sem edits, foi mapeado um schema V4 com tabela 1:1 de bindings remotos. A operação entraria em `Signed` com attempt1 de forma atômica, sem nonce snapshot ou reserva local.
+
+O import exige decoder RLP type-2 canônico/bounded e verificação integral. APIs distintas para open, claim e refund preservam allowance e deadline; fresh fence, idempotência e crash recovery continuam obrigatórios.
+
+O bump de schema e a API aguardam ratificação do root antes de mudanças extensas.
+
+### 2026-08-31T16:15:00-03:00 — Regra permanente: gates isolados antes da integração
+
+Todo crate alterado deve passar `cargo check` isolado com as features mínimas, seguido de testes e clippy isolados, antes de gates integrados ou do workspace. Feature unification nunca será aceita como evidência única.
+
+O finding `rustix` presente no checkpoint `b77695b` foi confirmado como falha real da Etapa 6 mascarada pela unificação de features. A feature `std` foi adicionada a Store, RouteExecutor, `btc-actuator`, `evm-actuator` e `solver-inventory`.
+
+Os checks isolados de Store, RouteExecutor e `btc-actuator` já estão verdes. Os demais gates isolados permanecem pendentes. Nenhum commit foi criado.
+
+### 2026-08-31T16:28:23-03:00 — Gates isolados `rustix` e blocker de restart F6
+
+Gates concluídos:
+
+- Store: check, 15 testes e clippy verdes.
+- RouteExecutor: check, 41 testes e clippy verdes.
+- `btc-actuator`: check, 28 testes — 18 lib, nove adversariais e um participant — e clippy verdes; o live regtest selecionou zero porque não foi solicitado neste gate.
+- `solver-inventory`: check, 23 testes — oito + 15 — e clippy verdes.
+
+`evm-actuator` aguarda a fatia de remote import. Churn global do `Cargo.lock` foi recusado e restaurado; somente a aresta `evm-actuator → blake2` foi adicionada.
+
+Foi detectado um blocker de restart F6. O replay read-only de delivery `Applied` já foi especificado e deve ser implementado/testado antes do fechamento.
+
+### 2026-08-31T16:41:45-03:00 — Etapa 7: replay F6 read-only static-ready
+
+`DurableRelayInbox` ganhou replay read-only e ordenado das rows F6 `Applied`. Cada item exige downstream Applied, duplicate e receipt exato; mismatch resulta em `CorruptState` e zero mutação da inbox.
+
+O lifecycle exige esse replay antes de pending dispatch e mantém a entrada pending após restart, factory ausente ou transplant.
+
+Testes internos cobrem restart genérico com dois Applied duplicates, divergências de receipt/nonduplicate/`FailedClosed`, stats/digest de reopen intactos e lifecycle pending/position transplant.
+
+Arquivos: route-transport durable/lib e `production_f6_lifecycle` mais o mod em lib. `rustfmt` e `git diff --check` estão verdes; Cargo não foi executado. Nenhum commit ou push foi realizado.
+
+### 2026-08-31T16:42:20-03:00 — Etapa 7: fail-fast do artefato production e recovery F6
+
+Em `main.rs`, o caminho production agora chama `require_operational_artifact_v1` antes de parsear path, ler nove secrets, abrir stores ou tocar a rede. Compilar com feature production em debug não é suficiente para passar o gate.
+
+No F6 static-ready, o lifecycle inicia em `RecoveryRequired` e só libera dispatch depois de replay integral read-only dos Applied em ordem, cada um com duplicate e receipt exato, sem `UPDATE`.
+
+Os gates isolados de route-transport foram iniciados.
+
+### 2026-08-31T16:53:51-03:00 — Etapa 7: route-transport replay F6 isolado verde
+
+`route-transport` passou check com `--no-default-features`, suíte completa 55/55 — 18 + 13 + 8 + 13 + 3 — com zero falhas/ignored, e strict clippy all-targets verde.
+
+O primeiro clippy encontrou dois wrappers do Store usados apenas em testes. Eles foram corrigidos estruturalmente com `cfg(test)`, sem `allow` ou `expect`, e o rerun ficou verde.
+
+### 2026-08-31T17:02:04-03:00 — Etapa 7: EVM compile findings, artifact duplo e loopback estrito
+
+O check isolado de `evm-actuator` no snapshot congelado encontrou exatamente três erros: mismatch `OperationControl` vs `EvmActuatorLease` em 2605/2650 e move de `Vec` no guard em 5606. Eles foram devolvidos ao agente para correção e migração.
+
+O root adicionou defesa dupla do artefato: `main` verifica antes do parse, e `run_production_v1` verifica novamente antes de stdin/path/Store. O run instala uma signal bridge real antes de qualquer outro worker. Um teste debug prova recusa `StartupArtifact` antes de qualquer input.
+
+A revisão de chain-services mostrou que a regra de HTTP loopback existia em teste, mas não no código. A implementação agora aceita somente literais `127.0.0.1` ou `[::1]`, com porta u16 nonzero opcional; rejeita `localhost`, lookalikes e portas inválidas.
+
+### 2026-08-31T17:04:47-03:00 — Etapa 7: gap de bootstrap autenticado dos Contracts Stores
+
+`open_contracts_store_pair` cria ou reabre Stores crus/pristine, mas `ProductionContractsV1::create/open` exige sessão, transport roster e duas identity refs já duráveis.
+
+Não existe wiring produtivo que derive um `SessionRecord Created` — transcript inicial, DOM chain tip, payload cifrado e nonce epoch — e execute `bind_transport_roster`/identity refs a partir de terms, identity, wallet e node.
+
+Assim, os Stores crus ainda não podem virar owners Relay/DOM. A correção deve ser uma authority de bootstrap autenticada; `initial_record` de fixture ou fatos fornecidos pelo caller são proibidos.
+
+### 2026-08-31T17:28:33-03:00 — Correção Stage 7: posição final do signal bridge
+
+A arquitetura anterior que instalava signalfd antes do stdin não é final: isso poderia suprimir SIGTERM enquanto a leitura de segredos bloqueasse sem loop para consumir o token.
+
+O artifact guard continua sendo o primeiro gate. O signal bridge final é instalado imediatamente depois da leitura única dos nove segredos via stdin e antes de qualquer worker, Relay, RPC client ou actuator.
+
+### 2026-08-31T17:28:33-03:00 — Etapa 7: EVM remote import static-ready; Store gate em andamento
+
+O slice EVM remote signed action está static-ready e congelado: schema V4 com migração V3→V4 atômica; custody remota separada de nonce lease; decoder EIP-1559 canônico/bounded com low-s/signer; import persist-before-broadcast; lifecycle remoto; e allowance ERC-20 remoto com fresh-time, fence e evidência recomputável. Adversariais cobrem expiry, transplant, restart, tamper e crash migration.
+
+Arquivos: `evm-actuator` Cargo.toml, lib/model/transaction/store e adversarial. Zero `allow`/`expect`; `rustfmt` e `git diff --check` verdes. Cargo isolado aguarda o Store.
+
+O gate isolado completo de `dom-scriptless-store` está em execução: check já verde; 414 testes com matrizes reais de crash/subprocesso, sem falha observada até o checkpoint.
+
+### 2026-08-31T17:32:52-03:00 — Etapa 7: suíte Store encontrou dois vermelhos reais
+
+A suíte completa de `dom-scriptless-store` encontrou falhas em `authorization_from_an_old_open_instance_is_rejected_after_restart` e `b2_v2_issuance_funding_template_crossbinding_rejects_coherent_substitution`.
+
+O Store não está verde. Aguardam-se conclusão da suíte e backtraces completos antes do diagnóstico; nenhum teste ou expectativa será enfraquecido.
+
+### 2026-08-31T17:47:42-03:00 — Etapa 7: causa dos vermelhos Store corrigida nas fixtures
+
+Dois hunks acidentais em fixtures haviam trocado `FundingAuthorized` por `RefundSigned`, em `funding_successors` e `v2_record_codec_fixture`. O caminho real exige `FundingAuthorized`.
+
+A alteração afetava pelo menos stale-open, funding persisted, concurrent funding, caller-shaped profile, mature refund, abort-vs-funding e B2 crossbinding. As duas fixtures foram restauradas para `FundingAuthorized`; `git diff --check` no Store está verde.
+
+O censo restante/codecs ainda aguarda o panic final antes da classificação. O gate completo não é declarado verde neste checkpoint.
+
+### 2026-08-31T17:48:25-03:00 — Precisão da auditoria read-only das fixtures Store
+
+HEAD confirma `FundingAuthorized` como baseline correto nos dois pontos. A primeira regressão contrariava diretamente `issue_funding_authorization`; a segunda contaminava as fixtures six-record codec e B2 crossbinding.
+
+Os caminhos census/pre-recovery/wrong-magic não possuem hunk atual e, por leitura, devem executar census/quarantine antes de recovery (`session_store.rs:4572-4577`). Sem panic/tail, eles não foram classificados como falha de pressão. O auditor não realizou edits nem Cargo.
+
+### 2026-08-31T17:50:45-03:00 — Correção: Store census tem causa determinística em HEAD
+
+A avaliação anterior de census aguardando panic/tail foi superada por leitura completa: a causa está em HEAD e não é pressão ambiental.
+
+`prepare_open` instala exclusions do staging em `session_store.rs:4575` antes do census em 4576. O census usa `scan_lexicographic` em 34325, enquanto `linux.rs:886-901` omite exatamente essas exclusions. Assim, mixed final/staging enxerga só final; V1+V2 staging enxerga zero; e staging wrong-magic nunca é validado e depois é apagado pelo recovery.
+
+Isso explica os testes em 42542, 42577, 42962 e 43035. O caso same artifact final+staging continua barrado por capture em 36020-36023; staging isolado é esperado permitir.
+
+Fix conceitual: executar census antes de instalar exclusions, preservando exclusions antes de preflight/recovery. O auditor não realizou edits nem Cargo.
+
+### 2026-08-31T17:52:10-03:00 — Etapa 7: correção Store census aplicada
+
+A ordem agora é: capture → canonical inventory → census ainda enxergando staging → `install_scan_exclusions` → preflight/recovery.
+
+As fixtures e o census foram corrigidos. O gate completo que já estava em execução usa o binário antigo; seu resultado servirá somente para coletar a lista final de failures, não como validação do patch novo.
+
+### 2026-08-31T18:06:00-03:00 — Etapa 7: Store census e cascatas focais verdes
+
+No snapshot corrigido, os 12 testes de census passaram 12/12. Nove testes das cascatas de fixtures também ficaram verdes: sete filtros de um teste e um filtro six-record 2/2, sem falhas ou ignored.
+
+A suíte completa de 414 testes será executada com `test-threads=2` para evitar a saturação observada no primeiro run; depois virá o strict clippy.
+
+### 2026-08-31T18:14:01-03:00 — Coordenação Store: run parcial substituído pelo full padrão
+
+O run completo com `test-threads=2` foi encerrado parcialmente, sem falha, porque a auditoria já provou que os vermelhos anteriores eram determinísticos e não causados por paralelismo. Esse parcial não conta como gate.
+
+Ele foi substituído pela suíte completa padrão de 414 testes no snapshot corrigido para reduzir latência. O run está em curso, sem failure observado até este checkpoint.
+
+### 2026-08-31T18:33:54-03:00 — Etapa 7: veredito integral do bootstrap bilateral Contracts
+
+#### Superfície existente
+
+`production_run.rs:512-558` abre Stores crus em `_contracts_stores` e para em `NotComposable` nas linhas 560-567; o holder está em 729-732. `open_contracts_store_pair` ocupa 803-877: Create chama `resume_create_production` do Store em 832-845; Reopen usa `prepare_open_production(...).finish()` em 853-867.
+
+O owner `ProductionContractsV1<F>` está em `production_contracts.rs:364-384`, com create 390-429, open 431-470 e resume 472-511. Em produção, Create deve sempre ser resume-create; Reopen deve apenas abrir.
+
+O owner exige session, roster e refs já duráveis. `validate_and_bind_identity` em 849-920 carrega refs, exige ordem Initiator/Solver, aceita exatamente um match local, proíbe reuse de chave Contracts↔Relay em 906-913 e só então liga o signer local em 914. `validate_relay_roster` está em 922-952.
+
+Uma única identity store física deve ser aberta em `Rc` e compartilhada; os constructors já aceitam `Into<Rc>`. A identity local já existe na config V2–V4 em `production_config.rs:635-668`, getter 786-813 e layout 1140-1149. O loader exige artefato preexistente owner-only e nunca cria (`1367-1371`, `2133-2142`, `2222-2229`); `production_run` atualmente descarta a senha em 235. A API correta é `ContractsTransportIdentityStoreV1::open_production` em identity-store `lib.rs:321-345`, com reference em 347-350. É necessário traversal por capability até parent+basename; uma capability isolada do state-dir não resolve caminho aninhado extra.
+
+#### Ausências confirmadas
+
+Não existe ref Contracts remota nos inputs: `ProductionRosterMember` contém apenas participant id, chave Relay BIP340 e role (`production_inputs.rs:240-272`); `AuthenticatedProductionInputs` em 1007-1024 não inclui Noise, Schnorr, key_ref ou bootstrap. Os binds no daemon são apenas fixtures.
+
+Não existe sealer/produtor produtivo do payload inicial. `SessionRecord::new` no daemon só aparece em teste; o Store preserva o blob e o codec aceita vazio.
+
+Não existe handshake pre-session. Relay create/resume/open (`relay_worker.rs:994-1125`) já exige Store/session. `prepare_early_transport_authority` do Store em 8966-9026 exige session, roster, refs e dois `SharedBlindingBinding` completos antes das mensagens 0x01–0x04.
+
+#### Initial record exato
+
+`session_id` é a session de terms upstream/downstream da composition; `terms_hash` é o hash exato dos terms; revision é 0; stage é `Created`; todos os flags são false; `nonce_epoch=0`, conforme `canonical/session.rs:256-277`.
+
+O transcript é `initial_transcript_hash_v1(trusted_chain, session, WitnessOrTimeout, participant_roster)` (`dom-adaptor/session.rs:311-330`). O roster é ordenado por participant id e contém identity key Schnorr Contracts, `R_i` signing key e direction.
+
+A chain deve vir de uma única leitura `dom_adapter.scan_page(genesis, 1)` (`chain-adapter/lib.rs:710-747`), compartilhada pelas duas legs. Tip e snapshot são exatos; tx observations iniciam `Unknown`; `TrustedChainId` é derivado de magic+genesis observados e deve igualar o expected. Erro RPC falha fechado.
+
+Payload `b''` é correto porque secrets permanecem em authorities externas e não existe consumidor do blob, mas deve ser produzido por um constructor tipado `ExternalSecretCustodyInitialSessionV1`, nunca por bytes caller-shaped.
+
+#### Protocolo bilateral separado
+
+Antes de persistir a primeira leg, deve existir e estar fsynced um `ContractsSessionPairBootstrapV1` com os dois records exatos, seus digests e o snapshot único. Depois de crash, o tip não pode ser recomputado.
+
+O Store precisa de `resume_create_initial_session(authenticated_initial)`: se ausente, cria; se existente, exige bytes revision0 idênticos e audita. Também precisa de `open_existing_initial_session(expected_digest)` sem criar, pois `load_session` devolve somente o head.
+
+O roster Relay não será ampliado e nenhum handshake inexistente será reutilizado. O bootstrap usa transcript V5 separado, bounded/versioned e dual-assinado pelas chaves Relay congeladas: primeiro commit dual-signed, depois reveal/final dual-signed, preservando anti-grinding de `DecoyContribution` (`decoy_capsule.rs:41-83`, combine 120-165).
+
+O resultado `AuthenticatedContractsBootstrap`/`SignedBundle`, por leg, liga network, route, position, DOM chain+genesis+registry, session, terms, roster, policy, kind e directions. Por participante, liga Contracts key_ref, Noise, Schnorr, `R_i` e pending-binding; inclui commitments, reveals, recovery capsule e signatures.
+
+A verificação Schnorr→participant usa `audit_retained_participant_id_v1` (`dom-adaptor/session.rs:116-132`). A ref local deve ser byte-exact à `identity.reference`; refs e Noise devem ser distintos; Contracts keys devem diferir das duas chaves Relay.
+
+Config V5 adiciona somente ref+digest pinados desse artefato separado; não mistura chaves Contracts no roster Relay.
+
+#### Ordem segura 1–9
+
+1. Carregar inputs autenticados e obter a leitura DOM única e exata.
+2. Abrir uma única identity store física em `Rc`.
+3. Executar handshake/share respaldado pelo vault por `contribute_vault_backed_blinding_share_v1` / `open_pending` (`shared_blinding_vault.rs:1355-1424`).
+4. Validar/reconstruir bindings, dois records e snapshot; persistir/fsync o pair bootstrap antes de qualquer session individual.
+5. Executar resume initial, bind roster na ordem das directions e bind refs na mesma ordem; Store 7401-7474, com idempotência `publish_immutable` em 34264+.
+6. Preparar a early transport authority.
+7. Construir `RouteWireContext` e Relay configs. Sender/inbox/frame ids e quotas ainda faltam na config e precisam ser pins/bounds ratificados.
+8. Preservar a ordem de provisioning: Contracts=10, F6=11, Relay=12.
+9. Depois de F6 real, construir os owners com a mesma identity `Rc`; só então criar child authorities, sem reabrir Store.
+
+O agente fez apenas auditoria: zero edits e zero Cargo.
+
+### 2026-08-31T18:33:54-03:00 — Coordenação: artefato bootstrap Contracts em frente exclusiva
+
+Uma frente independente implementa somente o módulo canônico/verificador do bundle bilateral Contracts, dual-assinado pelas chaves Relay, com testes adversariais. O artefato permanece separado do roster.
+
+Essa frente não edita config, Store ou run e não executa Cargo enquanto o gate do Store estiver ativo. O root mantém gates/composição; EVM continua congelado.
+
+### 2026-08-31T18:51:54-03:00 — Etapa 7: retomada pós-compactação no gate autoritativo Store
+
+A Etapa 7 foi retomada exatamente do checkpoint, sem reinício. O gate autoritativo de `dom-scriptless-store` continua na session 82897, com 414 unit tests.
+
+Nenhuma falha foi observada até agora e todos os antigos vermelhos já alcançados no rerun passaram. `post_anchor_projection_nonconfirmed...` e `post_anchor_v2_cross_session...` estão OK; `post_anchor_v2_raw_projection_cas...` permanece em execução há mais de 60 s.
+
+O gate ainda não é declarado concluído.
+
+### 2026-08-31T18:54:36-03:00 — Etapa 7: matriz integral Store permanece vermelha
+
+A matriz integral de `dom-scriptless-store` na session 82897 detectou duas falhas até o momento: `prepared_open_refuses_staging_path_swap_before_recovery_apply` e `prepared_operational_bp_rejects_context_order_tamper_and_equivocation`.
+
+O gate não está verde. A matriz continua até produzir o diagnóstico total; nenhuma conclusão foi antecipada e nenhuma expectativa ou invariante será relaxada.
+
+### 2026-08-31T18:55:36-03:00 — Etapa 7: artefato bilateral Contracts static-ready, sem gate Cargo
+
+A frente exclusiva de bootstrap acrescentou `production_contracts_bootstrap.rs` e somente a linha `mod` necessária. O artefato V1 possui tamanho canônico fixo de 2010 bytes: corpo bilateral de 1754 bytes e quatro assinaturas Relay BIP340 ordenadas.
+
+O corpo e o verificador ligam os escopos bilaterais de rede, rota, posições, sessões, terms, DOM/registry, identidades Contracts e contribuições commit/reveal; aplicam ordenação, canonicalidade, distinção de identidades/chaves, vínculo participante→assinatura Relay e verificação das quatro assinaturas. Testes adversariais estáticos acompanham a implementação.
+
+`rustfmt` e `git diff --check` estão verdes. Cargo ainda não foi executado: o módulo não está declarado verde e a frente permanece congelada até liberação do root.
+
+Detalhamento do handoff: o arquivo tem 1211 linhas. O digest global cobre os dois legs; cada digest individual acrescenta position, session, snapshot, participant, direction e role/chave Relay, impedindo transplante cross-leg. A verificação aceita somente `ComposedBindingV2`, `ResolvedRegistryV1`, `ProductionRelayRosterBundleV1` e `SecpContext` autenticados; confere registry digest/epoch, DOM chain/genesis, roster/policy/kind, SEC1 Schnorr e `R_i`, commit/reveal e cápsula de 96 bytes nos dois sentidos, mapeamento 1:1 das identidades e desigualdade entre chaves x-only Contracts e Relay. O resultado é move-only.
+
+Os adversariais cobrem truncamento/trailing, mutação de cada byte unsigned, transplantes de assinatura/corpo entre legs, roles, colisões de ref/Noise/Schnorr, reutilização Relay e adulteração de reveal/cápsula.
+
+### 2026-08-31T19:22:08-03:00 — Etapa 7: diagnóstico integral Store e reruns focados
+
+A matriz `dom-scriptless-store` encerrou com 388 testes aprovados, quatro falhas e 22 ignorados em 3488,71 s. As quatro falhas foram diagnosticadas, sem relaxar os invariantes:
+
+- Os testes BP/template esperavam indevidamente duplicate ACK depois de uma equivocation já persistida. Foram alinhados à semântica fail-closed fixada por `pending_equivocation...`: a redelivery original retorna `EquivocationPersisted`, sem ressuscitar ACK.
+- A fixture staging-swap plantava o arquivo não registrado antes de `prepare`, exercitando rejeição de inventory em vez do TOCTOU pretendido. O replacement agora é plantado somente após prepare/captura.
+- O census de FDs lia `/proc/self/fd` process-global dentro do harness paralelo. A medição foi isolada em subprocesso e mantém o mesmo limite `+16`.
+
+`cargo fmt` e `git diff --check` estão verdes. Uma primeira invocação com filtro `--exact` selecionou zero testes e não conta como evidência; o rerun correto do teste FD segue em execução na session 25680. O Store ainda não está declarado verde.
+
+### 2026-08-31T19:35:54-03:00 — Etapa 7: correções Store focadas verdes
+
+Os quatro alvos corrigidos passaram individualmente:
+
+- O census FD em subprocesso passou 1/1 em 274,98 s.
+- O staging swap ainda falhou uma vez porque a fixture usava modo `0400`, enquanto o Store exige `FILE_MODE` e recusava antes da captura. Original e replacement foram corrigidos para artefato canônico com `FILE_MODE`; o diagnóstico temporário foi removido e o teste passou 1/1.
+- BP equivocation passou 1/1.
+- Template equivocation passou 1/1.
+
+`cargo fmt` e `git diff --check` permanecem verdes. Esses filtros focados não fecham o gate: a matriz integral padrão será repetida antes de qualquer declaração verde.
+
+### 2026-08-31T19:37:12-03:00 — Etapa 7: P0 anti-grinding no artefato Contracts
+
+A revisão estática rejeitou como insuficiente o artefato Contracts de 2010 bytes e quatro assinaturas. As quatro assinaturas cobriam apenas o bundle final, que já continha commitments, reveals e cápsula; assim, não provavam que o commitment foi assinado antes do reveal e não fechavam o anti-grinding exigido.
+
+A frente foi instruída a substituir o desenho por dois estágios canônicos: primeiro, commit bytes/digest sem reveal ou cápsula e quatro assinaturas Relay; depois, um digest final que liga o commit digest aos reveals/cápsula e outras quatro assinaturas Relay. Os adversariais devem impedir transplante entre estágio ou perna e provar que assinatura final não pode substituir assinatura de commit.
+
+O artefato anterior permanece não-verde. A correção está em andamento sem Cargo.
+
+### 2026-08-31T19:42:00-03:00 — Etapa 7: anti-grinding Contracts corrigido estaticamente
+
+O wire V1 anterior foi substituído por 2538 bytes canônicos em dois estágios:
+
+- Commit: 1194 bytes, domínio `DOMCTC1`, escopo, identidades, `R_i` e commitments, sem qualquer reveal ou cápsula, seguido por quatro assinaturas Relay.
+- Reveal: 832 bytes, domínio `DOMCTR1`, commit digest explícito, reveals/cápsulas e outras quatro assinaturas Relay.
+
+O verifier reencoda o commit, deriva seu digest e valida as quatro assinaturas antes de aceitar qualquer reveal; depois cruza commit, reveal e cápsula sob domínio próprio. Todas as assinaturas estão ligadas a leg, session, snapshot, participant, direction, role e key.
+
+Os testes estáticos cobrem transplantes entre legs nos dois estágios, assinatura final no lugar da commit e vice-versa, mutações de commitment/reveal, todos os bytes de ambos os estágios e cross-role. `rustfmt` e `git diff --check` estão verdes. Cargo não foi executado e a frente voltou a ficar congelada; portanto, ainda não é gate verde.
+
+Precisão do layout: 1194 bytes de commit + 256 bytes das quatro assinaturas de commit + 832 bytes de reveal que inclui `commit_digest` + 256 bytes das quatro assinaturas de reveal = 2538 bytes. A capability resultante é move-only e expõe separadamente os dois digests autenticados.
+
+### 2026-08-31T19:47:23-03:00 — Etapa 7: auditoria read-only do import EVM remoto
+
+A auditoria confirmou como satisfeitos: binding integral do unsigned, decodificação type-2 canônica, low-s e signer exato; custody remota sem nonce local; persistência antes do send com fence fresh; migração atômica V3→V4; raw válido sob `Zeroizing`; e allowance ERC-20 remoto finalized.
+
+Permanecem três findings abertos:
+
+- P0: a evidence retida de allowance omite `observed_at` e `valid_until`, e o audit aceita igualdade, permitindo adulteração do TTL no banco.
+- P1: o constructor inválido de `RemoteSignedAction` descarta um `Vec` plaintext antes de envolvê-lo em `Zeroizing`.
+- P1: não há rejeição de equivocation de allowance remoto dentro do mesmo bloco.
+
+O auditor não editou código nem executou Cargo; os findings foram enviados ao root.
+
+### 2026-08-31T19:50:56-03:00 — Etapa 7: hardening EVM static-ready após auditoria
+
+Os três findings foram corrigidos estaticamente. A evidence de allowance agora compromete `observed_at` e `valid_until`, e o audit exige `valid_until > observed_at`; raw inválido entra em `Zeroizing` antes de qualquer retorno de erro; divergência de allowance no mesmo bloco retorna `ObservationMismatch`.
+
+Novos adversariais cobrem equivocation e adulteração de TTL seguida de reopen fail-closed. `rustfmt`, `git diff --check` e a varredura de zero `allow` estão verdes. Cargo ainda não foi executado, portanto esta fatia permanece static-ready, não gated.
+
+O digest autentica ambos os tempos; a matriz inclui também TTL igual (`valid_until == observed_at`). Os arquivos foram congelados e aguardam a janela Cargo posterior ao Store.
+
+### 2026-08-31T19:53:08-03:00 — Etapa 7: mapa read-only da integração Contracts V5
+
+A frente Contracts mapeou, sem edits ou Cargo, a integração V5/config, o ponto de entrada em `production_inputs`, a criação dos dois `SessionRecord`/Stores, a abertura única do identity store e a ordem run/provisioning.
+
+Correção importante do mapa: o artefato já contém as duas chaves públicas exigidas por `ParticipantIdentityV1`; Contracts Schnorr é `identity_public_key` e `R_i` é `signing_public_key`, exatamente como o Store exige.
+
+Blockers reais: V5 ainda não existe; o run descarta adapter e chain signers; não abre o identity store; Stage 10 conclui somente diretórios; composition F6/Relay ainda não existe. O payload inicial vazio ainda requer decisão explícita ou sealer tipado, não bytes caller-shaped.
+
+O mapa de integração exige que V5 preserve V1–V4 byte-exatos e acrescente somente path do artefato e os digests commit/reveal. O artefato deve ser autenticado depois dos stable pins da composition e antes de admitir ou persistir a rota.
+
+Cada initial `SessionRecord` deve ser revision 0, `Created`, com payload vazio tipado, transcript/roster/cápsulas derivados e genesis obtido da DOM viva; o transport roster é ligado segundo a direção de cada perna. Uma única `ContractsTransportIdentityStore` é aberta em `Rc` e compartilhada. Stage 10 somente pode concluir após reautenticar sessions, rosters, refs, local signer e early authority; nenhum desses passos pode ser substituído pelo mero provisionamento dos diretórios.
+
+### 2026-08-31T20:01:09-03:00 — Etapa 7: config V5 Contracts static-ready
+
+A V5 foi implementada exclusivamente em `production_config.rs`, sem Cargo. A família fechada possui header/files/count 42; pins tipados e distintos para commit/reveal; `ProductionFamilyInputsV5`; constructor e getters; codec canônico; artefato como `InputFile` owner-only; loaders create/reopen/resume; binding de provisioning; e filenames reservados. V1–V4 permanecem byte-exatos e sem campos V5.
+
+Os adversariais cobrem roundtrip, trailing, mutação, cross-family, alias de path, pins zero/iguais ou colidindo com os 18 pins existentes, companion substitution, presença física e ausência de linhas V5 nos layouts V1–V4. A implementação usa subestrutura forte, sem `allow`.
+
+`rustfmt` e `git diff --check` estão verdes. A fatia aguarda gate Cargo e ainda não é declarada verde.
+
+### 2026-08-31T20:04:16-03:00 — Etapa 7: auditoria read-only da config V5
+
+A auditoria confirmou o desenho estático: V1–V3 possuem goldens literais byte-exatos; V5 tem 77 linhas exatas, contra 74 da V4, acrescentando path bootstrap e dois pins; reencode é exato e canônico. O artefato é `InputFile` owner-only em create/reopen/provisioning. Os 20 pins são nonzero e pairwise-distinct. Companion cobre extras, e o journal binding liga bytes canônicos create/reopen e `route_id`.
+
+Lacunas de evidência a corrigir apenas nos testes: falta um golden V4 independente, teste V5 específico de resume/provisioning e teste reveal-vs-18 pins.
+
+Seams de integração ainda abertos: leitura semântica exata dos 2538 bytes, autenticação contra os pins e defesa TOCTOU pertencem a `production_inputs`; o loader low-level de reopen depende do binding/journal posterior; `production_run` permanece V4. Nenhum Cargo foi executado e o auditor não editou código.
+
+### 2026-08-31T20:08:32-03:00 — Etapa 7: lacunas de evidência V5 fechadas estaticamente
+
+As três lacunas de testes da config V5 foram corrigidas somente em `production_config.rs`:
+
+- `GOLDEN_CREATE_V4` é agora literal independente de 74 linhas e 4275 bytes. O digest do body é `1d479b9f113c9ccebe4630aadee1094dc2accb2c1a80da62a1e285262c39a1e6`; o hash completo é `dd73439a7e165ff8c868d3d171e47ba1914334a222b6ebc60637bba8c8c4c495`. Ambos foram validados externamente com `b2sum`; o teste fixa bytes, hashes, decode e preservação V1–V4.
+- O teste V5 percorre create-or-resume real com companion binding, journal e artefato modo `0600`, e depois prova recusa em `0640`.
+- A distinctness cobre separadamente commit e reveal contra cada um dos 18 pins anteriores.
+
+`rustfmt` e `git diff --check` estão verdes. Cargo continua não executado; este fechamento é static-ready, não gate final.
+
+### 2026-08-31T20:33:26-03:00 — Etapa 7: gate autoritativo Store final verde
+
+`cargo test --locked --offline -p dom-scriptless-store --no-default-features` terminou com exit 0. A matriz unit/integration passou 392 testes, zero falhas e 23 ignored em 3396,64 s; os doc-tests passaram 17/17 em 5,79 s.
+
+As quatro falhas do run integral anterior passaram no snapshot corrigido. O gate autoritativo de testes do Store está fechado verde.
+
+O gate strict-clippy isolado também está verde: `cargo clippy --locked --offline -p dom-scriptless-store --no-default-features --all-targets -- -D warnings`, exit 0 em 39,93 s.
+
+### 2026-08-31T20:34:37-03:00 — Etapa 7: primeiro gate isolado EVM vermelho
+
+O gate isolado de `evm-actuator` terminou com exit 101 e sete erros de compilação. `RemoteAllowanceEvidenceFieldsV1` ainda não possuía os campos `observed_at` e `valid_until` já usados pelo digest e initializers; além disso, o initializer de `OperationRow` em `store.rs:3908` não preenchia esses dois campos.
+
+O diagnóstico foi enviado ao owner EVM. A falha é isolada e real, não está sendo escondida por feature unification; nenhum gate EVM foi declarado verde.
+
+Após corrigir os sete erros no tipo correto, o check mínimo isolado passou: `cargo check --locked --offline -p evm-actuator --no-default-features`, exit 0 em 1,20 s. Testes e clippy isolados ainda são gates separados.
+
+O gate full no-default de testes EVM passou: 10/10 unit e 39/39 adversariais, doc-tests 0, exit 0. As verificações novas de TTL e equivocation no mesmo bloco estão incorporadas aos adversariais existentes. O clippy isolado continua gate pendente.
+
+O primeiro strict clippy no-default ficou vermelho, exit 101, com um único finding: `remote_unsigned_call_digest` possui oito argumentos contra o limite sete em `transaction.rs:159`. Nenhum `allow` será adicionado; a correção exigida é um binding tipado que preserve todos os campos, seguido de rerun.
+
+O finding foi corrigido com o value object `RemoteUnsignedCallBindingV1`, preservando todos os campos e sem `allow`. O strict clippy isolado EVM foi repetido e passou, exit 0 em 3,95 s.
+
+Após o refactor, a suíte EVM foi repetida e permaneceu verde: unit 10/10 em 7,70 s, adversarial 39/39 em 27,58 s, doc-tests 0, exit 0.
+
+O perfil produtivo RPC HTTP também está verde isoladamente: check `--no-default-features --features rpc-http` exit 0 em 11,60 s; strict clippy com as mesmas features, all-targets e `-D warnings` exit 0 em 19,12 s. O atuador EVM isolado está fechado.
+
+### 2026-08-31T20:39:30-03:00 — Etapa 7: fatia EVM remote signed action concluída
+
+Arquivos da fatia: `crates/evm-actuator/Cargo.toml`, `src/lib.rs`, `src/model.rs`, `src/transaction.rs`, `src/store.rs` e `tests/adversarial.rs`; `src/rpc.rs` contém apenas a timeout policy já gated anteriormente.
+
+Invariantes fechados: request/custody são ligados a route, owner epoch e action, separados da lease de nonce; o unsigned digest compromete kind, role, route, effect, semantic e todos os campos call/deployment/lock/cap, exceto nonce e fee concretos escolhidos pelo signer remoto. O decoder exige EIP-1559 type-2 RLP canônico, máximo 8 KiB, access list vazia, low-s, account recuperado e raw/hash exatos. Import é persist-before-broadcast com CAS, idempotência, fresh-time e fence; broadcast/observe/reconcile/adopt remotos não assumem nonce local.
+
+O schema V4 exige XOR entre `local_authority` e `remote_custody`; a migração V3→V4 é atômica, autenticada, com crash rollback e reopen idempotente. Allowance ERC-20 remota exige finality, custody scope, source proofs, values e tempos recomputáveis; recusa equivocation no mesmo bloco. Raw é move-only, entra em `Zeroizing` antes de qualquer erro, não tem `Debug`; retained audit e adulterações falham fechadas.
+
+Testes novos cobrem decoder canônico, migração atômica, native remote fencing/transplant/restart sem nonce lease e allowance ERC-20/equivocation/TTL tamper. Gates finais: check mínimo, 10 unit + 39 adversariais, strict clippy mínimo, check rpc-http e strict clippy rpc-http, todos verdes. Zero `allow`/`expect`; nenhum commit ou push.
+
+### 2026-08-31T20:39:50-03:00 — Etapa 7: `production_inputs` V5 static-ready
+
+`production_inputs.rs` agora integra o bootstrap Contracts V5. O loader abre o artefato owner-only exato de 2538 bytes uma única vez via `read_owner_file_bounded`, retém os bytes em tipo não-Clone e autentica commit/reveal imediatamente após `validate_composition_stable_pins`, tanto em create quanto recovery, antes de qualquer admit/recover/persist no RouteStore.
+
+Os digests dos dois estágios são comparados separadamente aos pins V5; `Option<AuthenticatedContractsBootstrapV1>` é movido para `AuthenticatedProductionInputsV1`. Falhas são colapsadas no erro redacted `ContractsBootstrapRefused`. O `Option` preserva compatibilidade V1–V4; o composition root produtivo ainda deve exigir `Some` e V5.
+
+Testes estáticos cobrem tamper sem criação de RouteStore, precedência de composição inválida sobre autenticação Contracts, substituição de path após read sem alterar os bytes retidos e mismatch independente dos pins commit/reveal. `rustfmt --check` e `git diff --check` estão verdes. Cargo ainda não foi executado.
+
+### 2026-08-31T20:49:30-03:00 — Etapa 7: live entrypoint migrado para V5
+
+O root integrou `production_run` ao requisito V5: imports, loaders e provisioning binding usam V5, a documentação foi atualizada, e o live entrypoint exige `inputs.contracts_bootstrap()` como `Some` antes de qualquer auditoria ou construção de autoridades.
+
+V1–V4 continuam decodificáveis para compatibilidade fora do live entrypoint, mas não podem iniciar produção. `git diff --check` está verde; Cargo integrado ainda está pendente.
+
+### 2026-08-31T20:54:58-03:00 — Etapa 7: gates focados V5 verdes
+
+O filtro `production_config` passou 26 testes, zero falhas, três ignored e 224 filtered. O filtro exato `production_inputs::tests::v5_` passou 4/4 em 11,31 s.
+
+São gates parciais, não fechamento da integração. O strict clippy de `dom-interopd` production está ativo na session 38643; nenhum Cargo concorrente foi iniciado.
+
+O strict clippy production terminou vermelho, exit 101, com 472 diagnósticos lib e 176 lib-test. A maioria é `dead_code` estrutural porque o composition root Stage 7 ainda não liga as superfícies. Há também `type_complexity` em `production_contracts_bootstrap.rs:606` e `byte_char_slices` em `production_node.rs:1495`. Não houve diagnóstico em `production_inputs.rs`.
+
+Nenhum `allow` será usado e o vermelho confirma que a Etapa 7 ainda não está composta; os gates focados V5 permanecem válidos, mas não substituem o gate integrado.
+
+### 2026-08-31T20:57:40-03:00 — Etapa 7: mapa vertical mínimo e blockers de composição
+
+O menor vertical Stage 10 deve reter os owners, realizar uma única scan do genesis DOM, abrir uma única identidade Contracts em `Rc`, criar as duas sessions `Created` revision 0 e ligar roster/refs/early authority. O artefato V5 autentica o bootstrap, mas não avança DSC1.
+
+Relay ainda requer sete IDs/quotas inexistentes, provavelmente uma família V6. F6 ainda carece de terms authority, bond signer, inputs e lease. A proposta de pair marker adicional ficou suspensa: o journal V5 integral pode já ligar o par e garantir convergência byte-exata; uma nova API somente será aceita se o agente demonstrar um ataque que o journal atual não feche.
+
+Uma execução Cargo na session 69086 do teste inode ficou vermelha por edição concorrente em `production_node`, portanto não é gate válido. O callsite foi corrigido para `for &evm_hex` e o teste será repetido.
+
+### 2026-08-31T20:58:55-03:00 — Etapa 7: TOCTOU do artefato V5 revalidado
+
+O teste de substitution foi fortalecido para trocar realmente o inode por rename depois da leitura owner-retained única. A reexecução exata `production_inputs::tests::v5_contracts_artifact_is_retained_from_one_owner_file_open -- --exact` passou 1/1, com 252 filtered.
+
+O teste prova que a autenticação usa os bytes originais retidos e que nenhum RouteStore é criado sob a substituição. A fatia `production_inputs` está congelada.
+
+### 2026-08-31T21:00:12-03:00 — Etapa 7: superfície pública V5 exportada
+
+O root fechou em `lib.rs` a superfície de deployment V5: loaders create/reopen, `ProductionContractsBootstrapPinsV5`, `ProductionFamilyInputsV5`, filenames e count V5 agora são públicos. Antes disso, a V5 funcionava internamente, mas tooling externo não conseguia construí-la ou carregá-la.
+
+Cargo desta integração permanece pendente.
+
+### 2026-08-31T21:07:33-03:00 — Etapa 7: owner Stage 10 implementado estaticamente em módulo novo
+
+O novo módulo Stage 10 contém um owner move-only que retém o adapter DOM, uma única identity store em `Rc`, os dois Contracts Stores, dois `PreparedEarly`, bindings e capsules. Ele realiza uma única scan do genesis, deriva IDs, rosters, transcripts, records, bindings e capsules, e exige convergência e reautenticação. A abertura do identity store usa capability de path aninhado.
+
+As dependências opcionais `dom-core` e `dom-crypto` foram acrescentadas ao Cargo. O verifier também cruza participant ID com key; fixture canônica e adversarial foram reassinados.
+
+O módulo ainda não foi adicionado via `mod`, não foi ligado ao run e não executou Cargo. `rustfmt`/diff ainda aguardam conclusão; este checkpoint é somente progresso estático, não gate verde.
+
+### 2026-08-31T21:08:50-03:00 — Etapa 7: P0 participant ID ↔ Contracts key static-ready
+
+O verifier agora parseia a DOM `PublicKey` e audita que `participant_id` é derivado do `dom_chain_id` e da chave Schnorr Contracts. A fixture usa IDs canônicos e ordenados.
+
+O adversarial substitui o ID e recompõe roster, expected e assinaturas de ambos os estágios; a verificação ainda recusa, provando que reassinar o artefato não contorna o vínculo ID↔key. `rustfmt --check` e `git diff --check` estão verdes.
+
+Cargo será executado no gate Stage 10. A frente V6 Relay foi iniciada separadamente, sem Cargo.
+
+### 2026-08-31T21:18:20-03:00 — Etapa 7: Stage 10 integrado e congelado para completar adversariais
+
+O módulo Stage 10 foi integrado a run, lib e Cargo. O check isolado `cargo check --locked --offline -p dom-interopd --no-default-features --features production` passou, exit 0 em 38,68 s, ainda com aproximadamente 470 warnings estruturais da composition incompleta. O filtro focado do módulo passou 3/3, exit 0.
+
+Uma invocação posterior do teste focado do artefato foi invalidada por edição concorrente V6: terminou exit 101 antes do harness, executou zero testes e encontrou somente match V6 não exaustivo em `production_config`. Não conta como falha nem como evidência.
+
+Stage 10 está congelado. Antes do gate final ainda faltam o adversarial durable de crash depois da primeira session e o transplante de binding V5/V6. A V6 Relay continua em edição estática; Cargo serial foi suspenso até haver snapshot estável.
+
+### 2026-08-31T21:20:29-03:00 — Etapa 7: config V6 Relay static-ready
+
+A V6 Relay foi implementada somente em `production_config.rs`. Ela herda os 42 paths V5 e acrescenta 13 linhas Relay depois dos dois pins V5: total de 90 linhas e fixture de 5338 bytes, contra 4528 bytes da V5, acréscimo de 810 bytes.
+
+Foram adicionados `ProductionRelayAuthorityPinsV6`, `ProductionFamilyInputsV6`, `from_parts`, getter, decode, loaders, create-or-resume, provisioning e layout. Os adversariais cobrem canonicalidade, cross-family, congelamento V1–V5, colisões 7×20, zero/pairwise distinct, bounds, companion e journal substitution.
+
+`rustfmt --check` e `git diff --check` estão verdes. Cargo não foi executado. O snapshot estático V6 foi congelado e Stage 10 foi liberado para completar adversariais e gates em série.
+
+### 2026-08-31T21:38:44-03:00 — Etapa 7: check integrado Stage 10 + V6 verde, testes ainda ativos
+
+O check production integrado Stage 10 + V6 passou, exit 0 em 245,12 s. Permanecem 474 warnings `dead_code` estruturais da composition ainda aberta; isto não é clippy nem gate final.
+
+O filtro de cinco testes Stage 10 compilou e continua ativo há mais de seis minutos devido aos Stores production. Se ultrapassar 12 minutos será isolado por teste, sem relaxar requisitos.
+
+### 2026-08-31T21:38:44-03:00 — Etapa 7: P0s read-only do Relay operacional
+
+Foram confirmados quatro bloqueios de produção:
+
+1. `ProductionF6LifecyclePortV2` começa com `recovery_complete=false` e exige `recover_applied_history(inbox)`, mas depois de mover o inbox para `ProductionContracts`/`DurableRelayWorker` não existe surface purpose-specific; `f6_mut` não expõe inbox. Assim, o RFQ real permanece `RecoveryRequired`. É necessário hook fechado worker+wrapper antes de completar o journal.
+2. `ProductionRelayV1` tem create/open/reconstruct, mas não `creation_state`/resume pristine. Crash depois de root/identity e antes do DB deixa journal `Started` irretomável: create retorna `AlreadyExists`, open retorna `DatabaseMissing`, reconstruct não retoma pristine. Exige preflight/state/resume e testes kill.
+3. `ProductionRelayV1` é apenas DB local. `ProductionContracts` grava outbound na Queue local; o daemon remoto não pode abrir a mesma root por flock e não há network face, client, endpoint ou credential V6. Dois DBs embedded não provam interoperabilidade multi-node. É necessária autoridade de transporte de rede/processo Relay única e cliente autenticado.
+4. `RelayQueueV1::deliver` retorna `Vec` de toda a história; o poll repete tudo, chegando a aproximadamente 1 GiB (`65536 × 16742`) sem cursor, paginação ou GC. A network face exige API V2 paginada com cap rígido antes de alocar e cursor durável/idempotente.
+
+Nenhum dos quatro repos de referência oferece transporte seguro reutilizável: Cipher usa harness/socket BTC; Kaystra, urllib RPC; Keystone, JSON-RPC retry básico sem mailbox; Kael, orderbook Axum in-memory com unwraps, sem persistência, TLS, bounds ou P2P. Essa absorção foi rejeitada.
+
+A V6 permanece congelada. Endpoint/mode/TLS ou server identity e page bounds devem entrar em V7 ou artefato canônico autenticado, sem mutar V6. A auditoria foi read-only, sem edits ou Cargo.
+
+### 2026-08-31T21:56:18-03:00 — Etapa 7: P0 Stage 10 mixed complete/pristine
+
+O teste de crash depois da primeira session confirmou uma lacuna real: a Store upstream deixa de ser pristine e `resume_create_production` retorna `Quarantined`; portanto, a integração atual não converge quando uma perna está completa e a outra pristine.
+
+A correção exige API Store purpose-specific de open resumed production: recalcular `resumable_store_id` a partir do `creation_binding` sobre root/inode retido e comparar `store_id` antes de recovery. O preflight do par deve classificar e reter as duas pernas — pristine resumable ou complete-bound prepared — antes de qualquer finish/write. Stage `Complete` continua usando backup/open normal; open genérico é proibido.
+
+Testes obrigatórios: mixed nos dois sentidos, ambas complete, wrong binding, transplante e zero mutação na segunda perna.
+
+### 2026-08-31T21:56:18-03:00 — Etapa 7: resume da Relay Queue static-ready parcial
+
+Em `production.rs`, a Relay Queue ganhou `CreationState` (`Missing`, `Incomplete`, `InitializedPristine`), preflight e resume. Create precria o inode DB modo `0600` e faz fsync antes de SQLite; recusa estado econômico/recovery, identity ou quota estrangeira, schema/mode/link inválidos.
+
+Os dois testes estáticos existentes não bastam: o root rejeitou tratar rollback limpo como kill recovery. O owner está acrescentando subprocess abort real nas fronteiras root, identity, lock, inode DB e pre-schema-commit, além de recusa de lock ativo. Sem Cargo; não está verde.
+
+### 2026-08-31T22:04:37-03:00 — Etapa 7: correção mixed Stage 10 static-ready e primeiro gate verde
+
+O Store ganhou `prepare_open_resumed_production`: retém root e lock e recalcula `store_id` a partir de binding, inode, root e policy antes de qualquer recovery. O pair classifica cada leg como pristine ou complete-bound e prepara ambos antes do primeiro write. Os testes cobrem mixed nos dois sentidos, ambas complete, wrong binding e transplante.
+
+Uma primeira invocação com nome incompleto selecionou zero testes; apesar de exit 0 em 67,68 s, é inválida e não conta. A invocação exata correta do Store passou 1/1, exit 0, wall 51,55 s — compile 37,52 s e harness 11,39 s.
+
+O teste exato do pair continua ativo; a correção ainda não está fechada integralmente.
+
+### 2026-08-31T22:06:14-03:00 — Etapa 7: matriz mixed Stage 10 e adversariais verdes
+
+A pair matrix exata passou 1/1, exit 0, wall 253,34 s — compile 2m20 e harness 108,10 s. Ela cobre missing, pristine, mixed nos dois sentidos, ambas complete e wrong binding sem mutar a segunda root.
+
+O adversarial Stage 10 de crash/replay passou 1/1, exit 0, wall 62,39 s — harness 9,29 s. O transplante V5 de binding/artefato passou 1/1, exit 0, wall 11,45 s — harness 10,67 s.
+
+O gate final serial check → módulo agregado → P0 do artefato → fmt/diff está ativo; os gates focados ainda não encerram isoladamente a fatia.
+
+### 2026-08-31T22:12:31-03:00 — Etapa 7: Stage 10 final verde
+
+A fatia Stage 10 fechou seus gates: production check exit 0 em 38,47 s; módulo Stage 10 5/5; artefato P0 13/13; Store API exata 1/1; pair matrix mixed/pristine/complete 1/1; crash/replay 1/1; binding/artifact swap 1/1; `rustfmt` e `git diff --check` exit 0.
+
+A nova API `prepare_open_resumed_production` valida binding, inode, root e policy antes de qualquer write de recovery. O check ainda emite 474 warnings `dead_code` estruturais da composition não concluída; eles permanecem abertos para o gate integrado, sem mascaramento.
+
+### 2026-08-31T22:12:31-03:00 — Etapa 7: Relay resume static-ready com process-loss real
+
+Em `crates/relay/src/production.rs`, o classificador distingue `Missing`, `Incomplete` e `InitializedPristine`; resume exige o prefixo estrito root → identity → lock → DB, com inode DB modo `0600` precriado. A matriz usa perda real de processo, exit 86, em cada boundary e inclui recusa de active lock.
+
+Os gates Cargo Relay começaram em série. A fatia ainda aguarda resultados; nenhum commit ou push foi feito.
+
+### 2026-08-31T22:13:55-03:00 — Etapa 7: Relay resume P0 fechado verde
+
+O check `production-durable` passou, exit 0 em 15,74 s. Os quatro testes exatos de process-loss, active-lock, published-boundaries e refusals passaram 1/1 cada.
+
+A suíte completa passou 66/66, zero falhas e zero ignored: unit 12, auth 17, policy 18, durable 9, transport 8 e doc-tests 2. Strict clippy all-targets com `-D warnings` passou em 4,98 s; `rustfmt` e `git diff --check` também passaram.
+
+`crates/relay/src/production.rs` está congelado. Nenhum commit ou push.
+
+### 2026-08-31T22:19:40-03:00 — Etapa 7: live entrypoint e tooling migrados para V6
+
+O live entrypoint usa V6 para load create/resume, reopen e provisioning binding. `lib.rs` exporta loaders, tipos, pins, filenames e count V6.
+
+O production check passou, exit 0 em 31,78 s, ainda com 472 warnings `dead_code` estruturais da composition incompleta. Os testes config V6 passaram 4/4 pelo prefixo `v6_`; a preservação byte-exata V1–V5 passou 1/1.
+
+O adversarial de provisioning quota-substitution no perfil production ainda precisa rerun depois dos edits F6. Nenhum commit ou push.
+
+Uma tentativa desse teste V6 provisioning não é evidência nem gate: Cargo leu a Relay V2 durante edição concorrente e falhou com 11 helpers ainda não publicados, antes do snapshot ficar estável. Não há declaração de vermelho final nem mudança de decisão; o teste será repetido serialmente depois do freeze Relay.
+
+### 2026-08-31T22:26:27-03:00 — Etapa 7: P0 F6 Terms — refund face sem derivação normativa
+
+`RefundFaceV2.payout_commitment` não possui derivação normativa produtiva nos adapters; existe apenas como campo RFQ/fixture. Os artefatos reais são heterogêneos: DOM wallet payout `[u8;33]`; BTC fresh receipt com script, amount e template; EVM com beneficiary, asset, contract e lock. Criar um hash ad hoc seria placeholder proibido.
+
+A correção autorizada é um tipo privado move-only `AdapterAuthenticatedRefundFaceV2`, construído somente pelos owners DOM/BTC/EVM. O commitment V2 deve ser domain-separated sobre os artefatos canônicos reais, scope, terms, deployment, profile e deadline, com evidence recomputável e revision durável. `TermsAuthority` deve cruzar as duas faces contra `ComposedBinding`, RFQ e quote.
+
+A frente está ativa e ainda não executou Cargo.
+
+### 2026-08-31T22:31:17-03:00 — Etapa 7: route-transport zero-allow static-ready
+
+Os cinco `#[allow(clippy::too_many_arguments)]` foram removidos de `route-transport` sem alterar o wire. Digests de chunk, message e frame agora recebem value objects tipados; `sender::build_envelope` recebe `EnvelopeBuildRequestV1` e `FrameEnvelopeBindingV1`. O constructor com sete argumentos não precisava de supressão e permaneceu direto.
+
+`rg` confirma zero `allow` em `route-transport/src`; `rustfmt` e `git diff --check` estão limpos. Cargo aguarda o freeze Relay.
+
+### 2026-08-31T22:33:35-03:00 — Retomada pós-compactação sem reinício
+
+O root releu o tail e o roteiro canônico, reconciliou o estado da árvore e retomou exatamente do checkpoint anterior. A branch oficial continua `mainnetswap` no HEAD de checkpoint já registrado; nenhum Cargo ou rustc está ativo neste instante.
+
+A Etapa 7 continua, sem reiniciar ou reduzir a missão.
+
+### 2026-08-31T22:36:01-03:00 — Etapa 7: Relay V2 ainda não ligado e primeiro check vermelho
+
+A revisão root confirmou que o bridge produtivo de `route-transport` ainda chama `queue_deliver` unbounded; ele precisa migrar para a API V2 paginada antes do fechamento.
+
+O primeiro check `cargo check --locked --offline -p relay --no-default-features --features production-durable` ficou vermelho, exit 101, com E0382 em `production.rs:1023`: `row` era movido antes da leitura de `ordinal`. O finding foi enviado ao owner para correção sem `Clone`.
+
+Nenhum gate Relay V2 está declarado verde.
+
+### 2026-08-31T22:39:32-03:00 — Etapa 7: Relay V2 testes verdes, clippy ainda vermelho
+
+Após corrigir E0382 sem `Clone`, o check `production-durable` passou. A suíte com `--no-default-features --features production-durable` passou 17 unit e dois doc-tests; as integrações `cfg(real-bip340)` selecionaram zero e não contam.
+
+A suíte default integral passou 71 testes, zero falhas e zero ignored: unit 17, auth 17, policy 18, production_durable 9, transport 8 e docs 2. O clippy foi iniciado antes da coleta final e aguardou o lock; essa concorrência não será repetida.
+
+O strict clippy default all-targets ficou vermelho, exit 101, somente por dois `type_complexity` em `production.rs:1901` e `production.rs:2437`. A correção exigida usa row structs e zero `allow`; Relay V2 ainda não está integralmente verde.
+
+### 2026-08-31T22:42:56-03:00 — Etapa 7: Relay V2 isolado fechado verde
+
+No snapshot pós-hardening, o check `--no-default-features --features production-durable` passou. A suíte default passou 72/72, zero falhas e zero ignored: unit 18, auth 17, policy 18, durable 9, transport 8 e docs 2. Strict clippy all-targets com `-D warnings` passou; a varredura confirmou zero `allow` e o diff está limpo.
+
+Esse fechamento é isolado. A integração continua aberta porque o `route-transport` produtivo ainda está sendo migrado de `queue_deliver` unbounded para cursor/page/ACK V2.
+
+### 2026-08-31T22:48:15-03:00 — Regra permanente de gates isolados reafirmada
+
+Toda mudança deve passar primeiro por `cargo check` isolado do crate, cobrindo no-default/minimal e todas as features produtivas relevantes; depois, testes integrais isolados e strict clippy com `-D warnings`. O workspace é executado somente ao final.
+
+Feature unification nunca é evidência válida nem pode esconder erros, inclusive incompatibilidades como `std::os::fd::AsFd` versus `rustix::fd::AsFd`.
+
+### 2026-08-31T22:49:53-03:00 — Etapa 7: integração Relay V2 static-ready e congelada
+
+Arquivos afetados: `route-transport` lib/durable e testes; `dom-interopd` relay_worker, lifecycle e testes. O caminho production usa `RelayQueueV2` mutável, página de um item com limite 16742 bytes, persistência no inbox antes do ACK e ACK somente depois de accepted ou duplicate completo. Página vazia não muta; pending é recusado fail-closed.
+
+A API V1 foi renomeada `ingest_ephemeral_v1` e permanece somente em harness. O adversarial com `ProductionRelay` cobre crash depois do commit local e antes do ACK, duplicate exato após reopen, ACK seguido de GC e semântica de page/empty.
+
+`rustfmt` e `git diff --check` estão verdes. Cargo ainda não foi executado; a fatia está congelada para gates isolados.
+
+### 2026-08-31T22:51:13-03:00 — Etapa 7: BTC → F6 Terms static-ready e congelado
+
+Em `btc-live` store/fresh/lib, `FreshFaceEvidence` Stage 7 é move-only, autenticada por owner MAC, com ausência revision 0 e estado imutável revision 1. Ela liga route, receipt, claim script, value e template; testes estáticos cobrem recovery, tamper e transplant.
+
+Em `dom-interopd/production_f6/terms.rs`, `from_btc` exige `ComposedBinding` e `ResolvedBitcoinDeployment` reais, recompõe o route binding e valida position, leg, direction, settlement, session, DOM, registry, chain, profile, native asset, Schnorr e `BtcTime512`. O bruto autenticado deve ser byte-exato aos terms; payout líquido e fee ceiling também são cruzados. Record/evidence são canônicos e revisionados como Stage 7.
+
+O KAT possui 670 bytes e há adversariais. `rustfmt`, `git diff --check` e scans estáticos estão verdes. Cargo isolado continua pendente; DOM Terms permanece explicitamente ausente e aberto.
+
+### 2026-08-31T22:54:37-03:00 — Etapa 7: auditoria Relay V2 mantém P0/P1 abertos
+
+A leitura confirmou os invariantes da implementação concreta: persist-before-ACK, recovery de crash, GC pós-ACK, bounds e empty sem mutação. Porém, há quatro lacunas:
+
+- P0: V1 continua alcançável em produção porque `RelayQueueV1` mistura submit e deliver, `ProductionRelay` implementa o trait largo e outbound `RouteSender`/`DurableRelaySender`/daemon/`ProductionContracts` dependem dele.
+- P0: o composition root ainda não chama o loop V2; `production_run` continua terminando `NotComposable`.
+- P1: `RelayQueueV2` pública não selada permite implementação caller-shaped.
+- P1: refusal causa head-of-line permanente. Avançar exige quarantine durável autenticada antes do cursor, nunca ACK silencioso.
+
+O owner foi autorizado a separar submit, retirar V1 do caminho produtivo e selar V2. O requisito HOL continua obrigatório se não couber nesta fatia sem afrouxamento.
+
+### 2026-08-31T22:55:50-03:00 — Etapa 7: auditoria DOM payout mantém Terms bloqueado
+
+Positivos confirmados: Pedersen real; política strict `ReceiveSlate`/`Unconfirmed`; capability move-only; append, revision e insert atômicos; restart/audit; e unicidade local.
+
+Lacunas abertas:
+
+- P0: falta pin wallet-side separado. O mesmo output pode ser reutilizado por outro Store ou restore. É necessário `payout_for` e protocolo crash-safe Store-prepared → wallet fsync → Store active/recovery.
+- P0: a capability pode ficar stale. Signing deve revalidar o Store exato e repetir status, origin, reservation e Pedersen. O root adicionou a validação exata no Store; invariantes da wallet ainda faltam.
+- P1: o Store deve validar SEC1 canônico.
+- P1: `from_dom` precisa de capability do refund-template Contracts e cross-check antes de funding.
+- P2: `created_at` não está autenticado e a documentação ainda referencia V8→V10.
+
+Os test gaps foram listados. `from_dom` não será ligado antes de todos esses pontos fecharem.
+
+### 2026-08-31T22:59:08-03:00 — Etapa 7: DOM payout hardening e check mínimo verde
+
+A capability agora retém o record privado. Signing chama a validação exata do Store, repete `ReceiveSlate`/`Unconfirmed`, ausência de origin, coinbase, derivable e reservation, e recompõe Pedersen mais ownership digest sob o binding completo.
+
+O Store valida SEC1 canônico tanto na entrada quanto no reopen; o record liga chain, runtime, finality e `created_at` completos. A documentação foi atualizada para V10.
+
+Testes novos cobrem revision/restart/idempotência, evidence incorreta, SEC1 malformado, UNIQUE cross-session com rollback de event, tamper de value/revision/record/created_at/commitment/event, e wallet positive/restart/no blinding leak/confirmed refusal.
+
+O check mínimo isolado `cargo check --locked --offline -p dom-actuator --no-default-features` passou, exit 0 em 1m05s. O P0 wallet-side `payout_for` continua aberto; a fatia ainda não é verde final.
+
+O gate focado `cargo test --locked --offline -p dom-actuator --no-default-features payout_face -- --nocapture` passou 5/5, zero falhas e zero ignored, com 69 filtered; compile 2m04 e testes 29,58 s. É evidência intermediária: `payout_for` wallet-side ainda mudará o snapshot e exigirá rerun.
+
+### 2026-08-31T23:05:02-03:00 — Etapa 7: boundary Relay V2 static-ready e congelado
+
+Foi criado o trait mínimo `RelaySubmitQueueV1`; outbound `RouteSender`, `DurableRelaySender`, daemon e `ProductionContracts` foram migrados para ele. O full-history V1 foi renomeado ephemeral e existe somente no `RelayV1` in-memory; `ProductionRelay` não implementa V1 e o deliver SQL legado está somente sob `cfg(test)`.
+
+`RelayQueueV2` tornou-se privado. Em production, `DurableRelayInbox` e daemon aceitam concretamente `&mut ProductionRelayV1`; doubles existem apenas sob `cfg(test)`. Os testes foram migrados para páginas bounded.
+
+O HOL de refusal continua explicitamente pendente e só pode ser resolvido por quarantine durável autenticada, nunca por ACK silencioso. `rustfmt`, `git diff --check` e scans estáticos estão verdes; gates isolados ainda não foram executados.
+
+### 2026-08-31T23:11:31-03:00 — Etapa 7: DOM payout Store two-phase em andamento
+
+O schema V10 foi redesenhado com `store_instance_id` CSPRNG, uma preparation row por session/commitment e evidence active ligada à preparação. `prepare_payout_face` persiste a decisão sem criar revision F6; `activate` somente executa depois do receipt de ciphertext da wallet, appenda exatamente um event/revision e reemite idempotentemente.
+
+O record liga store ID, prepare pin, wallet ciphertext, binding completo e tempo. Os audits cruzam preparação, active e identidade. Testes foram migrados para crash/reopen entre prepare e activate, identidade cross-store, rollback cross-session e tamper ampliado.
+
+`dom-wallet2::payout_for` ainda está em implementação e `wallet.rs` não foi migrado. Não houve Cargo; este checkpoint não é gate nem declaração de pronto.
+
+### 2026-08-31T23:15:16-03:00 — Etapa 7: `dom-wallet2::payout_for` static-ready e congelado
+
+`payout_for` é tipado, privado, nonzero e redacted. Somente `OutputStore` controla um pin global one-shot/idempotente; não existe clear. D1 e cancel preservam o pin. `merge_backup` agora retorna `Result`, faz preflight e clone-swap atômico, e trata conflitos fail-closed.
+
+O wallet schema passou a V3 com save/load estritos. A migração V2→V3 é explícita e owner-locked. Backups usam output version 4 e full version 5; legado é explícito e tentativa de disfarçar pin é recusada. O fuzz existente cobre as novas formas.
+
+Testes novos acompanham a implementação. `rustfmt`, `git diff --check` e scans estão verdes; Cargo ainda não foi executado. O root deve migrar `dom-actuator` open→migration, completar pin/fsync/active two-phase e exigir pin exato no signing antes dos gates.
+
+### 2026-08-31T23:21:51-03:00 — Etapa 7: DOM payout two-phase ligado ao wallet pin
+
+O callsite agora executa Store `PREPARED` → pin imutável `PayoutForV1` na wallet → `persist_securely`/fsync → Store `ACTIVE`. Se a wallet já está pinada durante recovery, o caminho usa somente `recover_payout_face_preparation`; nunca cria ou adota row em Store novo.
+
+Signing recompõe Pedersen e ownership e exige que `prepare_digest` seja exato ao pin. A migração wallet V2→V3 ocorre sob retained owner lock antes de reter o inode ciphertext.
+
+`rustfmt` e `git diff --check` estão verdes. O gate isolado `cargo check --locked --offline -p dom-wallet2 --no-default-features` passou, exit 0 em 1m34. Ainda faltam testes, crash matrix e gates integrais; a fatia não está fechada.
+
+### 2026-08-31T23:36:40-03:00 — Etapa 7: primeira suíte integral `dom-wallet2` vermelha antes do harness
+
+`cargo test --locked --offline -p dom-wallet2 --no-default-features` terminou antes do harness com E0004 em `tests/shield_directed_corruption.rs:202`: o match de `PersistError` não cobria `InvalidOwnerLock` e `LegacyContainsPayoutPin`.
+
+A correção enumera explicitamente os dois casos, sem wildcard ou `allow`, e os trata somente como rejeição tipada da entrada truncada. O rerun está pendente; nenhum gate `dom-wallet2` foi declarado verde.
+
+### 2026-09-01T04:44:35-03:00 — Etapa 7: rerun `dom-wallet2` vermelho por ambiente
+
+O rerun full compilou e executou 119 testes: 77 passaram e 42 falharam. Os 32 vermelhos de persist/backup/payment reportaram `invalid owner-only parent directory authority`, porque os tempdirs do sandbox foram criados sob umask não owner-only; outros dez `rpc_source` falharam bind local com EPERM do sandbox.
+
+São vermelhos ambientais e não autorizam declarar o gate verde. Uma tentativa fora do sandbox com `umask 077` ficou retida por autorização por aproximadamente cinco horas, sem veredito, e foi terminada; ela não conta como evidência.
+
+### 2026-09-01T04:44:35-03:00 — Etapa 7: quarantine Relay e pin V6 static-ready/frozen
+
+A Relay ganhou quarantine durável bounded antes do ACK, com crash/replay/quota/tamper/equivocation e authority explícita; `Debug` é redacted. `expected_relay_database_id` é persistido e validado antes de qualquer read ou ACK, e `ProductionContracts` exige config V6.
+
+`rustfmt` e `git diff --check` estão verdes. Zero Cargo foi executado nessa fatia; gates Relay continuam pendentes.
+
+### 2026-09-01T04:47:50-03:00 — Etapa 7: check mínimo DOM payout corrigido e verde
+
+O primeiro `cargo check --locked --offline -p dom-actuator --no-default-features` ficou vermelho com cinco E0502/E0503 em `store.rs`, nas rotas prepare/recover/activate: a `Transaction` mantinha mut-borrow enquanto o código relia `self.store_instance_id`.
+
+A correção copia o `store_instance_id` autenticado exato antes de abrir a transaction, sem alterar o binding. `rustfmt` e `git diff --check` estão verdes; o mesmo check foi repetido e passou, exit 0 em 19,50 s.
+
+Crash matrix e testes permanecem pendentes; a fatia não está fechada.
+
+### 2026-09-01T04:53:00-03:00 — Etapa 7: matriz de crash DOM payout focada verde
+
+Foram acrescentados os adversariais `payout_face_recovers_both_prepared_crash_boundaries`, cobrindo PREPARED com wallet vazia e PREPARED com pin já fsynced, e `payout_face_refuses_store_loss_and_stale_wallet_restore_without_adoption`: wallet pinada com Store novo é recusada sem criar row ou mutar estado; ACTIVE com restauração stale da wallet sem pin também é recusado e não repina. O Store agora recusa `prepare` quando ACTIVE já existe, e retry ativo exige recovery exato.
+
+O primeiro filtro payout executou 7/8: o teste de tamper falhou porque a foreign key impedia o próprio ataque SQL da fixture. A conexão adversarial at-rest passou a desligar a FK somente para produzir a corrupção; o teste exato de tamper passou 1/1 e o rerun completo payout passou 8/8, 69 filtrados, em 36,39 s. O check mínimo no-default permanece verde.
+
+Os gates integrais ainda estão pendentes; a fatia não está fechada.
+
+### 2026-09-01T05:07:38-03:00 — Etapa 7: gates DOM payout verdes; hardening wallet/RPC continua
+
+Sob `umask 077`, a suíte integral no-default do `dom-actuator` passou 77/77, zero ignorados, em 120,18 s; o clippy estrito no-default/all-targets com `-D warnings` também passou em 23,70 s. No `dom-wallet2`, o clippy estrito passou em 13,50 s e a lib sem sockets RPC passou 109/109, com 10 filtrados, em 51,70 s. As integrações executadas antes do socket — payment, persist, persistence, robustness, backup, directed e proptest — ficaram verdes.
+
+A auditoria encontrou três testes antigos de secret hygiene marcados ignored; eles não foram aceitos e a frente segue ativa para corrigir e executar. `shield_rpc` encontrou EPERM do sandbox, que não é gate verde, e também revelou um finding real: body de resposta sem cap.
+
+O hardening em curso troca a leitura por streaming bounded com validação de `Content-Length`; fixa página de scan do cliente em 16, cap de scan em 64 MiB, cap de controle em 64 KiB e validação exata de páginas contíguas. O adversarial passará a exigir `ResponseTooLarge`. Cargo está suspenso até o congelamento da correção de secret hygiene; a fatia wallet/RPC permanece aberta.
+
+### 2026-09-01T05:12:02-03:00 — Etapa 7: blockers Relay quarantine e F6 Terms confirmados
+
+A auditoria rejeitou o freeze da quarantine Relay por um P0 de liveness: records já resolvidos continuam consumindo o lifetime `max_entries`; o teste explícito permanece em `CapacityExceeded` após `ReleaseFailedClosed`. Assim, um atacante autorizado conseguiria paralisar permanentemente a session. O owner foi reativado para implementar pending bounded e compactação tamper-evident com receipt ring `O(max)`, incluindo crash tests e sem jamais expulsar unresolved.
+
+Na frente F6, `terms.rs` possui `from_btc` e `from_evm` apenas static-ready, porém não há implementação produtiva de `ProductionF6TermsAuthorityV2`, nem callsite de `into_parts_for` ou `from_adapter_faces`; o único impl é `UnreachableTermsV2` sob `cfg(test)`. O constructor DOM continua ausente, inclusive assinalado em comentário. Portanto F6 Terms não está ligado e será integrado somente depois do fechamento dos owners ativos.
+
+### 2026-09-01T05:14:12-03:00 — Etapa 7: retomada coordenada no checkpoint publicado
+
+A Etapa 7 foi retomada exatamente sobre o checkpoint publicado `b77695`, sem reinício. A frente secret/migration está static-ready e congelada; Relay quarantine bounded segue em correção; o root inicia os gates serializados e corrige a incompatibilidade MSRV de `is_none_or` sem afrouxar a regra. Nenhum commit ou push foi realizado.
+
+### 2026-09-01T05:16:32-03:00 — Etapa 7: gates isolados de secret hygiene verdes
+
+`dom-wallet-keys` passou o check no-default em 15,47 s, a suíte integral com 64 testes aprovados e um ignored histórico classificado como não atacável, e o clippy estrito all-targets com `-D warnings` em 8,73 s. A distribuição dos testes foi 26+5+5+3+2+4+1+7+6+5; doctests zero.
+
+`dom-slate` passou o check no-default em 5,09 s, a suíte integral 27/27 sem ignored e o clippy estrito em 1,63 s. A cobertura inclui `secret_material_is_owned_by_zeroizing_wrappers`; doctests zero. A incompatibilidade MSRV de `is_none_or` foi substituída por `match` fail-closed. `rustfmt` e `git diff --check` estão verdes. Nenhum commit ou push foi realizado.
+
+### 2026-09-01T05:17:51-03:00 — Etapa 7: suíte dom-wallet2 encontrou match não exaustivo
+
+A compilação da suíte `dom-wallet2` ficou vermelha com E0004: o match adversarial em `shield_directed_corruption` não cobria o novo `PersistError::ProcessLocked`. Foi acrescentado um braço explícito, sem wildcard nem `allow`; o rerun integral foi iniciado e ainda não constitui gate verde.
+
+### 2026-09-01T06:28:32-03:00 — Etapa 7: snapshot isolado dom-wallet2 integralmente verde
+
+O check no-default do `dom-wallet2` passou em 11,05 s. A primeira suíte integral no sandbox, sob `umask 077`, compilou e deixou 113/123 testes da lib verdes; os 10 testes de socket falharam com EPERM ambiental, portanto esse run não foi contado como gate.
+
+A execução externa autorizada, integral, no-default e sob `umask 077` passou 167/167, zero falhas e zero ignored: 123 testes da lib e 44 de integração, incluindo RPC bounded, migration locks e os 6/6 testes de secret hygiene. O clippy estrito all-targets com `-D warnings` também passou em 12,70 s. O E0004 anterior foi corrigido explicitamente. Nenhum commit ou push foi realizado.
+
+### 2026-09-01T06:31:48-03:00 — Etapa 7: fatia DOM payout/wallet isolada fechada verde
+
+No snapshot pós-wallet, o `dom-actuator` passou o check no-default em 43,53 s e o check production em 1,46 s. A suíte production integral sob `umask 077` passou 77/77, zero ignored e doctests zero, com harness de 107,98 s; o clippy production estrito all-targets com `-D warnings` também passou em 24,54 s.
+
+Esses gates fecham integralmente a fatia isolada DOM payout/wallet. A integração com F6 permanece aberta; os próximos gates serializados são Relay e `route-transport`.
+
+### 2026-09-01T06:32:17-03:00 — Etapa 7: primeiro gate route-transport vermelho
+
+O primeiro gate isolado de `route-transport` ficou vermelho com E0282 em `durable.rs:2163`, por um `Option` de ordinal sem inferência, e E0596 em `durable.rs:1330`, por reborrow mutável ausente. A correção estrita foi enviada ao owner, sem alteração semântica nem `allow`; o rerun permanece pendente e nenhum gate foi declarado verde.
+
+### 2026-09-01T06:36:33-03:00 — Etapa 7: check route-transport verde; suíte ainda não compilou
+
+O rerun do check no-default de `route-transport` passou em 6,41 s. A suíte integral seguinte ficou vermelha antes do harness com E0277 no adversarial de tamper: os literais `[0xf1; 32]` e `[0xf2; 32]` foram inferidos como `i32` e recusados por `ToSql`. Eles foram tipados explicitamente como `u8`, sem mudar a lógica; o rerun permanece pendente e a suíte ainda não é gate verde.
+
+### 2026-09-01T06:40:01-03:00 — Etapa 7: route-transport 74/74; clippy ainda pendente
+
+A suíte integral de `route-transport` após a correção passou 74/74, zero ignored: 37 unitários, 13 bridge, 8 inbox, 13 sender, 3 framing e zero doctests. A cobertura inclui process-loss, compaction, quota e tamper.
+
+O clippy estrito ficou vermelho somente por dois `needless_borrow` em `durable.rs:1327` e `durable.rs:1344`. Os borrows foram removidos diretamente, sem `allow`; o rerun permanece pendente, portanto o fechamento isolado ainda não foi declarado.
+
+### 2026-09-01T06:45:01-03:00 — Etapa 7: fatia isolada Relay/route-transport fechada verde
+
+O clippy estrito de `route-transport` após a correção passou em 20,40 s. O rerun integral no snapshot exato voltou a passar 74/74, zero ignored e doctests zero: 37 unitários, 13 bridge, 8 inbox, 13 sender e 3 framing.
+
+A quarantine agora prova liveness por fill→release→next, churn superior a 2× dentro do bound, crashes separados na resolução e na compactação, unresolved jamais evicto e tamper/replay fail-closed. A fatia isolada Relay/route-transport está fechada verde; a integração no `dom-interopd` ainda aguarda o freeze F6. Nenhum commit ou push foi realizado.
+
+### 2026-09-01T06:47:57-03:00 — Etapa 7: authority F6 Terms suficiente confirmada estaticamente
+
+A autoridade necessária foi confirmada sem facts caller-shaped. `from_dom`, em `terms.rs`, cruza `ResolvedDomDeployment` e `AuthenticatedDomPayoutFace` move-only da wallet/Store com binding, composition, settlement, registry, native asset, finality, session, terms, profile, epoch, roster, beneficiary e value. A authority selada e one-shot ordena DOM com BTC ou EVM conforme a rota e invoca o validator final.
+
+KAT e adversariais ainda estão em finalização; nenhum Cargo foi executado e a fatia não está verde.
+
+### 2026-09-01T06:49:46-03:00 — Etapa 7: mapa parcial do bloqueio NotComposable
+
+O owner Stage10 correto já existe, mas ainda é descartado. Também são descartados owners concretos de chain clients, pending EVM signer pair, secret retention, coordinator, três actuator stores, chain signers e inventory. O journal já reserva `F6Authorities=11` e `RelayAuthorities=12`.
+
+`ProductionContractsV1` retém Store, identity e worker e deve instalar `PreparedEarly` num único event loop `!Send`; falta a delegação estreita `poll_inbound`. Permanecem dois blockers de authority: não existe impl produtivo de `SettlementPlanAuthorityV1`, e o child EVM materializing exige dois `ScopedEip1559Signer`, enquanto `PendingEvmSignerPair` possui somente o signer local e o role remoto. A auditoria continua sem fabricar facts ou authorities.
+
+### 2026-09-01T06:50:45-03:00 — Etapa 7: gates exatos do crate Relay verdes
+
+No snapshot exato, o check `production-durable` no-default do crate Relay passou em 5,98 s. A suíte default integral passou 72/72, zero ignored: 18 unitários, 17 auth, 18 policy, 9 durable, 8 transport e 2 doctests. O clippy estrito all-targets com `-D warnings` passou em 3,92 s.
+
+Somados aos 74/74 de `route-transport`, esses resultados fecham a camada isolada. O gate de integração no `dom-interopd` continua pendente do freeze F6.
+
+### 2026-09-01T06:53:41-03:00 — Etapa 7: delegação estreita Contracts→Relay static-ready
+
+`ProductionContractsV1::poll_inbound` agora delega ao único worker privado usando exclusivamente o `ProductionRelayV1` V2 concreto. A superfície retorna erros tipados `OwnerBusy` ou `Worker`, não expõe `RefCell`, Store ou worker e não abre uma segunda instância.
+
+O adversarial retém o borrow do mesmo worker e prova `OwnerBusy` antes de qualquer acesso à fila. `rustfmt` e `git diff --check` estão verdes; Cargo aguarda o freeze F6, portanto esta integração ainda não é gate verde.
+
+### 2026-09-01T06:54:20-03:00 — Etapa 7: F6 Terms static-ready e congelado
+
+Em alteração exclusiva de `terms.rs`, `from_dom` ganhou autenticação integral, registro e KAT. `ProductionAdapterF6TermsAuthority` é selada, move-only e one-shot; ordena as faces por `rfq.route.legs`, cruza objetos, economia, clock, direção, deadline e chain, combina evidence/revision com aritmética overflow-safe e só consome no sucesso. A face EVM exige `ConditionLock`.
+
+Foram adicionados cinco adversariais. Os checks estáticos estão limpos e nenhum Cargo foi executado nessa fatia; o root iniciou o production check serial.
+
+### 2026-09-01T06:54:57-03:00 — Etapa 7: check production integrado verde, wiring ainda incompleto
+
+O check production do `dom-interopd` após F6/Relay passou, exit 0 em 22,42 s. A compilação ainda emitiu 490 warnings `dead_code`, que confirmam o wiring incompleto e permanecem bloqueio do clippy estrito; nenhum `allow` será usado. Os gates focados de Terms e Contracts foram iniciados.
+
+### 2026-09-01T06:57:02-03:00 — Etapa 7: primeiro gate F6 Terms vermelho
+
+A lib production compilou e 7/8 testes de F6 Terms passaram. O KAT `dom_record_has_a_pinned_canonical_shape` ficou vermelho: comprimento canônico real 834 contra 835 esperado. Também surgiu warning de `binding` não usado em teste.
+
+O owner foi reativado para auditar a causa e o encoder, sem ajustar o valor cegamente. O rerun está pendente e F6 Terms não está verde.
+
+### 2026-09-01T06:59:42-03:00 — Etapa 7: gate exato Contracts→Relay verde
+
+O teste exato `production_contracts::tests::inbound_poll_keeps_the_worker_private_and_refuses_reentrant_owner_borrow` passou 1/1, zero falhas e zero ignored, exit 0, com 275 filtrados, em 9,82 s. Ele prova owner único e recusa reentrante antes de tocar a fila.
+
+### 2026-09-01T06:59:42-03:00 — Etapa 7: KAT F6 Terms auditado e corrigido estaticamente
+
+O encoder do record DOM estava correto; o cálculo externo havia contado NUL como dois bytes. O KAT foi corrigido para comprimento canônico 834 e BLAKE2b-256 `2c92c83ffd858d462cc266cac1842fb8b56e83d94dd212df2ecd07b12ae14268`; o unused também foi corrigido sem `allow`. Os gates Cargo permanecem pendentes.
+
+### 2026-09-01T06:59:42-03:00 — Etapa 7: seis P0s ainda bloqueiam remover NotComposable
+
+A auditoria read-only confirmou o Stage10 correto, mas a Etapa 7 permanece aberta. `NotComposable` não pode ser removido honestamente enquanto existirem seis P0s: circularidade durável entre RFQ/F6/Relay/RouteStore; ausência de plan authority produtiva; signer EVM remoto; inputs F6 externos; BTC prebroadcast/live funding; e transporte de rede. O root não declarou a etapa verde e seguirá corrigindo todos. Nenhum commit ou push foi realizado.
+
+### 2026-09-01T07:00:07-03:00 — Etapa 7: gate focado F6 Terms corrigido e verde
+
+`cargo test --locked --offline -p dom-interopd --no-default-features --features production --lib production_f6::terms::tests -- --nocapture` passou, exit 0: 8/8, zero falhas, zero ignored e 268 filtrados. O KAT DOM confirmou comprimento 834 e o digest auditado.
+
+O build ainda emite 177 warnings `dead_code`, evidência de que o composition root permanece desconectado. Nenhum `allow` será usado e a Etapa 7 não foi declarada encerrada. Nenhum commit ou push foi realizado.
+
+### 2026-09-01T07:09:42-03:00 — Etapa 7: primitiva lazy-binding crash-safe static-ready
+
+`store::Store` ganhou `prepare_resume_create_production(path, preparation_binding)`, que publica lock e sidecar `.prepare` V1 por staging atômico/recovery sem criar o DB, e `open_or_resume_prepared_production(path, preparation_binding, final_binding)`, que completa o prefixo ou reabre estado econômico já inicializado. A superfície recusa missing, tamper, transplant e owner concorrente.
+
+Os testes adicionados cobrem restart com estado, owner concorrente, transplantes dos bindings preparation/final, missing, staging exato e torn recovery. Há wrappers static-ready em `f6-engine` StoreLog/CandidateBook e `route-time-anchor` PreF6; `dom-interopd` ganhou `ProductionF6PreparedBindingsV2` e o modo `OpenOrResumePrepared`.
+
+`rustfmt` e `git diff --check` estão verdes. Cargo permanece pendente enquanto outras frentes editam; não há `allow`, commit ou push. Esta é a base para quebrar o ciclo RFQ/F6/Relay sem ACK prematuro.
+
+### 2026-09-01T07:14:00-03:00 — Etapa 7: ativação pareada F6 static-ready parcial
+
+Foram criados `ProductionF6PreTerminalAuthoritiesV2`, `ProductionF6PairActivationRequestV2`, dois handles move-only por posição e `ProductionF6PairRuntimeReceiverV2`. O primeiro RFQ autenticado permanece pending/Awaiting; o segundo, exato, deriva os dois `ProductionSolverF6BindingV2` e usa `ProductionRouteTerminalAuthorityOwnerV2` para um único split. A ativação não pré-constrói authorities RFQ-scoped: chama o trait selado `ProductionF6PairAuthoritiesFactoryV2::build_pair` somente depois de existirem ambos os bindings, RFQs autenticados e terminal handles, permitindo abrir pre-F6 time corretamente.
+
+`ProductionF6PreparedBindingsV2::derive_stage11/prepare_stage11` deriva três prefixes distintos por provisioning, route, composition e position. O teste novo prova replay exato, ausência de DB final e recusa cross-position. O runtime Store só é liberado depois que ambas as authorities F6 abrem; equivocation, borrow ou falha de abertura envenenam o fluxo e fecham a execução. Restart usa Relay inbox/applied replay e Stores prepared, sem persistir capability em plaintext.
+
+`rustfmt`, `git diff --check` e scans de zero `allow`/TODO estão verdes. Testes e compilação aguardam o freeze das outras frentes; nenhum commit ou push foi realizado.
+
+### 2026-09-01T07:18:32-03:00 — Etapa 7: plan authority produtiva static-ready
+
+`ProductionAuthenticatedSettlementPlanAuthorityV1`, em `production_materializer`, e o getter `plan_authority_id` do coordinator derivam authority apenas de owners e inputs autenticados. A implementação recompõe SCP2 e recusa transplantes de route, settlement, leg, action, terms, registry, profile, deployment, chain, order, secret-role e descriptor. A capability é move-only e há três adversariais; Cargo ainda não foi executado.
+
+### 2026-09-01T07:18:32-03:00 — Etapa 7: requester EVM remoto static-ready parcial
+
+O novo `production_evm_remote_signer` autentica o binding completo e conduz 0x15→Store→Relay→0x16. O lookup de restart não aceita sequence caller-shaped, e o raw assinado é movido para custody remota `Zeroizing`, sem chave ou signer remoto fabricado. Testes foram adicionados.
+
+Ainda faltam migrar o child port para o import remoto e fazer o worker responder 0x16; o P0-3 não está completo. `rustfmt`, `git diff --check` e o scan zero `allow` estão verdes; nenhum Cargo, commit ou push foi realizado.
+
+### 2026-09-01T07:23:29-03:00 — Etapa 7: status de fechamento
+
+Em resposta ao operador, o root confirmou que a Etapa 7 está na fase final de authorities/composition, mas ainda não está fechada. Restam congelar BTC prebroadcast e F6 pós-RFQ, integrar o child EVM remoto e o network loop, e executar os gates isolados e integrados. Nenhum percentual ou estado verde será declarado sem essa evidência.
+
+### 2026-09-01T07:27:01-03:00 — Etapa 7: P0 de SolverStatusStore por posição
+
+O relay roster exige snapshots distintos para upstream e downstream, mas o owner compartilhava um único `SolverStatusStore` com um único `roster_snapshot`; nessa forma, a rota produtiva era impossível. A correção autorizada usa dois Stores físicos e paths/bindings V7 distintos por posição, sem fallback para o V4 singular. O mapping config/root será fechado na integração; o finding permanece aberto até isso ocorrer.
+
+### 2026-09-01T07:27:38-03:00 — Etapa 7: replay exato do requester EVM remoto static-ready
+
+`ProductionEvmRemoteSignerBindingV1::authenticate_request` foi separado da importação 0x16. Isso permite reconstruir exatamente `RemoteEvmActionRequestV1` a partir do 0x15 durável após crash, sem reliberar raw transaction; `authenticate_import` agora reutiliza a mesma validação.
+
+O teste novo prova replay exato e bindings, além de recusas a valores zero e transplant de role. Os gates estáticos/finais ainda estão pendentes.
+
+### 2026-09-01T07:29:58-03:00 — Etapa 7: bootstrap BTC V7 static-ready
+
+`btc-live` ganhou `open_existing` estrito, que não cria diretório, lock ou chave e só recupera staging preexistente. O bootstrap V7 usa `ExistingAuthorityDirectory` com pins completos. O owner linear conserva os mesmos `Rc<Store>`, `Rc<RPC>` e `Armed` entre payout, refund e funding.
+
+Há testes estáticos de ausência, restart, isolamento, transplant e layout. `rustfmt` e `git diff --check` estão verdes; scans e Cargo permanecem pendentes.
+
+### 2026-09-01T07:32:33-03:00 — Etapa 7: recovery de custody EVM remota static-ready
+
+O EVM actuator ganhou `RemoteEvmOperationCustodyResumeInputV1` e `acquire_existing_remote_operation_custody`, que recuperam custody de uma operação remota já importada sem raw transaction, calldata, scalar ou segunda grant. O locator `operation_id` só é aceito se owner, epoch, route, settlement, composition, effect, semantic, terms, registry, profile, deployment, kind, role, chain, contract, account e txid coincidirem com o Store.
+
+Lease viva reemite o mesmo fence; lease expirada produz refence local. O adversarial cobre reopen, recusa de transplant/txid sem mutação, refence e capability antiga stale. `rustfmt`, `git diff --check` e zero-allow estão verdes; Cargo permanece pendente.
+
+### 2026-09-01T07:36:00-03:00 — Etapa 7: F6 redesenhado em duas fases
+
+O fluxo agora separa `bind_pair`, que autentica os RFQs e gera os bindings, de `build_authorities`, que só roda depois de existirem os terminais. São usados dois `SolverStatusStore` físicos e não há fallback para V4.
+
+`rustfmt`, `git diff --check` e scans de `allow`, TODO, mock e placeholder estão verdes. Ainda restam revisão de tipos, testes do bundle V7 e callsite/config HSM explícitos; Cargo permanece pendente.
+
+### 2026-09-01T07:37:44-03:00 — Etapa 7: BTC P0-5 static-ready completo
+
+O P0-5 BTC está static-ready com `open_existing` estrito, config/bootstrap V7 com pins completos e owner linear preservando os mesmos `Rc<Store>`, `Rc<RPC>` e `Armed`; os testes de ausência, restart, isolamento, transplant e layout estão presentes. Fmt, diff e scans estão verdes. Cargo permanece pendente, e o único wiring restante dessa integração é o `production_run`.
+
+### 2026-09-01T07:37:44-03:00 — Etapa 7: authority estreita Contracts EVM static-ready
+
+O owner Contracts emite uma única authority EVM, restrita ao fluxo exato 0x15/0x16 e ao mesmo `Rc` de Store, identity e Relay. A capability autentica expiry e o binding de route, session e participants, sem `allow`. Cargo e testes permanecem pendentes.
+
+### 2026-09-01T07:38:25-03:00 — Etapa 7: gate EVM bloqueado antes da compilação pelo lockfile
+
+`cargo check --locked --offline -p evm-actuator --no-default-features`, sessão 96332, saiu 101 antes de compilar porque `Cargo.lock` diverge dos manifests em edição. Isso não conta como teste nem como vermelho do código.
+
+O lockfile não será atualizado durante edições concorrentes. Depois dos freezes haverá uma única atualização/check offline, seguida do rerun locked autoritativo.
+
+### 2026-09-01T07:40:38-03:00 — Etapa 7: gates EVM mínimos e focado verdes
+
+O lock offline foi atualizado uma única vez. `cargo check --locked --offline -p evm-actuator --no-default-features`, sessão 66630, passou, exit 0 em 9,26 s.
+
+O teste focado `remote_signed_action_is_verified_fenced_durable_and_nonce_lease_free`, sessão 13214, passou 1/1, zero falhas e zero ignored, com 38 filtrados e harness de 5,42 s. O unit target selecionou zero e não conta. A suíte completa segue em execução.
+
+### 2026-09-01T07:42:20-03:00 — Etapa 7: fatia isolada EVM actuator recovery fechada verde
+
+`cargo test --locked --offline -p evm-actuator --no-default-features`, sessão 33570, passou, exit 0: 10 unitários e 39 adversariais, total 49/49, zero falhas, zero ignored e doctests zero; o target adversarial levou 27,07 s. O clippy estrito all-targets com `-D warnings`, sessão 21157, passou em 11,82 s. O check locked já estava verde.
+
+A fatia isolada do actuator está fechada verde; a integração do child no daemon permanece aberta.
+
+### 2026-09-01T07:43:39-03:00 — Etapa 7: fonte autenticada do decoder F6 V7 corrigida
+
+O decoder V7 recebia um `AuthoritySet` caller-shaped. A fonte correta é `ProductionAuthorityBundleV1.registry`, já autenticada. A correção autorizada retém `registry_authorities` em `AuthenticatedProductionInputsV1` e deriva V7 exclusivamente desse valor, com teste de transplant e erro redacted.
+
+### 2026-09-01T07:44:05-03:00 — Etapa 7: superfície production EVM actuator verde
+
+A sessão encadeada 15048 saiu 0. O check `--no-default-features --features rpc-http` passou em 51,14 s, e o clippy estrito all-targets com `-D warnings` passou em 34,37 s. A superfície production do EVM actuator está verde em compilação e lint.
+
+### 2026-09-01T07:47:08-03:00 — Etapa 7: checkpoint solicitado pelo operador
+
+A Etapa 7 está em fase final, mas permanece aberta. Os gates do EVM actuator estão verdes; o P0 BTC está static-ready; F6 V7 e o child EVM seguem em implementação. O composition root, o network loop e os gates integrados ainda estão pendentes. Nenhum commit ou push foi realizado.
+
+### 2026-09-01T07:52:15-03:00 — Etapa 7: Store lazy-binding isolado fechado verde
+
+No snapshot atual, `cargo check --locked --offline -p store --no-default-features` passou. A suíte integral passou 18/18, zero falhas e zero ignored, incluindo três adversariais de prepared authority; doctests zero. O clippy all-targets com `-D warnings` também passou.
+
+F6 V7 foi entregue static-ready e congelado, mas seu Cargo ainda está pendente. Nenhum commit ou push foi realizado.
+
+### 2026-09-01T07:56:39-03:00 — Etapa 7: compile BTC corrigido com comparação constant-time explícita
+
+O primeiro compile production integrado ficou vermelho em `btc-live/store.rs`: `Zeroizing<[u8; 32]>::as_ref` era ambíguo entre implementações `AsRef` de bitcoin/core. A correção usa `subtle::ConstantTimeEq` explicitamente sobre slices; a dependência foi adicionada ao workspace e o lock atualizado offline.
+
+O check isolado no-default de `btc-live` passou. O rerun integrado foi iniciado e permanece pendente. Nenhum commit ou push foi realizado.
+
+### 2026-09-01T08:07:58-03:00 — Etapa 7: compile integrado e focados F6/EVM verdes
+
+O compile production integrado passou após corrigir o nome do pin F6 para `pre_f6_time_scope_digest: pre_f6_scope_digest`. Ainda foram emitidos 613 warnings `dead_code`, bloqueio honesto que confirma wiring incompleto.
+
+Os filtros focados passaram sem falhas ou ignored: `production_f6_factory` 5/5, `production_evm_remote_signer` 6/6 e `production_child_evm` 4/4. Nenhum commit ou push foi realizado. Foram iniciadas duas frentes novas: Noise Relay em arquivo novo e config/secrets V7 estrita.
+
+### 2026-09-01T08:15:34-03:00 — Etapa 7: gates isolados BTC/F6/time/status verdes
+
+`btc-live` passou 34/34 e clippy estrito; o warning `must_use` foi corrigido com `drop`, e o teste exato passou 1/1. `f6-engine` passou check, clippy e 41 testes — 18+7+7+5+4 — sem falhas ou ignored. `route-time-anchor` passou check, clippy e 22 testes — 8+3+11. `solver-status` passou check, clippy e 5/5.
+
+Um E0004 V8 observado durante edição ativa de `production_config` era snapshot intermediário e não foi contado como gate; o braço V8 explícito segue com o owner. Nenhum push foi realizado.
+
+### 2026-09-01T08:20:37-03:00 — Etapa 7: gate isolado btc-actuator verde
+
+No snapshot atual, `cargo check --locked --offline -p btc-actuator --no-default-features` passou. A suíte passou 28/28, zero falhas e zero ignored: 18 unitários, 9 adversariais e 1 participant. O alvo regtest compilou, mas contém zero testes e não conta; doctests zero. O clippy all-targets com `-D warnings` também passou.
+
+### 2026-09-01T08:20:37-03:00 — Etapa 7: Noise Relay static-ready com finding pendente
+
+O agente congelou `production_noise_relay.rs` como static-ready, sem Cargo. Antes da integração, o decoder canônico ainda deve recusar frame `Refused` com body extra como `ProtocolRefused`. A Etapa 7 permanece aberta.
+
+### 2026-09-01T08:22:23-03:00 — Etapa 7: finding canônico Noise Relay corrigido
+
+A revisão root confirmou validação de contexto/envelope e persist-before-ACK. `decode_frame` agora recusa `FrameKindV1::Refused` com corpo não vazio como `ProtocolRefused`, com adversarial específico. `mod production_noise_relay` foi incluído sob a feature production.
+
+O `rustfmt` integral está temporariamente bloqueado pela edição concorrente V8. Não há gate Cargo nem fechamento da Etapa 7 neste checkpoint.
+
+### 2026-09-01T08:25:19-03:00 — Etapa 7: sequência operacional refinada em cinco gates
+
+Sem substituir ou alterar o roadmap canônico, a execução corrente da Etapa 7 foi organizada assim:
+
+1. Congelar e gatear V8, secrets V3 e Noise.
+2. Fechar Stage11 payout/BTC/inventory lease/F6 factory.
+3. Fechar Stage12 com dois owners Contracts, Noise Relay e bootstrap F6 em um único loop.
+4. Liberar o único RouteStore e montar supervisor, router, plan, refund, timer e runtime.
+5. Remover `NotComposable` e dead code e fechar production, restart e daemon local.
+
+As Etapas 8–13 continuam integralmente depois desse fechamento.
+
+### 2026-09-01T08:25:47-03:00 — Etapa 7: finding de ciclo Contracts early→payout→F6
+
+Durante o mapeamento de integração, observou-se que `ProductionF6PairFactoryRequestV7` exige os dois `AuthenticatedDomPayoutFaceV1` já existentes, enquanto `ProductionContractsV1` precisa possuir `ProductionF6LifecyclePortV2` desde a construção e não expõe delegação para instalar a activation depois; `DurableRelayWorkerV1` mantém `f6` privado. No fluxo Create, Stage10 começa com early ingress antes de o payout DOM estar autenticado.
+
+Isso sugere um ciclo real Contracts early→payout→instalar F6 que a API atual não fecha. A correção deve ser uma authority estreita e one-shot, nunca reabrir Store nem fabricar payout. O finding ainda não foi classificado como blocker final até o mapa terminar.
+
+### 2026-09-01T08:27:03-03:00 — Etapa 7: finding confirmado de escopo Relay V2
+
+`ProductionRelayV1` V2 mantém cursor/state por `recipient_id`, e o ACK remove todas as rows desse recipient até o ordinal. Como a rota DOM composta usa duas sessions na mesma `RelayQueue`, o Noise session-bound não pode consumir página recipient-wide sem risco de misturar sessões. Usar um banco por session não será aceito como contorno.
+
+A correção deve oferecer delivery e ACK duráveis scopeados por route, session e network autenticado, com GC apenas desse escopo e testes de páginas intercaladas, restart e transplant. A configuração também precisa pinar a identidade do DB remoto e endpoint/role de rede. A Etapa 7 não está perto do último gate enquanto isso não fechar.
+
+### 2026-09-01T08:27:55-03:00 — Etapa 7: mapa read-only de blockers do composition root
+
+O `production_run` ainda usa V6+secrets V2 e termina em `NotComposable`, enquanto a família live já é V8+secrets V3. A circularidade RouteStore/F6 foi resolvida por pair activation e runtime receiver. Contracts pair/poll/recovery também existem, mas o bootstrap deve anteceder o runtime.
+
+Persistem blockers reais. A factory F6 exige duas faces DOM move-only, porém o run não adquire `DomLease` nem possui fonte autenticada dos dois commitment/value para `DomPayoutFaceRequestV1`; esses valores não podem ser fabricados. A API de inventory lease existe, mas faltam wiring e política. `RefundArmingAuthority` exige DB/path/credential/faces/epoch, enquanto a config não possui path, pin ou stage do refund DB e o run descarta a credential.
+
+A Etapa 7 não está perto do fechamento enquanto essas lacunas permanecerem.
+
+### 2026-09-01T08:29:35-03:00 — Etapa 7: V8/secrets V3 congelados estaticamente
+
+V8 e secrets V3 foram congelados com hashes e gates estáticos verdes; Cargo permanece pendente. A Etapa 7 não está quase concluída: composition root, Relay scopeado, payout e refund continuam abertos.
+
+### 2026-09-01T08:35:35-03:00 — Etapa 7: gates V8/V3 verdes; Noise ainda vermelho
+
+O gate de config V8 passou 5/5 e o de secrets V3 passou 2/2. O gate Noise passou somente 1/2: o caso loopback ficou vermelho com `InvalidConfiguration`, portanto essa frente não está encerrada.
+
+V8/V3 foram migrados localmente nos exports de lib e no loader/reader de secrets do `production_run`, mas ainda não houve compile pós-migração. O mapa read-only final confirmou seams P0 ainda abertos em payout, solver lease, refund path/provisioning, Contracts refund issuer, Network config/supervisor e timer source; o wiring existente também foi inventariado. A Etapa 7 permanece aberta.
+
+### 2026-09-01T08:40:48-03:00 — Etapa 7: migração live, inventory lease e timer static-ready
+
+`production_run` e lib foram migrados de V6/V2 para V8/V3; não restam referências ao legado no run. Fmt e diff estão verdes, mas o Cargo pós-migração permanece pendente.
+
+O bundle F6 ganhou `acquire_inventory_lease` purpose-specific: o solver não é caller-shaped, o binding é validado antes de qualquer mutação e a factory revalida. O timer passou a derivar somente `TimestampSeconds` de `ComposedBindingV2`, sem converter blockheight ou BTC MTP; o contexto domain-separated liga route, composition, settlement, session, chain e deadline, com novo adversarial. Cargo dessas fatias permanece pendente.
+
+### 2026-09-01T08:49:20-03:00 — Etapa 7: seleção DOM payout e estágio refund static em revisão
+
+A seleção do payout DOM agora é commitment-free para o caller: parte do valor exato, deriva o único output wallet-owned elegível e retoma o mesmo Store. Missing, ambiguidade ou transplant falham antes de qualquer mutação.
+
+O provisioning ganhou o estágio `RefundArmingAuthority=13`, depois de Relay. Diff/fmt estáticos ainda aguardam revisão final e Cargo não foi executado; nada foi declarado verde.
+
+### 2026-09-01T08:51:51-03:00 — Etapa 7: Relay V3 focused corrigido e verde
+
+O primeiro run real do Relay V3 ficou vermelho em criação com `StorageUnavailable`. A causa exata era `relay_meta.schema_version` ainda inserir o literal 2, embora `SCHEMA` e a constraint já fossem 3. O root corrigiu o literal para 3 sem relaxar a validação.
+
+O rerun exato `cargo test --locked --offline -p relay --test production_durable delivery_v3_interleaved_sessions_restart_and_transplants_are_strictly_scoped -- --nocapture` passou 1/1, zero falhas e zero ignored, com 9 filtrados. A suíte integral ainda não foi declarada.
+
+### 2026-09-01T09:14:56-03:00 — Etapa 7: gates focados Noise e Contracts refund verdes
+
+Após link/I/O prolongado, `cargo test --locked --offline -p dom-interopd --no-default-features --features production --lib production_noise_relay::tests -- --nocapture` passou 2/2, zero falhas e zero ignored, com 311 filtrados.
+
+O filtro `production_contracts::tests::refund` passou 2/2, zero falhas e zero ignored, com 311 filtrados. O teste exato de mesmo Store/child/refund, one-shot e reentrância passou 1/1, zero falhas e zero ignored, com 312 filtrados.
+
+O build ainda emite 243 warnings `dead_code`, que permanecem blockers honestos do wiring Stage7.
+
+### 2026-09-01T09:17:08-03:00 — Etapa 7: gates DOM payout verdes
+
+O filtro de seleção única commitment-free, restart e ambiguidade passou 2/2. O filtro integral `payout_face_` passou 8/8, zero falhas e zero ignored, com 71 filtrados; cobre revisão imutável, cross-store, crash boundaries, stale restore e tamper.
+
+Esses gates não provam ainda o wiring do daemon.
+
+### 2026-09-01T09:25:03-03:00 — Etapa 7: transferência one-shot RouteStore e inventário V8 static-ready
+
+`AuthenticatedProductionInputs` agora retém a composition em `Rc` imutável com owner exato e guarda o RouteStore em `Option` one-shot, exposto somente por `take_route_store_for_f6`. Os demais inputs permanecem disponíveis após a transferência; há adversarial específico.
+
+V8 agora reconhece somente seis journals V4 ainda owned e exige a ausência de cinco owners V4 superseded: status singular, dois time e dois candidate-attestation. O teste recovery/legacy foi ajustado. Não houve relaxamento nem V9; Cargo permanece pendente.
+
+### 2026-09-01T09:34:28-03:00 — Etapa 7: compile V8 corrigido e filtro config verde
+
+O compile do snapshot V8 encontrou dois vermelhos reais: um callsite acessava `route_store` privado, e outro esperava `()` mas recebia `RouteSnapshot`. O primeiro foi migrado para a superfície estreita `audit_external_custody_only`; o segundo converte explicitamente o snapshot para `()`.
+
+O rerun do filtro config V8 passou 5/5, zero falhas e zero ignored, com 319 filtrados. Permanecem 245 warnings `dead_code`, blocker honesto do wiring.
+
+### 2026-09-01T09:36:54-03:00 — Etapa 7: Relay network sidecar V1 5/5 verde
+
+O Relay network sidecar V1 final passou 5/5, zero falhas e zero ignored, com 319 filtrados. Ele exige `SocketAddr` numérico, mapeia Connect→Initiator e Listen→Responder, exige IDs de DB remoto distintos e sem alias com o DB local V8, e recusa multicast ou connect unspecified.
+
+### 2026-09-01T09:36:54-03:00 — Etapa 7: RouteStore one-shot e composition Rc 1/1 verde
+
+O teste de `AuthenticatedProductionInputs` com RouteStore one-shot e composition `Rc` exata passou 1/1, zero falhas e zero ignored, com 323 filtrados.
+
+### 2026-09-01T09:36:54-03:00 — Etapa 7: path fixo refund-arming integrado ao V8
+
+O path fixo `refund-arming.v1.sqlite3` foi integrado ao V8 e ao provisioning Stage13. O gate recovery V8 5/5 já verde cobre presença/ausência e recusa dos owners V4 superseded.
+
+### 2026-09-01T09:36:54-03:00 — Etapa 7: inventory RFQ-late com cinco gates exatos verdes
+
+A implementação RFQ-late de inventory passou cinco testes exatos, cada um 1/1, zero falhas e zero ignored, com 323 filtrados: `delayed_rfq_replaces_stale_pre_rfq_lease_with_fresh_deadline`; `lease_bind_refuses_wrong_store_owner_solver_and_bound_before_mutation`; `live_rfq_lease_is_exactly_renewed_without_refencing`; `exact_inventory_lease_renewal_preserves_epoch_and_rejects_identity_substitution`; e `expired_inventory_lease_renewal_fails_before_persistent_or_retained_mutation`. O build ainda reporta 245 warnings `dead_code`, portanto o wiring permanece blocker.
+
+### 2026-09-01T09:50:24-03:00 — Etapa 7: gate network corrigido e módulo 3/3 verde
+
+O gate inicial do network runtime concluiu vermelho, 2/3. `StorageUnavailable` ocorreu porque o teste tentou reabrir a mesma Relay de Alice enquanto o owner anterior ainda estava vivo; o código produtivo recusou corretamente. Após o drop explícito do primeiro owner, o teste combinado exato passou 1/1, com 328 filtrados, e o módulo integral passou 3/3, zero falhas e zero ignored, com 326 filtrados.
+
+O snapshot está estável, mas ainda emite 247 warnings `dead_code`, blocker de wiring que inclui a nova superfície ainda não usada. Stage11 congelou a correção do blocker estrutural: accessor estreito do solver; novo `AuthenticatedProductionF6PairBindingV7` move-only; `bind_pair` retorna o pair e o epoch exato da lease; activation request/state não recebem mais epoch antecipado; o terminal split ocorre somente depois de ambos wire+RFQ e usa o epoch retornado. Cargo Stage11 permanece pendente.
+
+### 2026-09-01T10:06:59-03:00 — Etapa 7: recibo técnico final do network runtime
+
+Foi criado `production_relay_network_runtime.rs` e registrado em lib. `ProductionRelayNetworkBoundsV1` limita connect/accept a 25 ms..300 s. `ProductionRelayNetworkRuntimeV1::exchange_configured_link` deriva o role exclusivamente do sidecar, recusa role ou remote Relay DB antes do socket, faz Connect com retry sob deadline absoluto e Listen nonblocking aceitando exatamente um peer sob deadline, e então delega ao handshake Noise e à troca deadline-aware; produção não usa spawn. `production_noise_relay.rs` ganhou apenas `matches_network_binding`.
+
+O gate `production_relay_network_runtime::tests::` passou 3/3, zero falhas e zero ignored, com 326 filtrados; o teste combinado de identidade passou 1/1. `rustfmt --check` e `git diff --check` estão verdes. Hash Noise: `02273dc6c692f0fa14f999186cb0e3820a9d9a37ac8abf4f86818d4d27e52cb7`; hash runtime: `05349b172f81fe08d68e15aeac550693d6df287f0652a61e68946f25ebe4006f`. Nenhum commit ou push foi realizado.
+
+### 2026-09-01T10:07:48-03:00 — Etapa 7: gates estruturais Stage11 verdes
+
+`production_f6_factory::tests` passou 9/9, zero falhas e zero ignored, com 320 filtrados. `terminal_split_remains_unreachable...` passou 1/1, zero falhas e zero ignored, com 328 filtrados.
+
+O warning count permanece estável em 247 e continua blocker de wiring. A integração Stage11 no `production_run` está ativa.
+
+### 2026-09-01T10:18:13-03:00 — Etapa 7: Stage11 production_run 10/10 verde
+
+O snapshot Stage11 de `production_run`, SHA `bd3963...`, compilou a lib production com exit 0. `production_run::tests` passou 10/10, zero falhas e zero ignored, com 319 filtrados.
+
+### 2026-09-01T10:18:13-03:00 — Etapa 7: Stage12 registrado e compilando
+
+O novo `production_relay_stage12.rs`, SHA `ee4613...`, foi registrado em lib. O check production da lib passou, exit 0, mas ainda há 505 warnings `dead_code` globais, confirmando wiring aberto. Os testes Stage12 continuam sendo adicionados. Nenhum commit ou push foi realizado.
+
+### 2026-09-01T10:20:35-03:00 — Etapa 7: Stage12 integrado ao production_run
+
+O root integrou Stage12 no `production_run` com begin-before-effects, construct, complete e finish revalidando o mesmo journal. `F6TransportPort` foi removido da lista de ausências.
+
+`cargo fmt`, `git diff --check` e o check production da lib passaram, exit 0. Os warnings globais caíram de 505 para 484, ainda blocker de Stage13/wiring. Nenhum commit ou push foi realizado.
+
+### 2026-09-01T10:22:15-03:00 — Etapa 7: Stage12 focused 2/2 verde
+
+Os testes focados Stage12 passaram 2/2, zero falhas e zero ignored, com 330 filtrados. A cobertura percorre exaustivamente 18 transições do journal, além de ordering de identidades e recusas de transplant. SHA final pré-gate do arquivo: `33e486...`. Nenhum commit ou push foi realizado.
+
+### 2026-09-01T10:23:01-03:00 — Etapa 7: recovery Stage11 exato verde
+
+`production_run::tests::f6_stage11_recovery_accepts_only_started_create_or_complete_reopen` passou 1/1, zero falhas e zero ignored, com 329 filtrados, exit 0. O hash atual de `production_run`, já incluindo a integração Stage12 do root, é `13f317...`. Nenhum commit ou push foi realizado.
+
+### 2026-09-01T10:24:53-03:00 — Etapa 7: P0 Stage13 exige authority epoch canônico V9
+
+O `authority_epoch` de RefundArming é estático e config-bound, distinto do fence dinâmico da RouteStore. V8 não fornece uma fonte normativa; usar 1, 13, registry epoch ou fence como fallback está proibido.
+
+A correção ativa cria V9 canônico com `refund_arming_authority_epoch` explícito, nonzero e autenticado. Os testes devem cobrir codec missing, zero e transplant, preservando V1–V8 byte-exatos.
+
+### 2026-09-01T10:26:31-03:00 — Etapa 7: P0 de ordering Stage12 pre-complete
+
+`ProductionContractsV1::recover_production_f6_applied_history` precisa executar antes de marcar `RelayAuthorities` Complete. Porém, `Constructed` só liberava o owner após complete, e o run completava sem recovery.
+
+A correção enviada ao owner adiciona um método/call interno estreito pre-complete e um teste específico. A semântica do journal não será afrouxada.
+
+### 2026-09-01T10:27:44-03:00 — Etapa 7: P0 ordering Stage12 corrigido estaticamente
+
+O typestate agora força `Constructed→Recovered`: os dois histories F6 precisam ser recuperados antes de complete/finish. O root inseriu o call no run antes de `complete_provisioning_stage`. SHA Stage12: `7afe713...`.
+
+O teste estático novo ainda aguarda Cargo; fmt e diff-check focados estão verdes.
+
+### 2026-09-01T10:31:33-03:00 — Etapa 7: `DomLeaseV1` autenticado retido até o handoff Stage13
+
+O `production_run` agora retém o `DomLeaseV1` autenticado adquirido em `authenticate_dom_f6_payouts`, devolve-o junto das duas payout faces e o leva ao handoff Stage13. Antes, a lease era descartada e o child DOM concreto não poderia ser construído.
+
+Fmt e diff-check focados estão verdes; Cargo aguarda o freeze V9.
+
+### 2026-09-01T10:33:44-03:00 — Etapa 7: status operacional e blockers reais de Stage13
+
+A Etapa 7 permanece ativa e não finalizada. Stage11 `production_run` está verde em 10/10 e recovery em 1/1; Stage12 estava verde em 2/2 no snapshot anterior, mas o novo typestate de recovery ainda aguarda rerun. V9 para o authority epoch de refund está em fechamento, restando varredura e freeze; não se atribui percentual artificial nem se declara conclusão.
+
+O mapa Stage13 confirmou quatro blockers reais: migração V9; child BTC ainda sem materiais M8, seal, vault e conversão; ownership do public secret e expected IDs; e joint borrow de identity + Relay.
+
+### 2026-09-01T10:44:42-03:00 — Etapa 7: V9 congelada e Stage12 revalidado
+
+V9 foi congelada no SHA `c5c88f0...`. O filtro `production_config::tests::v9` passou 3/3; o KAT `production_config_v9_hash_golden_is_frozen` passou 1/1 e fixou o hash `7d48f1...`. O `production_run` migrou os loaders e o provisioning binding de V8 para V9.
+
+O gate Stage12 para o novo typestate e o accessor conjunto identity/Relay passou 3/3. Os 191 warnings `dead_code` no teste da lib production permanecem blocker honesto do wiring; nenhum `allow`, commit ou push foi feito.
+
+### 2026-09-01T10:55:12-03:00 — Etapa 7: wiring de refund Stage13 e matriz de prefixes
+
+O wiring de refund Stage13 foi inserido e a revisão adversarial não encontrou bug funcional. `adapter-btc-live` passou `cargo check`; o check da lib production de `dom-interopd` também saiu 0, ainda com 480 warnings que permanecem blocker de wiring. O primeiro compile BTC revelou E0277 e E0061; ambos foram corrigidos e o rerun ficou verde.
+
+A matriz de open/journal/file prefixes do refund passou 1/1 cobrindo 72 combinações, e o reopen do prefix completo F6 + Relay + Refund passou 1/1. O `history_limit` DOM agora é retido no handoff. Nenhum commit ou push foi feito.
+
+### 2026-09-01T11:10:03-03:00 — Etapa 7/Stage13: integração e handoff BTC fresh claim
+
+V9, Stage12, refund e timer estão integrados. O check production saiu 0, mas os 477 warnings permanecem blocker de wiring.
+
+O handoff BTC fresh claim ganhou digest interno domain-separated além do MAC. O teste de codec/tamper/trailing/partial reuse passou 1/1, e o teste de transplante de attempt/network/template passou 1/1, com 340 filtrados. Nenhum commit ou push foi feito.
+
+### 2026-09-01T11:11:33-03:00 — Etapa 7/Stage13: gate do consumer de public secret DOM
+
+O teste `public_secret_consumer_scope_refuses_every_single_pin_transplant` passou 1/1, com 340 filtrados. O owner linear entrega o child e dois consumers selados, reutilizando a mesma instância privada `Arc` de runtime/verifiers.
+
+O `production_run` ainda precisa consumir esse split; o wiring permanece blocker. Nenhum commit ou push foi feito.
+
+### 2026-09-01T11:16:11-03:00 — Etapa 7/Stage13: revisão DOM reabre dois findings HIGH
+
+Apesar do gate verde anterior, a revisão DOM encontrou dois findings HIGH: o wrapper liberava `RealDomClaimConsumerV1` cru antes de `PotentiallyExposed` e da observação canônica; e o scope omitia `composition_digest`.
+
+O patch foi rejeitado e devolvido para correção, incluindo teste de transplante de composição. Nenhum commit ou push foi feito.
+
+### 2026-09-01T11:17:03-03:00 — Etapa 7/Stage13: revisão BTC rejeita patch por findings HIGH/MED
+
+A revisão BTC rejeitou o patch por três findings HIGH: a extração pública legada contorna confirmação; o restart de uma operação existente pode produzir fake success sem handoff de extração; e a extração é reutilizável sem journal-before-effect. Há ainda dois findings MED: `bind_fresh` não prova o mesmo Store/receipt, e os dois owners RPC não compartilham identidade autenticada.
+
+Riscos adicionais de múltiplos reopens e de corrupção em staging também permanecem abertos. Todos os findings foram devolvidos para correção; nenhum commit ou push foi feito.
+
+### 2026-09-01T11:23:54-03:00 — Etapa 7/Stage13: HIGHs DOM corrigidos e handoffs lineares
+
+Os HIGHs DOM foram corrigidos estaticamente: o consumer cru foi removido; o handoff agora é opaco e pina composition, leg, settlement, binding e trusted chain; o owner Contracts revalida o handoff; e o source constructor é único. O gate Cargo aguarda execução serial.
+
+O root também adicionou `AuthenticatedProductionInputsV1::into_runtime_admission_and_time_guard`, que exige a transferência prévia do RouteStore e move juntos admission, o único `DurableRouteTimeAnchorStore`, authority sets, secp, registry e terms. `PendingEvmSignerPairV1::into_parts` fornece a separação linear do par EVM. Nenhum commit ou push foi feito.
+
+### 2026-09-01T11:27:02-03:00 — Etapa 7: retomada pós-compactação sem reinício
+
+A retomada pós-compactação confirmou a continuidade exata da Etapa 7, ainda ativa e sem reinício. O HEAD permanece `b77695b`; BTC/V10 continuam em execução e nenhuma publicação foi feita.
+
+### 2026-09-01T11:27:35-03:00 — Etapa 7: estado objetivo antes do gate final
+
+A Etapa 7 ainda não chegou ao gate final. Na frente BTC, HIGH1 está fechado e HIGH3 tem journal/one-shot parcial; permanecem HIGH2 recovery exata, binding do mesmo owner/Store, corrupção e testes. Na frente V10, constantes, family, policies e inputs foram iniciados; codec, loaders, exports e testes permanecem pendentes.
+
+Depois dessas frentes, ainda será necessário integrar o composition root, remover `NotComposable` e executar os gates. Nenhum Cargo, commit ou push foi feito neste checkpoint.
+
+### 2026-09-01T11:33:00-03:00 — Etapa 7: ciclo arquitetural na identidade do public-secret source
+
+O wiring real revelou um ciclo de identidade: o tx hash EVM só existe após o claim, e a extraction BTC só existe após o fresh claim/materialização; portanto, o expected txid não pode ser preenchido no startup.
+
+O fechamento exige handoff tardio autenticado derivado do mesmo owner de child/materialization, ou equivalência formalmente provada, comparando o snapshot Public com a evidência canônica. Config, fallback e IDs caller-shaped são proibidos. A Etapa 7 não fecha antes da implementação desse owner.
+
+### 2026-09-01T11:37:03-03:00 — Etapa 7: freeze estático V10 sob revisão adversarial
+
+V10 foi congelada estaticamente com `production_config` SHA `0c5ed095...` e `lib` SHA `82dbbdfe...`. O KAT V9 `7d48f1...` é alegadamente preservado; root confirmou os hashes, e fmt/diff-check estáticos estão verdes.
+
+Cargo ainda não foi executado. A revisão adversarial permanece ativa antes da migração do `production_run`.
+
+### 2026-09-01T11:40:47-03:00 — Etapa 7: freeze estático BTC sob revisão
+
+Os findings BTC HIGH1/HIGH2/HIGH3 e MED foram declarados fechados pela frente; rustfmt e diff-check estão verdes, mas Cargo permanece pendente. Hashes congelados: fresh `0806cdf1`, funding `e1db316f`, btc-live lib `49745f6a`, Store `5ca7574a`, child BTC `f68a2c88` e F5 lib `f242f9bc`.
+
+O root iniciou a revisão estática e o agente iniciou a instalação tardia do source-router. Nenhum commit ou push foi feito.
+
+### 2026-09-01T11:41:28-03:00 — Etapa 7: BTC reaberto por perda do handoff em retry
+
+A revisão encontrou que o handoff consumindo `self` era perdido quando o RPC ficava indisponível ou as confirmações eram insuficientes, quebrando o retry no mesmo processo.
+
+Foi autorizada correção mínima para `&mut` exclusivamente dentro de slot fechado, com journal-before-RPC e consumo lógico somente após sucesso. São obrigatórios testes unavailable/insufficient → retry success e ausência de double success.
+
+### 2026-09-01T11:41:57-03:00 — Etapa 7: correção normativa do slot BTC pós-extraction
+
+O slot BTC não pode consumir permanentemente a authority após extraction success: uma falha posterior, antes de verify/seal/upstream claim, precisa permitir retry da mesma rota. O slot deve recusar todo transplante, mas reter ou reabrir a mesma authority exata para reextração idempotente sobre journal `Complete`, sem authority duplicada nem escape.
+
+### 2026-09-01T11:43:20-03:00 — Etapa 7: V10 corrigida e congelada
+
+V10 agora possui fixture completa; o loader de reopen compara o companion; e o codec ganhou adversariais para `u128`, ordem, duplicatas e swap, com documentação V10. A fee factory exige config + `ResolvedEvmDeployment`, valida registry, epoch e caps, e recusa `u128::MAX` no boundary.
+
+Hashes congelados: config `511f3ec1` e lib `82dbbdfe`. Fmt/diff-check estão verdes e o KAT V9 permanece preservado; Cargo ainda não foi executado.
+
+### 2026-09-01T11:43:57-03:00 — Etapa 7: novo HIGH BTC no recovery do extractor
+
+A revisão root encontrou que a extraction authority só era criada por `finalize_claim(t)`. Após crash com claim já pública, mas antes do seal no vault, o reopen em `Prepared` exige `t` e não consegue reconstruir o extractor, formando um ciclo impossível apesar da documentação.
+
+O finding foi devolvido para durabilizar o contexto e o expected exact antes de liberar/broadcast, com teste obrigatório crash → reopen → reextract via Core sem `t` prévio.
+
+### 2026-09-01T11:49:45-03:00 — Etapa 7: blockers adicionais do composition root e F7/M8
+
+A Etapa 7 permanece ativa. V10 está estaticamente fechada, mas o mapa do composition root confirmou blockers obrigatórios: child EVM, router e materializer ainda não são construídos; o loop composto Relay/Noise está ausente; V10 autentica intervalos, mas ainda não fornece uma autoridade contínua de tempo; e o upgrade in-place V9 → V10 exige migração atômica explícita porque o provisioning binding muda, sem fallback V9.
+
+No eixo F7/M8, não existe callsite produtivo de `verify_f7_route_anchor_authority_v2`, nem split de `VerifiedF7RouteAnchorAuthorizationsV2` para Contracts + BTC, nem duas seal keys e vault paths BTC autenticadas, nem wrapper Contracts V2 no owner. Nenhum desses requisitos pode ser escondido como follow-up.
+
+### 2026-09-01T11:52:08-03:00 — Etapa 7: `production_run` migrado estaticamente para V10
+
+O root migrou os loaders e o provisioning binding do `production_run` de V9 para V10. O entrypoint agora exige `operational_policies_v10`, carrega o sidecar Relay e cruza os IDs upstream, downstream e local antes de provisioning ou sockets; também valida `EvmFeesV1` contra `ResolvedEvmDeployment` antes de abrir os clients e retém policies, sidecar e fees no handoff.
+
+Rustfmt e diff-check focados estão verdes. Cargo não foi executado enquanto outras frentes editam a árvore. Upgrade in-place V9 continua recusado, sem fallback.
+
+### 2026-09-01T11:54:10-03:00 — Etapa 7: `MISSING_PRODUCTION_PARTS` atualizado honestamente
+
+Políticas V10 e Relay peer binding saíram de `MISSING_PRODUCTION_PARTS` porque agora são autenticadas no boundary. F7/M8 anchor authority e continuous durable time foram adicionados explicitamente como partes ainda ausentes. Também foi corrigido o comentário stale de V10 que ainda dizia V9.
+
+Nenhum Cargo, commit ou push foi feito.
+
+### 2026-09-01T11:55:26-03:00 — Etapa 7: blocker adicional F7/M8 nos vaults BTC
+
+`BoundFreshBitcoinClaimAuthorityV1::prepare_after_m8` ainda usa `BitcoinNonceVault::open` de laboratório e não aceita vaults production; o handoff prebroadcast perde a ligação ao mesmo `Rc<Store>`; e V10/layout/journal ainda não incluem os dois vault paths, key-store e estágio necessários.
+
+A frente F7 implementará verify/split e o wrapper Contracts sem fingir o fechamento BTC. A frente BTC deverá fechar o owner produtivo e os vaults. O finding permanece blocker da Etapa 7.
+
+### 2026-09-01T11:57:42-03:00 — Etapa 7: boundary Relay V10 isolado em validator puro
+
+O boundary Relay V10 foi extraído para um validator puro. Um teste adversarial no `production_run` prova estaticamente que o match exato passa, enquanto alias do Relay local e swap upstream/downstream retornam `RelayNetworkConfiguration`.
+
+Rustfmt e diff-check estão verdes. O teste ainda não foi executado devido ao freeze global de Cargo.
+
+### 2026-09-01T12:01:36-03:00 — Etapa 7: ponte F7/M8 congelada e child EVM composto
+
+A ponte F7/M8 foi congelada em `production_f7_m8`: usa exclusivamente `verify_f7_route_anchor_authority_v2`, faz split linear único, cria o wrapper Contracts V2 sobre o mesmo `Rc`/Store e expõe trait BTC selado sem fallback. O módulo foi integrado em `lib.rs`.
+
+O root também compôs o child EVM real no `production_run`: decompõe o plano F6, autentica scope, adquire lease fresca conforme o role do signer, emite remote transport do mesmo owner Contracts e passa fees, TTL e custody V10 exatos, substituindo Store/RPC/signer crus pelo port. Rustfmt e diff-check estão verdes; Cargo permanece pendente.
+
+### 2026-09-01T12:02:35-03:00 — Etapa 7: P0 F7/M8 reaberto no boundary persist-before-return
+
+Um crash depois de `issue_post_anchor_v2` persistir e antes do retorno perde o par BTC. O resume Contracts atual não permite consumir ou reautenticar o fresh share Contracts de um rerun, tornando impossível recuperar o aggregate.
+
+Foi exigida uma API Store `issue-or-resume-from-verified` idempotente, com fresh evidence byte-exata, e teste de crash nesse boundary. O patch F7/M8 não está fechado até essa correção.
+
+### 2026-09-01T12:03:51-03:00 — Etapa 7: segundo P0 F7/M8 no ordering da runtime DOM
+
+O ordering live é impossível no patch atual: Stage12 retém `DomHttpChainAdapter` para F7, mas o child DOM precisa consumi-lo em `RealDomRpcRuntimeV1` antes de produzir funding; F7 só pode validar depois desse funding.
+
+É obrigatório um owner/runtime compartilhado único, ou verifier selado sobre o mesmo `RealDomRpcRuntime`, sem clone, reopen ou segundo client. O gate deve incluir funding → F7 usando exatamente a mesma runtime.
+
+### 2026-09-01T12:05:42-03:00 — Etapa 7: P0 crítico de custódia bilateral BTC
+
+O fluxo fresh/prebroadcast V1 persiste `maker_secret` e `taker_secret` no mesmo Store, e `prepare_after_m8` assina localmente as duas metades. Isso viola a custódia bilateral e não pode entrar em produção; a tentativa de provisionar dois vaults locais foi cancelada.
+
+Produção deve usar uma única `BitcoinParticipantClaimAuthority`/Vault local proveniente do Stage8 e transporte autenticado do pubnonce/partial remoto. O fresh dual-signer deve ficar lab/recovery-only ou ser substituído por V2 com roster público e sem secrets remotos.
+
+### 2026-09-01T12:08:25-03:00 — Etapa 7: status objetivo de F7/M8, BTC e composition root
+
+Os patches para os dois P0 F7/M8 foram aplicados, mas ainda não foram congelados nem passaram Cargo. O desenho BTC participant-separated existe, porém o patch ainda está pendente: precisa retirar dual-key do handoff produtivo, usar um único vault local e transportar pubnonce/partial remotamente com autenticação.
+
+O composition root, o loop produtivo e os gates também permanecem pendentes. Nenhum commit ou push foi feito.
+
+### 2026-09-01T12:12:06-03:00 — Regra do operador: encerrar esta execução após a Etapa 7
+
+Nesta execução, a missão é concluir integralmente apenas a Etapa 7, deixar todos os seus gates verdes e então parar e reportar. As Etapas 8–13 não devem ser iniciadas agora. Nenhum commit ou push foi autorizado.
+
+### 2026-09-01T12:21:07-03:00 — Etapa 7: compile RED corrigido e F7 reaberto por revisão cruzada
+
+O primeiro `cargo check -p dom-interopd --features production` falhou em `btc-live/fresh.rs:1551` porque `record` estava fora de escopo. O root corrigiu o uso para o request autenticado disponível; o gate ainda precisa ser rerodado.
+
+A revisão cruzada F7 encontrou dois HIGH — owner/trait BTC ainda modelando dual-signer e teste `include_str` autocontaminado —, dois MED — resume dependente de session caller-shaped e perda do handle bloqueando progresso até restart —, além de LOW sobre leg separada. A frente foi reaberta para correção. Nenhum commit ou push foi feito.
+
+### 2026-09-01T12:21:57-03:00 — Etapa 7: revisão cruzada BTC encontra fixture produtiva e recovery incompleto
+
+A revisão cruzada BTC encontrou P0 em `prepare_fresh_route`: fixture injetada com IDs, Regtest e adaptor hardcoded, além de overwrite do template. Também encontrou P1 porque dual-key ainda era construído indiretamente no reopen produtivo, P1 porque recovery `Finalized` não tinha callsite e P2 por consume-before-validate.
+
+O root removeu integralmente o bloco de fixture contaminante. A frente BTC permanece reaberta para tornar dual-key inalcançável, ligar o recovery e garantir retry seguro. Nenhum Cargo, commit ou push foi feito.
+
+### 2026-09-01T12:24:33-03:00 — Etapa 7: child DOM real composto estaticamente no `production_run`
+
+O root ligou o child DOM real usando os dois owners Contracts exatos do Stage12, bindings upstream/downstream e um único `DomHttpChainAdapter` consumido em `RealDomRpcRuntimeV1`. A mesma composition emite o child, dois secret consumers e o scanner F7 com identidade `Arc` exata.
+
+O Store e a lease DOM saíram do tuple cru. Rustfmt e diff-check focados estão verdes; Cargo aguarda o freeze das frentes de código.
+
+### 2026-09-01T12:27:00-03:00 — Etapa 7: F7/M8 P0 corrigidos e congelados estaticamente
+
+O owner dual-signer foi removido. O fluxo retém somente capability BTC local participant-bound e metade remota pública; leg, role, participant e digests são autenticados. O teste autocontaminado foi substituído, e o resume produtivo dependente de session caller-shaped foi removido.
+
+O live guard usa `Arc`/`Weak`, transfere no consume e permite recovery no mesmo processo via `Drop` com F7 fresco. Fmt/diff-check estão verdes; Cargo permanece pendente. A frente iniciou módulo independente para o loop Relay/Noise/F6/runtime.
+
+### 2026-09-01T12:30:38-03:00 — Ordem mais recente: continuar automaticamente após a Etapa 7
+
+O operador revogou a ordem anterior de parada após a Etapa 7. Depois de fechar e gatear integralmente a Etapa 7, a execução deve continuar automaticamente pelas Etapas 8–13 até satisfazer o critério global de produção.
+
+Continuam vedados commit e push; Signet permanece cancelado; os invariantes DOM permanecem intactos.
+
+### 2026-09-01T12:35:06-03:00 — Retomada pelo roteiro integral e finding real BTC em `ExtractionReady`
+
+A execução foi retomada pelo roteiro integral. Durante patches transitórios, a revisão estática apontou duplicidades aparentes em BTC/F7; os agentes confirmaram que elas já foram removidas no disco congelável.
+
+O finding real BTC permanece: um crash após finalization intent + `Prepared`, mas antes de `FreshClaimFinalized`, deixava produção sem extractor. A frente corrige isso com estado secret-free `ExtractionReady`, liberado somente por prova `Terminal` exata. O root assumirá o late DOM public-secret source depois do freeze de `production_plan_source`.
+
+### 2026-09-01T12:38:34-03:00 — Etapa 7: blocker produtivo do round participante BTC após F7/M8
+
+O código confirma que `verify_and_issue_production_f7_m8_v2` ainda não possui callsite produtivo. O owner participante Bitcoin do Stage8 já expõe authority/state, e `btc-actuator` possui pubnonce, partial e aggregate duráveis, mas `dom-interopd` não tem protocolo DSC1 produtivo para transportar e autenticar pubnonce/partial remotos, nem owner que conduza F7 → M8 → round participante → pre-signature.
+
+O fresh dual-signer continua proibido. Essa superfície precisa ser implementada e testada e não pode sair de `MISSING_PRODUCTION_PARTS` como simples wiring.
+
+### 2026-09-01T12:40:04-03:00 — Etapa 7: gate integrado RED revela erros reais
+
+`cargo check -p dom-interopd --features production` ativou também default/development; o rerun correto usará `--no-default-features`. Ainda assim, o run encontrou erros reais: dependência `dom-final-claim-binding` ausente, `recover_existing_exact_claim` BTC dentro do trait errado, getters `const` sobre `Rc`, move de dois scopes no `production_run`, Store EVM não mutável e refs Noise sem `Clone`.
+
+O root corrigirá todos e rerodará o gate. Warnings do legado dual-key também serão eliminados, não ignorados.
+
+### 2026-09-01T12:42:48-03:00 — Etapa 7: revisão adversarial reabre o loop composite
+
+A revisão encontrou CRITICAL no shutdown, que saía sem gate safe e arriscava fundos ou `t` público. Encontrou também HIGH por lease não renovada antes de bloqueios, perda do owner Stage12/F6 em erros retryáveis e ausência de callsite; MED por indisponibilidade fatal, provenance receiver/owner não tipada, `SystemTime` regressivo e shutdown de até cerca de 120s; e LOW por backlog descartado.
+
+A frente está corrigindo todos com testes. O root corrigiu os erros do primeiro compile e aguarda novo freeze antes do rerun.
+
+### 2026-09-01T12:44:17-03:00 — Finding Stage13: gates production neutralizados no CI local
+
+`scripts/ci_local.sh`, aproximadamente nas linhas 268, 271 e 274, executa gates production de `dom-interopd` com `|| true`, neutralizando falhas reais. Essa estrutura deverá ser removida ou reestruturada no fechamento do Stage13; sua saída nunca pode ser aceita como gate verde.
+
+### 2026-09-01T12:46:42-03:00 — Etapa 7: blocker da seal key no protocolo participante BTC
+
+As APIs participantes `produce_claim_pubnonce`, `produce_claim_partial` e `aggregate_claim` exigem `BitcoinNonceSealKeyV1`, mas o Stage8 de `dom-interopd` retém apenas authority + nonce state e não provisiona nem deriva essa key; `rg` não encontrou uso fora de `btc-actuator`.
+
+A correção deve derivar ou provisionar uma key de domínio separado, vinculada a route e authority, dentro do owner Stage8, sem getter bruto ou UI, e entregá-la somente ao protocolo BTC autenticado. Constante e novo vault dual são proibidos.
+
+### 2026-09-01T12:48:39-03:00 — Etapa 7: primeiro seam da nonce seal key BTC fechado estaticamente
+
+O Stage8 agora deriva uma key separada pelo domínio V1 a partir do secret local e de route, terms, participant, leg e role; importa-a em `BitcoinNonceSealKeyV1`; e a retém somente dentro do aggregate owner. O `key_id` integra o binding digest, e apenas uma referência é exposta pela authority participante Bitcoin temporária.
+
+Não há constante, getter bruto nem segundo vault. O gate Cargo permanece pendente até o freeze das frentes.
+
+### 2026-09-01T12:49:21-03:00 — Diretiva de execução vigente: gates em lotes com freio de falhas
+
+A iteração deve parar antes de qualquer correção e produzir relatório primeiro. Durante cada iteração, somente os testes e crates afetados podem ser executados; vermelhos devem ser agrupados em lote e tratados na ordem `fmt` → clippy do crate → unit → integration → regtest/Anvil.
+
+Após três falhas, aplica-se freio obrigatório: não iniciar uma quarta tentativa sem novo relatório e decisão. Não tocar áreas verdes nem fazer refactor fora do finding. Cada tentativa deve registrar tentativa, mudança e resultado. O root deve reportar a cada quatro horas ou a cada gate, o que ocorrer primeiro.
+
+Continuam proibidos `allow`, mock, fallback e qualquer afrouxamento. Os agentes de código foram interrompidos antes de novas correções para aplicar esta diretiva.
+
+### 2026-09-01T12:52:22-03:00 — Relatório completo da pausa e protocolo de retomada
+
+A iteração foi efetivamente parada antes de qualquer nova correção. Os agentes `stage7_btc_claim_handoff`, `stage7_config_v10` e `scribe_continuation` estão interrompidos. Nenhum teste, commit ou push adicional foi executado depois da ordem de pausa. A worktree local permanece preservada sobre `mainnetswap`; o remoto oficial continua no checkpoint `b77695b95abd888ed32b8ea9bd77765afbacebd0`.
+
+#### Estado dos gates da Etapa 6
+
+A Etapa 6 foi formalmente fechada no snapshot publicado, mas a falha isolada de features do `rustix` descoberta depois estava mascarada pela feature unification do workspace. Portanto, evidência histórica e evidência atual não podem ser misturadas:
+
+| Gate | Última evidência | Situação no snapshot local interrompido |
+|---|---|---|
+| `settlement-coordinator` | 44/44 e clippy estrito | Verde histórico; regate necessário após a integração atual |
+| `route-executor` | check, 41 testes e clippy isolados após a correção `rustix` | Verde atual |
+| `route-secret-vault` | 14/14 | Verde histórico; nenhuma falha atual conhecida |
+| `dom-actuator` | 69/69 e clippy | Verde histórico; alterado depois, evidência stale |
+| `evm-actuator` | 47/47 e clippy | Verde histórico; alterado pela integração EVM, regate pendente |
+| `btc-actuator` | check, 28 testes e clippy isolados | Verde atual; regtest não foi repetido neste gate |
+| Bitcoin Core regtest | live 1/1 | Verde histórico; Signet continua cancelado |
+| `production_settlement` | 17/17 | Verde histórico; regate proporcional pendente |
+| `production_plan_source` | 11/11 | Verde histórico; alterado agora, não certificado |
+| `production_materializer` | 5/5 | Verde histórico; alterado agora, não certificado |
+| production child ports | 36/36 | Verde histórico; DOM/EVM/BTC foram alterados depois |
+| `route-composer` | 35/35 | Verde histórico |
+| `route-time-anchor` | 22/22 | Verde histórico |
+| receiver `0x12`/Store | 2/2 e 1/1 | Verde histórico |
+| `dom-interopd` production lib | 202 passed, zero failed, três golden printers ignored | Verde histórico; não prova a árvore atual |
+| scans `#[allow]`/`#[expect]` da Etapa 6 | zero ocorrências | Verde histórico |
+| `git diff --check` | executado no levantamento da pausa | Verde atual |
+| `cargo fmt --all --check` | verde antes dos últimos patches interrompidos | Não certificado atualmente |
+| clippy global do daemon | 452 diagnósticos no último run | Vermelho |
+| compile production integrado | duas tentativas falharam | Vermelho até o rerun correto |
+
+Não há teste comportamental conhecido da Etapa 6 falhando. O vermelho atual é de compilação e integrabilidade da Etapa 7 sobre superfícies da Etapa 6, além do clippy global ainda não fechado.
+
+#### Bloqueio atual e contador de tentativas
+
+O bloqueio imediato é o compile integrado de produção do `dom-interopd`, seguido do fechamento real do composition root da Etapa 7. O comando correto para o gate futuro é:
+
+```bash
+cargo check -p dom-interopd --no-default-features --features production
+```
+
+Foram consumidas duas de no máximo três tentativas permitidas para esse bloqueio:
+
+1. **Tentativa 1:** falhou em `crates/adapters/btc-live/src/fresh.rs:1551` porque `record` não existia no escopo. A revisão demonstrou que havia uma fixture contaminando produção com IDs hardcoded, `Regtest`, adaptor e template sobrescritos. O bloco inteiro foi removido, em vez de apenas renomear o identificador. Não houve rerun isolado antes da tentativa seguinte.
+2. **Tentativa 2:** foi chamada sem `--no-default-features`, ativando `development` e `production` simultaneamente, mas também revelou erros reais: dependência ausente de `dom-final-claim-binding`; `recover_existing_exact_claim` no `impl` errado; getters `const` desreferenciando `Rc`; scopes upstream/downstream movidos; Store EVM não mutável; referências Noise movidas; e legado BTC dual-key ainda produtivamente alcançável/dead. As correções foram agrupadas: dependência ligada, método movido para o `impl` inerente, `const` removido, scopes clonados, Store tornado mutável, identidades Noise clonadas, dual-key restrito a `cfg(test)` sem `allow`, e nonce seal key BTC derivada com domínio separado e vinculada a rota/terms/participante/leg/role. Nenhum rerun ocorreu; portanto, o gate permanece oficialmente vermelho.
+
+Se a terceira tentativa do mesmo gate falhar, a execução deve parar sem uma quarta tentativa e registrar erro exato, diff tentado, hipótese causal e necessidade concreta.
+
+#### Diffs parciais que não podem ser tratados como fechados
+
+- O loop composto estava sendo corrigido para impedir shutdown sem gate seguro, renovar leases antes de bloqueios, preservar owners Stage12/F6 em erros retryable, tipar provenance owner/receiver, rejeitar regressão de relógio e reduzir latência de shutdown. A edição foi interrompida e não foi verificada.
+- O late DOM source/materialization estava em implementação para produzir a fonte real somente quando a transação esperada existe, sem fabricar funding ou reorg. A edição foi interrompida e não foi verificada.
+- O Stage8 agora deriva e retém uma `BitcoinNonceSealKeyV1` participant-bound, mas essa mudança não foi formatada/gateada após o último teste adicionado.
+- Continua faltando o callsite produtivo F7→M8 e o protocolo DSC1 autenticado e durável para pubnonce, partial e aggregate do round participante BTC. O fluxo dual-signer permanece proibido.
+- `scripts/ci_local.sh` ainda contém gates production neutralizados por `|| true`; isso é finding da Etapa 13, não evidência verde.
+
+#### Plano obrigatório de retomada
+
+1. Reler este checkpoint, o roteiro canônico e o estado real da worktree; inventariar os diffs parciais sem Cargo.
+2. Congelar ownership de arquivos e corrigir em lote todos os vermelhos conhecidos das frentes independentes BTC participante, loop composto/DOM e compile/wiring. Não tocar código verde nem fazer refactor lateral.
+3. Verificar estritamente nesta ordem: `cargo fmt`/diff; clippy somente dos crates afetados; testes unitários direcionados; testes de integração direcionados; somente então regtest/Anvil pertinente.
+4. Executar o gate production integrado uma única vez quando todos os gates baratos estiverem verdes. Essa será a terceira tentativa contabilizada; se falhar, aplicar o freio de loop e reportar antes de qualquer nova ação.
+5. Fechar a Etapa 7 com tabela requisito → código → teste → resultado. Depois continuar automaticamente pelas Etapas 8–13 até o critério global de produção, preservando a proibição de Signet e de commit/push sem autorização explícita.
+6. Reportar a cada gate fechado ou quatro horas, o que ocorrer primeiro, e registrar no livro tentativa, mudança e resultado.
+
+Por ordem do operador, a execução fica agora aguardando novo comando. Nenhuma frente será retomada automaticamente a partir deste checkpoint.
+
+### 2026-09-01 — Diretiva de retomada: agente único, recertificação Stage 6 e freeze F7/M8
+
+O operador retomou a execução com uma única autoridade de edição. Os agentes `scribe_continuation`, `stage7_btc_claim_handoff` e `stage7_config_v10` permanecem encerrados/interrompidos; somente o root pode editar a worktree até o compile integrado ficar verde.
+
+A tentativa anterior que combinou features `development` e `production` foi declarada inválida. O contador do gate integrado retornou a um. Sem qualquer edição prévia, foi executado exatamente:
+
+```bash
+cargo check -p dom-interopd --no-default-features --features production
+```
+
+#### Gate integrado válido nº 1 — RED e correção em lote
+
+O primeiro run válido falhou com onze erros, todos concentrados em três arquivos:
+
+- `production_chain_signers.rs`: `Zeroizing<[u8; 32]>` não satisfazia o `AsRef<[u8; 32]>` selecionado;
+- `production_composite_loop.rs`: o callsite referia o helper inexistente `is_retryable_activation_error` apesar de o classificador exato existente ser `is_f6_activation_awaiting`;
+- `production_plan_source.rs`: nove getters `const` tentavam desreferenciar `Rc`, operação não permitida em função const.
+
+Foi aplicado um único lote, limitado ao que o compilador apontou:
+
+- passagem do secret como `&*bitcoin_participant_secret`;
+- uso do classificador exato `is_f6_activation_awaiting`, sem ampliar a classe retryable;
+- remoção exclusiva de `const` dos nove getters sobre `Rc`.
+
+O único rerun permitido do mesmo comando terminou GREEN, exit 0, em 4,64 s. O daemon ainda emitiu 447 warnings de dead code/unused; eles são findings reais a agrupar e resolver por crate depois da recertificação Stage 6, sem `allow` ou `expect`.
+
+#### CI local deixou de neutralizar resultados
+
+Por ordem explícita do operador, todas as ocorrências literais de `|| true` foram removidas de `scripts/ci_local.sh`, incluindo gates static/offline/live, production check/clippy/tests e wrappers de modo. `bash -n scripts/ci_local.sh` passou e uma varredura confirmou zero `|| true` remanescente. Qualquer vermelho futuro será preservado como finding.
+
+#### Ordem obrigatória a partir deste ponto
+
+1. Inventariar mecanicamente cada crate da Etapa 6 alterado depois do checkpoint `b77695b`.
+2. Executar `cargo test` e clippy estrito isolados de cada um; atualizar a tabela inteira para `verde atual`. Nenhum `verde histórico` fecha a recertificação.
+3. Somente depois, finalizar um diff parcial por vez: loop composto → late DOM source → nonce seal key Stage8. Cada frente exige fmt e teste do crate antes da seguinte.
+4. F7→M8 e o protocolo DSC1 do round BTC ficam congelados. Nenhuma implementação é autorizada; será produzido apenas documento curto com interfaces, estado, lacunas e pontos de contato com o Store.
+5. Agrupar e resolver os diagnósticos clippy por crate depois da recertificação, sem suppressions ou afrouxamento.
+
 <!-- DOM_INTEROP_CANONICAL_ROADMAP_TAIL_V1 -->
 # Roteiro canônico e imutável da missão até produção
 

@@ -23,14 +23,12 @@
 //! authenticated snapshot independently authorizes the same exact-record
 //! recovery path.
 
+use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
-use adapter_dom_real::RealDomClaimConsumerV1;
+use adapter_dom_real::{RealDomClaimConsumerV1, RealDomClaimVerifierV1, RealDomRpcRuntimeV1};
 use adapter_evm::{evm_counterparty_chain_id, EvidenceKind, EvmAdapter, JsonRpc, LockTerms};
-use btc_actuator::{
-    extract_revealed_secret_from_confirmed_lookup, BitcoinActionV1, BitcoinActuationScopeV1,
-    BitcoinActuatorErrorV1, BitcoinClaimExtractionContextV1, BitcoinRpcV1,
-};
 use counterparty_api::{AdapterError, RevealedSecretBytes, VerifiedOutcome};
 use dom_actuator::{
     DomActuatorError, DomClaimCustodyClassificationV1, DomContractsActuatorV1, DomSessionBindingV1,
@@ -49,10 +47,12 @@ use route_secret_vault::{
 use settlement_coordinator::{
     AuthenticatedCoordinatorExposureV1, ChildExposureV1, DeferredChildMaterializationCapabilityV1,
     DeferredChildMaterializationResultV1, SecretRequirementV1, SettlementChildPlanV1,
-    SettlementChildrenV1,
+    SettlementChildrenV1, SettlementLegV1,
 };
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::production_child_btc::ProductionBitcoinPublicExtractionHandoffV1;
+use crate::production_child_router::ProductionChildMaterializationRequestV1;
 use crate::production_settlement::{
     ProductionSettlementPlanDraftV1, ProductionSettlementPlanSourceV1,
 };
@@ -81,6 +81,10 @@ pub(crate) struct ProductionPublicSecretRetentionV1 {
 }
 
 enum VaultRecoveryAuthorizationV1<'authority> {
+    #[expect(
+        dead_code,
+        reason = "EVM public-secret re-extraction surface excluded by the stage-7 composition"
+    )]
     CanonicalOnly,
     AuthenticatedPublicSnapshot,
     AuthenticatedCoordinatorExposure(&'authority AuthenticatedCoordinatorExposureV1),
@@ -212,11 +216,11 @@ impl core::fmt::Debug for ProductionPublicSecretRequestV1<'_> {
 }
 
 impl<'a> ProductionPublicSecretRequestV1<'a> {
-    pub(crate) const fn route_id(&self) -> RouteIdV1 {
+    pub(crate) fn route_id(&self) -> RouteIdV1 {
         self.route_id
     }
 
-    pub(crate) const fn composition_digest(&self) -> Digest32 {
+    pub(crate) fn composition_digest(&self) -> Digest32 {
         self.composition_digest
     }
 
@@ -248,7 +252,214 @@ pub(crate) trait ProductionChainPublicSecretSourceV1 {
     ) -> Result<RevealedSecretBytes, AuthorityRefusalV1>;
 }
 
-/// Restart-safe DOM receiver authority for one exact observed `FinalClaim`.
+/// Closed, move-only handoff from the DOM child composition into the sole DOM
+/// public-secret source constructor.
+///
+/// This type intentionally has no operation that returns or borrows its
+/// `RealDomClaimConsumerV1`.  Only
+/// [`ProductionDomPublicSecretSourceV1::from_dom_child_consumer_authority`]
+/// can consume it, after crossing the Contracts owner's exact Store opening
+/// with the route composition, leg, settlement, session and trusted-chain
+/// pins.  Consequently no composition-root callsite can invoke
+/// `RealDomClaimConsumerV1::consume` directly.
+pub(crate) struct ProductionDomPublicSecretConsumerAuthorityV1 {
+    composition_digest: Digest32,
+    leg: SettlementLegV1,
+    settlement_id: Digest32,
+    binding: DomSessionBindingV1,
+    trusted_chain_id: TrustedChainIdV1,
+    consumer: RealDomClaimConsumerV1,
+}
+
+impl core::fmt::Debug for ProductionDomPublicSecretConsumerAuthorityV1 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("ProductionDomPublicSecretConsumerAuthorityV1([authority redacted])")
+    }
+}
+
+impl ProductionDomPublicSecretConsumerAuthorityV1 {
+    /// Minted only by the DOM child composition from the same shared runtime
+    /// and exact per-session verifier installed in the child port.
+    pub(crate) fn authenticate(
+        composition_digest: Digest32,
+        leg: SettlementLegV1,
+        settlement_id: Digest32,
+        binding: DomSessionBindingV1,
+        trusted_chain_id: TrustedChainIdV1,
+        runtime: Arc<RealDomRpcRuntimeV1>,
+        verifier: Arc<RealDomClaimVerifierV1>,
+    ) -> Result<Self, AuthorityRefusalV1> {
+        let expected_identity = binding
+            .expected_dom_identity()
+            .map_err(map_dom_secret_source_error)?;
+        if composition_digest == ZERO_DIGEST
+            || settlement_id == ZERO_DIGEST
+            || trusted_chain_id.as_bytes() != &binding.chain_id()
+            || runtime.expected_identity() != &expected_identity
+        {
+            return Err(AuthorityRefusalV1::Inconsistent);
+        }
+        Ok(Self {
+            composition_digest,
+            leg,
+            settlement_id,
+            binding,
+            trusted_chain_id,
+            consumer: RealDomClaimConsumerV1::new(runtime, verifier),
+        })
+    }
+}
+
+/// Exact-scope predicate shared by the closed handoff and its adversarial
+/// tests.  Production supplies a complete `DomSessionBindingV1`; the generic
+/// equality parameters let tests vary every pin without manufacturing a
+/// second RPC runtime, verifier, consumer, or Store.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+)]
+fn exact_dom_public_secret_consumer_scope_v1<B: PartialEq, T: PartialEq>(
+    retained_composition_digest: Digest32,
+    retained_leg: SettlementLegV1,
+    retained_settlement_id: Digest32,
+    retained_binding: &B,
+    retained_trusted_chain: &T,
+    expected_composition_digest: Digest32,
+    expected_leg: SettlementLegV1,
+    expected_settlement_id: Digest32,
+    expected_binding: &B,
+    expected_trusted_chain: &T,
+) -> bool {
+    retained_composition_digest == expected_composition_digest
+        && retained_leg == expected_leg
+        && retained_settlement_id == expected_settlement_id
+        && retained_binding == expected_binding
+        && retained_trusted_chain == expected_trusted_chain
+}
+
+/// Contracts-owner request for opening one exact DOM public-secret source.
+/// Route and chain identity are derived from the authenticated session binding
+/// rather than accepted as independent caller-shaped values.
+pub(crate) struct ProductionDomPublicSecretSourceScopeV1 {
+    composition_digest: Digest32,
+    leg: SettlementLegV1,
+    settlement_id: Digest32,
+    binding: DomSessionBindingV1,
+    trusted_chain_id: TrustedChainIdV1,
+}
+
+impl ProductionDomPublicSecretSourceScopeV1 {
+    pub(crate) fn authenticate(
+        composition_digest: Digest32,
+        leg: SettlementLegV1,
+        settlement_id: Digest32,
+        binding: DomSessionBindingV1,
+        trusted_chain_id: TrustedChainIdV1,
+    ) -> Result<Self, AuthorityRefusalV1> {
+        if composition_digest == ZERO_DIGEST
+            || leg != SettlementLegV1::Downstream
+            || settlement_id == ZERO_DIGEST
+            || trusted_chain_id.as_bytes() != &binding.chain_id()
+        {
+            return Err(AuthorityRefusalV1::Inconsistent);
+        }
+        Ok(Self {
+            composition_digest,
+            leg,
+            settlement_id,
+            binding,
+            trusted_chain_id,
+        })
+    }
+
+    pub(crate) const fn binding(&self) -> DomSessionBindingV1 {
+        self.binding
+    }
+
+    pub(crate) const fn trusted_chain_id(&self) -> TrustedChainIdV1 {
+        self.trusted_chain_id
+    }
+}
+
+struct ProductionPendingDomPublicSecretSourceV1 {
+    route_id: RouteIdV1,
+    composition_digest: Digest32,
+    leg: SettlementLegV1,
+    #[expect(
+        dead_code,
+        reason = "EVM public-secret re-extraction surface excluded by the stage-7 composition"
+    )]
+    settlement_id: Digest32,
+    chain_id: Digest32,
+    store: Rc<ContractsSessionStoreV1>,
+    binding: DomSessionBindingV1,
+    trusted_chain_id: TrustedChainIdV1,
+    consumer: RealDomClaimConsumerV1,
+}
+
+struct ProductionInstalledDomPublicSecretSourceV1 {
+    route_id: RouteIdV1,
+    composition_digest: Digest32,
+    chain_id: Digest32,
+    expected_claim_transaction_id: Digest32,
+    store: Rc<ContractsSessionStoreV1>,
+    binding: DomSessionBindingV1,
+    trusted_chain_id: TrustedChainIdV1,
+    consumer: RealDomClaimConsumerV1,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProductionInstalledDomChildPlanV1 {
+    request: ProductionChildMaterializationRequestV1,
+    plan: SettlementChildPlanV1,
+}
+
+enum ProductionLateDomSecretSlotStateV1 {
+    Pending(Option<ProductionPendingDomPublicSecretSourceV1>),
+    Installed {
+        exact: Box<ProductionInstalledDomChildPlanV1>,
+        source: ProductionInstalledDomPublicSecretSourceV1,
+    },
+}
+
+struct ProductionLateDomSecretSlotV1 {
+    route_id: RouteIdV1,
+    composition_digest: Digest32,
+    leg: SettlementLegV1,
+    settlement_id: Digest32,
+    chain_id: Digest32,
+    binding: DomSessionBindingV1,
+    trusted_chain_id: TrustedChainIdV1,
+    state: RefCell<ProductionLateDomSecretSlotStateV1>,
+}
+
+/// Move-only authority retained by the settlement materializer. The exact DOM
+/// claim transaction is learned only from the real child plan produced for the
+/// retained `FirstSecretExposure` request.
+pub(crate) struct ProductionDomPublicSecretInstallerV1 {
+    shared: Rc<ProductionLateDomSecretSlotV1>,
+}
+
+/// Startup-safe DOM public-secret source. Before its paired installer accepts
+/// the exact child materialization, re-extraction is deliberately unavailable.
+pub(crate) struct ProductionDomPublicSecretSourceV1 {
+    shared: Rc<ProductionLateDomSecretSlotV1>,
+}
+
+impl core::fmt::Debug for ProductionDomPublicSecretInstallerV1 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("ProductionDomPublicSecretInstallerV1([authority redacted])")
+    }
+}
+
+impl core::fmt::Debug for ProductionDomPublicSecretSourceV1 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("ProductionDomPublicSecretSourceV1([authority redacted])")
+    }
+}
+
+/// Restart-safe installed DOM receiver authority for one exact observed
+/// `FinalClaim`.
 ///
 /// The source retains an [`Rc`] clone of the composition root's already-open
 /// Contracts Store; it cannot open a second store. Every extraction resumes
@@ -260,72 +471,225 @@ pub(crate) trait ProductionChainPublicSecretSourceV1 {
 /// those are distinct commitment domains. The V2 retention record binds both
 /// independently verified transaction identity and the snapshot's exact
 /// exposure facts.
-pub(crate) struct ProductionDomPublicSecretSourceV1 {
-    route_id: RouteIdV1,
-    composition_digest: Digest32,
-    chain_id: Digest32,
-    expected_claim_transaction_id: Digest32,
-    store: Rc<ContractsSessionStoreV1>,
-    binding: DomSessionBindingV1,
-    trusted_chain_id: TrustedChainIdV1,
-    consumer: RealDomClaimConsumerV1,
-}
-
-impl core::fmt::Debug for ProductionDomPublicSecretSourceV1 {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter
-            .debug_struct("ProductionDomPublicSecretSourceV1")
-            .field("route_id", &self.route_id)
-            .field("composition_digest", &self.composition_digest)
-            .field("chain_id", &self.chain_id)
-            .field(
-                "expected_claim_transaction_id",
-                &self.expected_claim_transaction_id,
-            )
-            .field("authorities", &"<redacted>")
-            .finish()
-    }
-}
-
 impl ProductionDomPublicSecretSourceV1 {
-    pub(crate) fn new(
-        route_id: RouteIdV1,
-        composition_digest: Digest32,
-        expected_claim_transaction_id: Digest32,
+    /// Called only by `ProductionContractsV1`, after it has supplied an `Rc`
+    /// clone of its already-open Store. The consumer came from the same DOM
+    /// child runtime and remains parked in the shared slot until installation.
+    pub(crate) fn new_installable(
         store: Rc<ContractsSessionStoreV1>,
-        binding: DomSessionBindingV1,
-        trusted_chain_id: TrustedChainIdV1,
-        consumer: RealDomClaimConsumerV1,
-    ) -> Result<Self, AuthorityRefusalV1> {
-        let chain_id = *trusted_chain_id.as_bytes();
-        if [
-            route_id,
+        scope: ProductionDomPublicSecretSourceScopeV1,
+        authority: ProductionDomPublicSecretConsumerAuthorityV1,
+    ) -> Result<(Self, ProductionDomPublicSecretInstallerV1), AuthorityRefusalV1> {
+        if !exact_dom_public_secret_consumer_scope_v1(
+            authority.composition_digest,
+            authority.leg,
+            authority.settlement_id,
+            &authority.binding,
+            authority.trusted_chain_id.as_bytes(),
+            scope.composition_digest,
+            scope.leg,
+            scope.settlement_id,
+            &scope.binding,
+            scope.trusted_chain_id.as_bytes(),
+        ) {
+            return Err(AuthorityRefusalV1::Inconsistent);
+        }
+        let ProductionDomPublicSecretConsumerAuthorityV1 {
             composition_digest,
-            chain_id,
-            expected_claim_transaction_id,
-        ]
-        .contains(&ZERO_DIGEST)
-            || binding.route_id() != route_id
+            leg,
+            settlement_id,
+            binding,
+            trusted_chain_id,
+            consumer,
+        } = authority;
+        let route_id = binding.route_id();
+        let chain_id = *trusted_chain_id.as_bytes();
+        if [route_id, composition_digest, settlement_id, chain_id].contains(&ZERO_DIGEST)
+            || leg != SettlementLegV1::Downstream
             || binding.chain_id() != chain_id
         {
             return Err(AuthorityRefusalV1::Inconsistent);
         }
         DomContractsActuatorV1::bind(store.as_ref(), binding)
             .map_err(map_dom_secret_source_error)?;
-        Ok(Self {
+        let pending = ProductionPendingDomPublicSecretSourceV1 {
             route_id,
             composition_digest,
+            leg,
+            settlement_id,
             chain_id,
-            expected_claim_transaction_id,
             store,
             binding,
             trusted_chain_id,
             consumer,
+        };
+        let shared = Rc::new(ProductionLateDomSecretSlotV1 {
+            route_id,
+            composition_digest,
+            leg,
+            settlement_id,
+            chain_id,
+            binding,
+            trusted_chain_id,
+            state: RefCell::new(ProductionLateDomSecretSlotStateV1::Pending(Some(pending))),
+        });
+        Ok((
+            Self {
+                shared: Rc::clone(&shared),
+            },
+            ProductionDomPublicSecretInstallerV1 { shared },
+        ))
+    }
+}
+
+impl ProductionPendingDomPublicSecretSourceV1 {
+    #[expect(
+        clippy::result_large_err,
+        reason = "the refusal returns the rejected value to its owner; one-shot composition path"
+    )]
+    fn into_installed(
+        self,
+        expected_claim_transaction_id: Digest32,
+    ) -> Result<ProductionInstalledDomPublicSecretSourceV1, (AuthorityRefusalV1, Self)> {
+        if expected_claim_transaction_id == ZERO_DIGEST
+            || self.binding.route_id() != self.route_id
+            || self.binding.chain_id() != self.chain_id
+            || self.leg != SettlementLegV1::Downstream
+        {
+            return Err((AuthorityRefusalV1::Inconsistent, self));
+        }
+        if let Err(error) = DomContractsActuatorV1::bind(self.store.as_ref(), self.binding) {
+            return Err((map_dom_secret_source_error(error), self));
+        }
+        Ok(ProductionInstalledDomPublicSecretSourceV1 {
+            route_id: self.route_id,
+            composition_digest: self.composition_digest,
+            chain_id: self.chain_id,
+            expected_claim_transaction_id,
+            store: self.store,
+            binding: self.binding,
+            trusted_chain_id: self.trusted_chain_id,
+            consumer: self.consumer,
         })
     }
 }
 
-impl ProductionChainPublicSecretSourceV1 for ProductionDomPublicSecretSourceV1 {
+impl ProductionDomPublicSecretInstallerV1 {
+    pub(crate) fn route_id(&self) -> RouteIdV1 {
+        self.shared.route_id
+    }
+
+    pub(crate) fn composition_digest(&self) -> Digest32 {
+        self.shared.composition_digest
+    }
+
+    pub(crate) fn leg(&self) -> SettlementLegV1 {
+        self.shared.leg
+    }
+
+    pub(crate) fn settlement_id(&self) -> Digest32 {
+        self.shared.settlement_id
+    }
+
+    pub(crate) fn chain_id(&self) -> Digest32 {
+        self.shared.chain_id
+    }
+
+    pub(crate) fn binding(&self) -> DomSessionBindingV1 {
+        self.shared.binding
+    }
+
+    pub(crate) fn trusted_chain_id(&self) -> TrustedChainIdV1 {
+        self.shared.trusted_chain_id
+    }
+
+    pub(crate) fn install_from_exact_child(
+        &mut self,
+        request: &ProductionChildMaterializationRequestV1,
+        plan: &SettlementChildPlanV1,
+    ) -> Result<(), AuthorityRefusalV1> {
+        require_dom_installation_scope(self.shared.as_ref(), request, plan)?;
+        let exact = ProductionInstalledDomChildPlanV1 {
+            request: *request,
+            plan: plan.clone(),
+        };
+        let mut state = self.shared.state.borrow_mut();
+        match &mut *state {
+            ProductionLateDomSecretSlotStateV1::Installed {
+                exact: retained, ..
+            } => {
+                if retained.as_ref() == &exact {
+                    Ok(())
+                } else {
+                    Err(AuthorityRefusalV1::Inconsistent)
+                }
+            }
+            ProductionLateDomSecretSlotStateV1::Pending(pending_slot) => {
+                let pending = pending_slot.take().ok_or(AuthorityRefusalV1::Unavailable)?;
+                match pending.into_installed(plan.expected_transaction_id) {
+                    Ok(source) => {
+                        *state = ProductionLateDomSecretSlotStateV1::Installed {
+                            exact: Box::new(exact),
+                            source,
+                        };
+                        Ok(())
+                    }
+                    Err((error, restored)) => {
+                        *pending_slot = Some(restored);
+                        Err(error)
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn require_dom_installation_scope(
+    retained: &ProductionLateDomSecretSlotV1,
+    request: &ProductionChildMaterializationRequestV1,
+    plan: &SettlementChildPlanV1,
+) -> Result<(), AuthorityRefusalV1> {
+    if retained.leg != SettlementLegV1::Downstream
+        || retained.trusted_chain_id.as_bytes() != &retained.chain_id
+        || retained.binding.route_id() != retained.route_id
+        || retained.binding.chain_id() != retained.chain_id
+        || retained.binding.profile_digest() != request.profile_digest
+        || retained.binding.deployment_digest() != request.deployment_digest
+        || request.route_id != retained.route_id
+        || request.composition_digest != retained.composition_digest
+        || request.leg != retained.leg
+        || request.settlement_id != retained.settlement_id
+        || request.action != settlement_coordinator::SettlementActionV1::Claim
+        || request.exposure != ChildExposureV1::FirstSecretExposure
+        || request.fencing_epoch == 0
+        || [
+            request.effect_id,
+            request.semantic_digest,
+            request.terms_digest,
+            request.registry_digest,
+            request.profile_digest,
+            request.deployment_digest,
+            request.route_scope_digest,
+            request.role_plan_digest,
+            request.source_scope_digest,
+        ]
+        .contains(&ZERO_DIGEST)
+        || plan.face != settlement_coordinator::SettlementFaceV1::Dom
+        || plan.exposure != ChildExposureV1::FirstSecretExposure
+        || plan.chain_id != retained.chain_id
+        || [
+            plan.expected_transaction_id,
+            plan.intent_digest,
+            plan.custody_digest,
+        ]
+        .contains(&ZERO_DIGEST)
+    {
+        return Err(AuthorityRefusalV1::Inconsistent);
+    }
+    Ok(())
+}
+
+impl ProductionChainPublicSecretSourceV1 for ProductionInstalledDomPublicSecretSourceV1 {
     fn chain_id(&self) -> Digest32 {
         self.chain_id
     }
@@ -368,6 +732,25 @@ impl ProductionChainPublicSecretSourceV1 for ProductionDomPublicSecretSourceV1 {
         actuator
             .extract_observed_claim_secret_v2(&self.consumer, &observed)
             .map_err(map_dom_secret_source_error)
+    }
+}
+
+impl ProductionChainPublicSecretSourceV1 for ProductionDomPublicSecretSourceV1 {
+    fn chain_id(&self) -> Digest32 {
+        self.shared.chain_id
+    }
+
+    fn reextract_for_chain(
+        &mut self,
+        request: ProductionPublicSecretRequestV1<'_>,
+    ) -> Result<RevealedSecretBytes, AuthorityRefusalV1> {
+        let mut state = self.shared.state.borrow_mut();
+        match &mut *state {
+            ProductionLateDomSecretSlotStateV1::Pending(_) => Err(AuthorityRefusalV1::Unavailable),
+            ProductionLateDomSecretSlotStateV1::Installed { source, .. } => {
+                source.reextract_for_chain(request)
+            }
+        }
     }
 }
 
@@ -437,6 +820,10 @@ fn map_dom_secret_source_error(error: DomActuatorError) -> AuthorityRefusalV1 {
 /// retained by the route, and runs the adapter's full static plus on-chain
 /// verification for the one pre-registered lock before returning the redacted
 /// scalar wrapper.
+#[expect(
+    dead_code,
+    reason = "EVM public-secret re-extraction surface excluded by the stage-7 composition"
+)]
 pub(crate) struct ProductionEvmPublicSecretSourceV1<R: JsonRpc> {
     route_id: RouteIdV1,
     composition_digest: Digest32,
@@ -464,6 +851,10 @@ impl<R: JsonRpc> core::fmt::Debug for ProductionEvmPublicSecretSourceV1<R> {
 }
 
 impl<R: JsonRpc> ProductionEvmPublicSecretSourceV1<R> {
+    #[expect(
+        dead_code,
+        reason = "EVM public-secret re-extraction surface excluded by the stage-7 composition"
+    )]
     pub(crate) fn new(
         route_id: RouteIdV1,
         composition_digest: Digest32,
@@ -542,6 +933,10 @@ impl<R: JsonRpc> ProductionChainPublicSecretSourceV1 for ProductionEvmPublicSecr
     }
 }
 
+#[expect(
+    dead_code,
+    reason = "EVM public-secret re-extraction surface excluded by the stage-7 composition"
+)]
 fn map_evm_secret_source_error(error: AdapterError) -> AuthorityRefusalV1 {
     match error {
         AdapterError::AdapterUnavailable => AuthorityRefusalV1::Unavailable,
@@ -561,88 +956,195 @@ fn map_evm_secret_source_error(error: AdapterError) -> AuthorityRefusalV1 {
     }
 }
 
-/// Restart-safe Bitcoin extraction authority for one exact Taproot claim.
-///
-/// The RPC transaction wrapper has no raw-byte accessor. This source passes
-/// the consumed lookup directly back into `btc-actuator`, where confirmation,
-/// txid, witness, BIP340 and `t·G=T` are verified without making the
-/// secret-bearing witness representable in the daemon.
-pub(crate) struct ProductionBitcoinPublicSecretSourceV1<R: BitcoinRpcV1> {
+enum ProductionLateBitcoinSecretSlotStateV1 {
+    Vacant,
+    Installed(Box<ProductionBitcoinPublicExtractionHandoffV1>),
+}
+
+struct ProductionLateBitcoinSecretSlotV1 {
     route_id: RouteIdV1,
     composition_digest: Digest32,
     chain_id: Digest32,
-    expected_claim_transaction_id: Digest32,
-    scope: BitcoinActuationScopeV1,
-    extraction: BitcoinClaimExtractionContextV1,
-    rpc: R,
+    state: RefCell<ProductionLateBitcoinSecretSlotStateV1>,
 }
 
-impl<R: BitcoinRpcV1> core::fmt::Debug for ProductionBitcoinPublicSecretSourceV1<R> {
+/// Move-only installation authority retained solely by the materialization
+/// owner. It accepts no caller-shaped txid: the exact id comes from both the
+/// child plan and the closed handoff, and those values must agree.
+pub(crate) struct ProductionBitcoinPublicSecretInstallerV1 {
+    shared: Rc<ProductionLateBitcoinSecretSlotV1>,
+}
+
+/// Startup-safe Bitcoin source whose exact extraction owner is installed only
+/// after fresh claim finalization and durable actuator retention.
+pub(crate) struct ProductionLateBitcoinPublicSecretSourceV1 {
+    shared: Rc<ProductionLateBitcoinSecretSlotV1>,
+}
+
+impl core::fmt::Debug for ProductionBitcoinPublicSecretInstallerV1 {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter
-            .debug_struct("ProductionBitcoinPublicSecretSourceV1")
-            .field("route_id", &self.route_id)
-            .field("composition_digest", &self.composition_digest)
-            .field("chain_id", &self.chain_id)
-            .field(
-                "expected_claim_transaction_id",
-                &self.expected_claim_transaction_id,
-            )
-            .field("scope_digest", &self.scope.scope_digest())
-            .field(
-                "extraction_context_digest",
-                &self.extraction.context_digest(),
-            )
-            .field("rpc", &"<authority redacted>")
-            .finish()
+        formatter.write_str("ProductionBitcoinPublicSecretInstallerV1([authority redacted])")
     }
 }
 
-impl<R: BitcoinRpcV1> ProductionBitcoinPublicSecretSourceV1<R> {
-    pub(crate) fn new(
+impl core::fmt::Debug for ProductionLateBitcoinPublicSecretSourceV1 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("ProductionLateBitcoinPublicSecretSourceV1([authority redacted])")
+    }
+}
+
+impl ProductionLateBitcoinPublicSecretSourceV1 {
+    pub(crate) fn new_installable(
         route_id: RouteIdV1,
         composition_digest: Digest32,
         chain_id: Digest32,
-        expected_claim_transaction_id: Digest32,
-        scope: BitcoinActuationScopeV1,
-        extraction: BitcoinClaimExtractionContextV1,
-        mut rpc: R,
-    ) -> Result<Self, AuthorityRefusalV1> {
-        if [
-            route_id,
-            composition_digest,
-            chain_id,
-            expected_claim_transaction_id,
-            scope.scope_digest(),
-            extraction.context_digest(),
-        ]
-        .contains(&ZERO_DIGEST)
-            || scope.route_id() != route_id
-            || scope.expected_txid() != expected_claim_transaction_id
-            || scope.action() != BitcoinActionV1::Claim
-            || scope.minimum_confirmations() == 0
-        {
+    ) -> Result<(Self, ProductionBitcoinPublicSecretInstallerV1), AuthorityRefusalV1> {
+        if [route_id, composition_digest, chain_id].contains(&ZERO_DIGEST) {
             return Err(AuthorityRefusalV1::Inconsistent);
         }
-        rpc.verify_scope(&scope)
-            .map_err(|_| AuthorityRefusalV1::Unavailable)?;
-        Ok(Self {
+        let shared = Rc::new(ProductionLateBitcoinSecretSlotV1 {
             route_id,
             composition_digest,
             chain_id,
-            expected_claim_transaction_id,
-            scope,
-            extraction,
-            rpc,
-        })
+            state: RefCell::new(ProductionLateBitcoinSecretSlotStateV1::Vacant),
+        });
+        Ok((
+            Self {
+                shared: Rc::clone(&shared),
+            },
+            ProductionBitcoinPublicSecretInstallerV1 { shared },
+        ))
     }
 }
 
-impl<R: BitcoinRpcV1> ProductionChainPublicSecretSourceV1
-    for ProductionBitcoinPublicSecretSourceV1<R>
-{
+impl ProductionBitcoinPublicSecretInstallerV1 {
+    pub(crate) fn route_id(&self) -> RouteIdV1 {
+        self.shared.route_id
+    }
+
+    pub(crate) fn composition_digest(&self) -> Digest32 {
+        self.shared.composition_digest
+    }
+
+    pub(crate) fn chain_id(&self) -> Digest32 {
+        self.shared.chain_id
+    }
+
+    /// Installs an exact claim recovered by the sole Bitcoin child at startup.
+    ///
+    /// No caller supplies a transaction id here. The child handoff is already
+    /// bound to the retained exact transaction, prebroadcast store and Core
+    /// RPC; this boundary only authenticates the immutable route scope shared
+    /// with the source created before claim materialization.
+    #[expect(
+        clippy::result_large_err,
+        reason = "the refusal returns the rejected value to its owner; one-shot composition path"
+    )]
+    pub(crate) fn install_recovered_exact(
+        &mut self,
+        handoff: ProductionBitcoinPublicExtractionHandoffV1,
+    ) -> Result<
+        (),
+        (
+            AuthorityRefusalV1,
+            ProductionBitcoinPublicExtractionHandoffV1,
+        ),
+    > {
+        if handoff.route_id() != self.shared.route_id
+            || handoff.composition_digest() != self.shared.composition_digest
+            || handoff.chain_id() != self.shared.chain_id
+            || handoff.expected_txid() == ZERO_DIGEST
+        {
+            return Err((AuthorityRefusalV1::Inconsistent, handoff));
+        }
+        let mut state = self.shared.state.borrow_mut();
+        match &*state {
+            ProductionLateBitcoinSecretSlotStateV1::Vacant => {
+                *state = ProductionLateBitcoinSecretSlotStateV1::Installed(Box::new(handoff));
+                Ok(())
+            }
+            ProductionLateBitcoinSecretSlotStateV1::Installed(_) => {
+                Err((AuthorityRefusalV1::Inconsistent, handoff))
+            }
+        }
+    }
+
+    #[expect(
+        clippy::result_large_err,
+        reason = "the refusal returns the rejected value to its owner; one-shot composition path"
+    )]
+    pub(crate) fn install_from_exact_child(
+        &mut self,
+        request: &ProductionChildMaterializationRequestV1,
+        plan: &SettlementChildPlanV1,
+        handoff: ProductionBitcoinPublicExtractionHandoffV1,
+    ) -> Result<
+        (),
+        (
+            AuthorityRefusalV1,
+            ProductionBitcoinPublicExtractionHandoffV1,
+        ),
+    > {
+        if request.route_id != self.shared.route_id
+            || request.composition_digest != self.shared.composition_digest
+            || request.action != settlement_coordinator::SettlementActionV1::Claim
+            || !matches!(
+                request.exposure,
+                ChildExposureV1::FirstSecretExposure | ChildExposureV1::UsesPublicSecret
+            )
+            || plan.face != settlement_coordinator::SettlementFaceV1::Bitcoin
+            || plan.chain_id != self.shared.chain_id
+            || plan.expected_transaction_id == ZERO_DIGEST
+            || handoff.route_id() != self.shared.route_id
+            || handoff.composition_digest() != self.shared.composition_digest
+            || handoff.chain_id() != self.shared.chain_id
+            || handoff.expected_txid() != plan.expected_transaction_id
+        {
+            return Err((AuthorityRefusalV1::Inconsistent, handoff));
+        }
+        let mut state = self.shared.state.borrow_mut();
+        match &*state {
+            ProductionLateBitcoinSecretSlotStateV1::Vacant => {
+                *state = ProductionLateBitcoinSecretSlotStateV1::Installed(Box::new(handoff));
+                Ok(())
+            }
+            ProductionLateBitcoinSecretSlotStateV1::Installed(_) => {
+                Err((AuthorityRefusalV1::Inconsistent, handoff))
+            }
+        }
+    }
+
+    pub(crate) fn authenticate_installed_exact_child(
+        &self,
+        request: &ProductionChildMaterializationRequestV1,
+        plan: &SettlementChildPlanV1,
+    ) -> Result<(), AuthorityRefusalV1> {
+        if request.route_id != self.shared.route_id
+            || request.composition_digest != self.shared.composition_digest
+            || request.action != settlement_coordinator::SettlementActionV1::Claim
+            || plan.face != settlement_coordinator::SettlementFaceV1::Bitcoin
+            || plan.chain_id != self.shared.chain_id
+        {
+            return Err(AuthorityRefusalV1::Inconsistent);
+        }
+        let state = self.shared.state.borrow();
+        match &*state {
+            ProductionLateBitcoinSecretSlotStateV1::Installed(handoff)
+                if handoff.expected_txid() == plan.expected_transaction_id =>
+            {
+                Ok(())
+            }
+            ProductionLateBitcoinSecretSlotStateV1::Vacant
+            | ProductionLateBitcoinSecretSlotStateV1::Installed(_) => {
+                Err(AuthorityRefusalV1::Inconsistent)
+            }
+        }
+    }
+}
+
+impl ProductionChainPublicSecretSourceV1 for ProductionLateBitcoinPublicSecretSourceV1 {
     fn chain_id(&self) -> Digest32 {
-        self.chain_id
+        self.shared.chain_id
     }
 
     fn reextract_for_chain(
@@ -650,60 +1152,42 @@ impl<R: BitcoinRpcV1> ProductionChainPublicSecretSourceV1
         request: ProductionPublicSecretRequestV1<'_>,
     ) -> Result<RevealedSecretBytes, AuthorityRefusalV1> {
         let exposure = request.exposure();
-        if request.route_id() != self.route_id
-            || request.composition_digest() != self.composition_digest
-            || exposure.chain_id != self.chain_id
-            || exposure.transaction_id != self.expected_claim_transaction_id
+        if request.route_id() != self.shared.route_id
+            || request.composition_digest() != self.shared.composition_digest
+            || exposure.chain_id != self.shared.chain_id
+            || exposure.transaction_id == ZERO_DIGEST
             || exposure.evidence_digest == ZERO_DIGEST
             || exposure.observed_at_unix_ms == 0
         {
             return Err(AuthorityRefusalV1::Inconsistent);
         }
-        self.rpc
-            .verify_scope(&self.scope)
-            .map_err(|_| AuthorityRefusalV1::Unavailable)?;
-        let lookup = self
-            .rpc
-            .lookup_exact(self.expected_claim_transaction_id)
-            .map_err(|_| AuthorityRefusalV1::Unavailable)?;
-        extract_revealed_secret_from_confirmed_lookup(
-            &self.extraction,
-            self.expected_claim_transaction_id,
-            self.scope.minimum_confirmations(),
-            lookup,
-        )
-        .map_err(map_bitcoin_secret_source_error)
+        let mut state = self.shared.state.borrow_mut();
+        let ProductionLateBitcoinSecretSlotStateV1::Installed(handoff) = &mut *state else {
+            return Err(AuthorityRefusalV1::Unavailable);
+        };
+        if exposure.transaction_id != handoff.expected_txid() {
+            return Err(AuthorityRefusalV1::Inconsistent);
+        }
+        let revealed = handoff
+            .extract_confirmed()
+            .map_err(map_child_secret_source_refusal)?;
+        let mut scalar = Zeroizing::new([0_u8; 32]);
+        revealed.move_into(&mut scalar);
+        Ok(RevealedSecretBytes::new(*scalar))
     }
 }
 
-fn map_bitcoin_secret_source_error(error: BitcoinActuatorErrorV1) -> AuthorityRefusalV1 {
+fn map_child_secret_source_refusal(
+    error: settlement_coordinator::ChildAuthorityRefusalV1,
+) -> AuthorityRefusalV1 {
     match error {
-        BitcoinActuatorErrorV1::InvalidState
-        | BitcoinActuatorErrorV1::EffectNotFound
-        | BitcoinActuatorErrorV1::ExternalizationAmbiguous
-        | BitcoinActuatorErrorV1::ReconciliationRequired
-        | BitcoinActuatorErrorV1::Rpc(_) => AuthorityRefusalV1::Unavailable,
-        BitcoinActuatorErrorV1::InvalidScope
-        | BitcoinActuatorErrorV1::InvalidTransaction
-        | BitcoinActuatorErrorV1::TransactionMismatch
-        | BitcoinActuatorErrorV1::UnsafeReplacement
-        | BitcoinActuatorErrorV1::DatabasePresent
-        | BitcoinActuatorErrorV1::DatabaseMissing
-        | BitcoinActuatorErrorV1::CreationIncomplete
-        | BitcoinActuatorErrorV1::InvalidStorageAuthority
-        | BitcoinActuatorErrorV1::Storage(_)
-        | BitcoinActuatorErrorV1::CorruptState
-        | BitcoinActuatorErrorV1::LeaseHeld
-        | BitcoinActuatorErrorV1::StaleFencing
-        | BitcoinActuatorErrorV1::InvalidTime
-        | BitcoinActuatorErrorV1::IdempotencyConflict
-        | BitcoinActuatorErrorV1::TerminalConflict
-        | BitcoinActuatorErrorV1::RpcScopeMismatch
-        | BitcoinActuatorErrorV1::ClaimAuthorityMismatch
-        | BitcoinActuatorErrorV1::ClaimNonceCustody
-        | BitcoinActuatorErrorV1::ClaimCryptography
-        | BitcoinActuatorErrorV1::FundingNotArmed
-        | BitcoinActuatorErrorV1::LiveFunding => AuthorityRefusalV1::Inconsistent,
+        settlement_coordinator::ChildAuthorityRefusalV1::Unavailable
+        | settlement_coordinator::ChildAuthorityRefusalV1::Refused => {
+            AuthorityRefusalV1::Unavailable
+        }
+        settlement_coordinator::ChildAuthorityRefusalV1::Conflict => {
+            AuthorityRefusalV1::Inconsistent
+        }
     }
 }
 
@@ -1114,8 +1598,102 @@ mod tests {
         PlanAuthorizationV1, SettlementActionV1, SettlementChildAuthorityV1, SettlementChildPlanV1,
         SettlementFaceV1, SettlementLegV1, SettlementPlanAuthorityV1, SettlementPlanBindingsV1,
     };
+    use static_assertions::assert_not_impl_any;
 
     use super::*;
+
+    assert_not_impl_any!(ProductionDomPublicSecretConsumerAuthorityV1: Clone, Copy);
+    assert_not_impl_any!(ProductionBitcoinPublicSecretInstallerV1: Clone, Copy);
+    assert_not_impl_any!(ProductionLateBitcoinPublicSecretSourceV1: Clone, Copy);
+
+    const fn digest(tag: u8) -> Digest32 {
+        [tag; 32]
+    }
+
+    #[test]
+    fn public_secret_consumer_scope_refuses_every_single_pin_transplant() {
+        let retained_composition = digest(40);
+        let retained_leg = SettlementLegV1::Upstream;
+        let retained_settlement = digest(41);
+        let retained_binding = digest(42);
+        let retained_trusted_chain = digest(43);
+        assert!(exact_dom_public_secret_consumer_scope_v1(
+            retained_composition,
+            retained_leg,
+            retained_settlement,
+            &retained_binding,
+            &retained_trusted_chain,
+            retained_composition,
+            retained_leg,
+            retained_settlement,
+            &retained_binding,
+            &retained_trusted_chain,
+        ));
+        for transplanted in [
+            exact_dom_public_secret_consumer_scope_v1(
+                retained_composition,
+                retained_leg,
+                retained_settlement,
+                &retained_binding,
+                &retained_trusted_chain,
+                digest(44),
+                retained_leg,
+                retained_settlement,
+                &retained_binding,
+                &retained_trusted_chain,
+            ),
+            exact_dom_public_secret_consumer_scope_v1(
+                retained_composition,
+                retained_leg,
+                retained_settlement,
+                &retained_binding,
+                &retained_trusted_chain,
+                retained_composition,
+                SettlementLegV1::Downstream,
+                retained_settlement,
+                &retained_binding,
+                &retained_trusted_chain,
+            ),
+            exact_dom_public_secret_consumer_scope_v1(
+                retained_composition,
+                retained_leg,
+                retained_settlement,
+                &retained_binding,
+                &retained_trusted_chain,
+                retained_composition,
+                retained_leg,
+                digest(45),
+                &retained_binding,
+                &retained_trusted_chain,
+            ),
+            exact_dom_public_secret_consumer_scope_v1(
+                retained_composition,
+                retained_leg,
+                retained_settlement,
+                &retained_binding,
+                &retained_trusted_chain,
+                retained_composition,
+                retained_leg,
+                retained_settlement,
+                &digest(46),
+                &retained_trusted_chain,
+            ),
+            exact_dom_public_secret_consumer_scope_v1(
+                retained_composition,
+                retained_leg,
+                retained_settlement,
+                &retained_binding,
+                &retained_trusted_chain,
+                retained_composition,
+                retained_leg,
+                retained_settlement,
+                &retained_binding,
+                &digest(47),
+            ),
+        ] {
+            assert!(!transplanted);
+        }
+    }
 
     #[derive(Clone)]
     struct RecordingSecretSourceV1 {
@@ -1167,6 +1745,38 @@ mod tests {
             calls,
             refusal,
         }
+    }
+
+    #[test]
+    fn late_bitcoin_source_is_unavailable_until_exact_child_installs_once() {
+        let route_id = digest(0x51);
+        let composition_digest = digest(0x52);
+        let chain_id = digest(0x53);
+        let (mut source, installer) = ProductionLateBitcoinPublicSecretSourceV1::new_installable(
+            route_id,
+            composition_digest,
+            chain_id,
+        )
+        .expect("nonzero frozen scope");
+        let observed = exposure(chain_id);
+
+        assert_eq!(installer.route_id(), route_id);
+        assert_eq!(installer.composition_digest(), composition_digest);
+        assert_eq!(installer.chain_id(), chain_id);
+        assert!(matches!(
+            source.reextract_for_chain(ProductionPublicSecretRequestV1 {
+                route_id,
+                composition_digest,
+                exposure: &observed,
+            }),
+            Err(AuthorityRefusalV1::Unavailable)
+        ));
+        assert!(ProductionLateBitcoinPublicSecretSourceV1::new_installable(
+            ZERO_DIGEST,
+            composition_digest,
+            chain_id,
+        )
+        .is_err());
     }
 
     #[test]

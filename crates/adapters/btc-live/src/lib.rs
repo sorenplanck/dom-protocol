@@ -39,10 +39,12 @@ pub use evidence::{
     BitcoinCoreEvidenceCollectorV1, BitcoinEvidenceBindingV1, CanonicalBitcoinRpcEvidenceV1,
 };
 pub use fresh::{
-    BitcoinFreshClaimBindingV1, BitcoinFreshRouteReceiptV1, BitcoinFreshRouteRequestV1,
-    BoundFreshBitcoinClaimAuthorityV1, FreshBitcoinPreparedClaimPartsV1,
-    PreparedFreshBitcoinClaimV1, PreparedFreshBitcoinRouteV1, ReopenedFreshBitcoinRouteV1,
-    RetainedFreshBitcoinClaimAuthorityV1, RetainedFreshBitcoinRefundSignerV1,
+    AuthenticatedBitcoinPayoutFaceV1, BitcoinFreshClaimBindingV1, BitcoinFreshRouteReceiptV1,
+    BitcoinFreshRouteRequestV1, FinalizedFreshBitcoinClaimV1,
+    FreshBitcoinClaimExtractionAuthorityV1, FreshBitcoinPreparedClaimPublicV1,
+    FreshBitcoinRevealedSecretV1, PreparedFreshBitcoinClaimV1, PreparedFreshBitcoinRouteV1,
+    ReopenedFreshBitcoinClaimV1, ReopenedFreshBitcoinFundingRouteV1,
+    RetainedFreshBitcoinRefundSignerV1,
 };
 pub use funding::{
     ArmedBitcoinFundingV1, BitcoinFundingBroadcastReceiptV1, BitcoinPrebroadcastPlanV1,
@@ -51,7 +53,7 @@ pub use funding::{
 };
 pub use rpc::{
     bitcoin_signet_challenge_digest_v1, BitcoinCoreNetworkV1, BitcoinCoreRpcClientV1,
-    BitcoinCoreRpcConfigV1,
+    BitcoinCoreRpcConfigV1, BitcoinCoreRpcTimeoutsV1,
 };
 
 /// Failures from the concrete Bitcoin Core boundary.

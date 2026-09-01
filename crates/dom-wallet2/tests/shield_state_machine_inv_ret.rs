@@ -242,7 +242,7 @@ fn fix025_forged_lower_rank_backup_cannot_overwrite_canonical_spent() {
         )
         .unwrap(); // -> Confirmed
 
-    let report: MergeReport = store.merge_backup(vec![forged]);
+    let report: MergeReport = store.merge_backup(vec![forged]).unwrap();
 
     assert_eq!(report.advanced, 0, "lower-rank backup must NOT advance");
     assert_eq!(report.kept, 1);
@@ -291,7 +291,7 @@ fn fix025_equal_rank_backup_does_not_overwrite() {
         .unwrap();
     forged.mark_spent(9_999).unwrap(); // -> Spent (equal rank)
 
-    let report = store.merge_backup(vec![forged]);
+    let report = store.merge_backup(vec![forged]).unwrap();
     assert_eq!(report.advanced, 0, "equal rank must not advance/overwrite");
     assert_eq!(report.kept, 1);
     let after = store.get(&key(1)).unwrap();
@@ -310,9 +310,11 @@ fn merge_backup_never_changes_cardinality_downward() {
     store.insert(at_status(2, OutputStatus::Confirmed)).unwrap();
     let before = store.len();
     // Empty backup, then a backup that only repeats existing commitments.
-    store.merge_backup(vec![]);
+    store.merge_backup(vec![]).unwrap();
     assert_eq!(store.len(), before, "empty merge changed cardinality");
-    store.merge_backup(vec![at_status(1, OutputStatus::Confirmed)]);
+    store
+        .merge_backup(vec![at_status(1, OutputStatus::Confirmed)])
+        .unwrap();
     assert_eq!(store.len(), before, "repeat merge changed cardinality");
 }
 
@@ -330,7 +332,7 @@ fn merge_backup_advances_only_strictly_higher_rank() {
         10,
     )
     .unwrap();
-    let report = store.merge_backup(vec![adv]);
+    let report = store.merge_backup(vec![adv]).unwrap();
     assert_eq!(report.advanced, 1);
     assert_eq!(store.get(&key(1)).unwrap().status, OutputStatus::Confirmed);
 }

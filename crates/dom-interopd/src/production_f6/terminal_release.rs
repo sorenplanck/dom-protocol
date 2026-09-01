@@ -84,8 +84,9 @@ impl ProductionRouteTerminalAuthorityOwnerV2 {
             || upstream.position != SettlementPositionV2::Upstream
             || downstream.position != SettlementPositionV2::Downstream
             || upstream.composition_id != downstream.composition_id
+            || upstream.composition_id != composition_v2_digest
             || upstream.wire.network_id != downstream.wire.network_id
-            || upstream.wire.session_id != downstream.wire.session_id
+            || upstream.wire.session_id == downstream.wire.session_id
         {
             return Err(ProductionF6ErrorV2::InvalidBinding);
         }
@@ -145,11 +146,22 @@ impl ProductionRouteTerminalAuthorityOwnerV2 {
 
 impl ProductionRouteStoreRuntimeAuthorityV2 {
     /// Exact route owned by this runtime handle.
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
     pub(crate) const fn route_id(&self) -> RouteIdV1 {
         self.route_id
     }
 
     /// Replays the exact retained route store without exposing the raw store.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "retained surface not yet wired by the stage-7 composition root"
+        )
+    )]
     pub(crate) fn verify_replay(
         &self,
     ) -> Result<route_executor::RouteSnapshotV1, ProductionF6ErrorV2> {
@@ -157,6 +169,20 @@ impl ProductionRouteStoreRuntimeAuthorityV2 {
             .try_borrow()
             .map_err(|_| ProductionF6ErrorV2::TerminalUnavailable)?
             .verify_replay(self.route_id)
+            .map_err(map_route_error)
+    }
+
+    /// Full-history audit proving every committed action is an
+    /// external-custody descriptor. The composition root must run it before
+    /// installing the closed production runner; a route whose journal already
+    /// carries a generic runner action cannot be driven by that policy.
+    pub(crate) fn audit_external_custody_only_v1(
+        &self,
+    ) -> Result<route_executor::RouteSnapshotV1, ProductionF6ErrorV2> {
+        self.store
+            .try_borrow()
+            .map_err(|_| ProductionF6ErrorV2::TerminalUnavailable)?
+            .audit_external_custody_only_v1(self.route_id)
             .map_err(map_route_error)
     }
 

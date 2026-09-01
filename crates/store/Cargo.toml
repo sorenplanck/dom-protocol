@@ -19,7 +19,7 @@ failpoints = []
 
 [dependencies]
 rusqlite = { workspace = true }
-rustix = { version = "=1.1.4", default-features = false, features = ["fs", "process"] }
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]

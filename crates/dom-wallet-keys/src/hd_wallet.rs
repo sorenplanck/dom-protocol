@@ -37,12 +37,11 @@ pub enum HdError {
 }
 
 /// An extended private key node in the HD tree.
-#[derive(Clone)]
 pub struct ExtendedPrivKey {
     /// 32-byte private key (secp256k1 scalar).
     key: Zeroizing<[u8; 32]>,
     /// 32-byte chain code.
-    chain_code: [u8; 32],
+    chain_code: Zeroizing<[u8; 32]>,
     /// Depth in the tree (0 = master).
     pub depth: u8,
     /// Child index at this level.
@@ -96,7 +95,7 @@ impl ExtendedPrivKey {
 
         let node = Self {
             key: Zeroizing::new(key),
-            chain_code,
+            chain_code: Zeroizing::new(chain_code),
             depth: 0,
             index: 0,
         };
@@ -116,8 +115,8 @@ impl ExtendedPrivKey {
             SecretKey::from_slice(self.key.as_ref()).map_err(|_| HdError::InvalidKey)?;
 
         type HmacSha512 = Hmac<Sha512>;
-        let mut mac =
-            HmacSha512::new_from_slice(&self.chain_code).expect("HMAC can take key of any size");
+        let mut mac = HmacSha512::new_from_slice(self.chain_code.as_ref())
+            .expect("HMAC can take key of any size");
 
         if index >= HARDENED_OFFSET {
             // Hardened: data = 0x00 || ser256(kpar) || ser32(i)
@@ -162,7 +161,7 @@ impl ExtendedPrivKey {
 
         let node = Self {
             key: Zeroizing::new(child_key),
-            chain_code,
+            chain_code: Zeroizing::new(chain_code),
             depth: self.depth.saturating_add(1),
             index,
         };
@@ -180,10 +179,10 @@ impl ExtendedPrivKey {
     pub fn derive_path(&self, path: &str) -> Result<Self, HdError> {
         let path = path.trim_start_matches("m/");
         if path.is_empty() {
-            return Ok(self.clone());
+            return Ok(self.duplicate_for_derivation());
         }
 
-        let mut current = self.clone();
+        let mut current = self.duplicate_for_derivation();
         for component in path.split('/') {
             let (index_str, hardened) = if let Some(s) = component.strip_suffix('\'') {
                 (s, true)
@@ -232,6 +231,20 @@ impl ExtendedPrivKey {
     /// (e.g. validating derivation against external BIP-32 test vectors).
     pub fn chain_code(&self) -> &[u8; 32] {
         &self.chain_code
+    }
+
+    /// Make the one owned working copy required while walking a derivation
+    /// path.  This deliberately stays private: exposing `Clone` on an HD
+    /// private-key owner would let callers create unconstrained secret copies.
+    /// Both fields in the returned node remain `Zeroizing` and are wiped by
+    /// `Drop` on replacement or early-return from the path walk.
+    fn duplicate_for_derivation(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            chain_code: self.chain_code.clone(),
+            depth: self.depth,
+            index: self.index,
+        }
     }
 }
 
@@ -298,5 +311,17 @@ mod tests {
         assert_eq!(child.depth, 1);
         let grandchild = child.child(0).unwrap();
         assert_eq!(grandchild.depth, 2);
+    }
+
+    #[test]
+    fn explicit_zeroize_covers_private_key_and_chain_code() {
+        let mut master = ExtendedPrivKey::from_seed(&test_seed()).unwrap();
+        assert_ne!(*master.key_bytes(), [0; 32]);
+        assert_ne!(*master.chain_code(), [0; 32]);
+
+        master.zeroize();
+
+        assert_eq!(*master.key_bytes(), [0; 32]);
+        assert_eq!(*master.chain_code(), [0; 32]);
     }
 }

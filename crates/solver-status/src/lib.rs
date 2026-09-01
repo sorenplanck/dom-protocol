@@ -727,6 +727,31 @@ impl DurableSolverStatusStoreV1 {
         Ok(value)
     }
 
+    /// Opens retained status state or completes the exact externally
+    /// journalled lazy-binding prefix after an authenticated Relay roster
+    /// fixes this position's final status scope.
+    pub fn open_or_resume_prepared_production(
+        path: &Path,
+        preparation_digest: Digest32,
+        config: SolverStatusStoreConfigV1,
+        authorities: AuthoritySetV1,
+        secp: &SecpContext,
+    ) -> Result<Self> {
+        validate_config_authorities(config, &authorities, secp)?;
+        let preparation = ProductionStoreBindingV1::new(preparation_digest)
+            .map_err(|_| SolverStatusErrorV1::Storage)?;
+        let binding = ProductionStoreBindingV1::new(config.store_binding_digest()?)
+            .map_err(|_| SolverStatusErrorV1::Storage)?;
+        let value = Self {
+            store: Store::open_or_resume_prepared_production(path, preparation, binding)
+                .map_err(|_| SolverStatusErrorV1::Storage)?,
+            config,
+            authorities,
+        };
+        value.audit(secp)?;
+        Ok(value)
+    }
+
     /// Immutable scope digest consumed by the F6 adapter.
     pub fn scope_digest(&self) -> Result<Digest32> {
         self.config.store_binding_digest()

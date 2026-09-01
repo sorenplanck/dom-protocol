@@ -93,7 +93,7 @@ fn now() -> TimelockSpec {
 }
 
 fn inbox_config(id: u8, max_entries: u32) -> DurableInboxConfigV1 {
-    DurableInboxConfigV1::new([id; 32], wire(), RECIPIENT, max_entries).unwrap()
+    DurableInboxConfigV1::new([id; 32], [0x91; 32], wire(), RECIPIENT, max_entries).unwrap()
 }
 
 fn frame_config(id: u8) -> DurableFrameReassemblerConfigV2 {
@@ -172,7 +172,7 @@ fn exact_512k_limit_and_direct_v1_reach_contracts_byte_identical() -> Result<(),
     let frames_root = temporary.path().join("frames");
     let rosters = rosters();
     let mut inbox = DurableRelayInboxV1::create(&inbox_root, inbox_config(0x91, 64), &rosters)?;
-    let ingest = inbox.ingest(&relay, &rosters, now())?;
+    let ingest = inbox.ingest_ephemeral_v1(&relay, &rosters, now())?;
     assert_eq!(ingest.accepted, 34);
     assert!(ingest.refused.is_empty());
 
@@ -258,7 +258,7 @@ fn crash_after_contracts_commit_redelivers_one_complete_message() -> Result<(), 
     let rosters = rosters();
     let mut inbox = DurableRelayInboxV1::create(&inbox_root, inbox_cfg, &rosters)?;
     assert_eq!(
-        inbox.ingest(&relay, &rosters, now())?.accepted,
+        inbox.ingest_ephemeral_v1(&relay, &rosters, now())?.accepted,
         plan.frame_count()
     );
     let durable = Arc::new(Mutex::new(DurableContractsState {
@@ -309,7 +309,7 @@ impl RelayQueueV1 for ReorderedMailbox {
         Err(route_transport::BridgeRefusal::AckDigestMismatch)
     }
 
-    fn queue_deliver(
+    fn queue_deliver_ephemeral_v1(
         &self,
         recipient: &ParticipantId,
     ) -> Result<Vec<Vec<u8>>, route_transport::BridgeRefusal> {
@@ -350,15 +350,26 @@ fn relay_loss_reorder_and_duplicates_eventually_complete_once() -> Result<(), Bo
     let first = ReorderedMailbox {
         raw: vec![raw[2].clone(), raw[0].clone()],
     };
-    assert_eq!(inbox.ingest(&first, &rosters, now())?.accepted, 1);
+    assert_eq!(
+        inbox.ingest_ephemeral_v1(&first, &rosters, now())?.accepted,
+        1
+    );
     let second = ReorderedMailbox {
         raw: vec![raw[2].clone(), raw[0].clone(), raw[1].clone()],
     };
-    assert_eq!(inbox.ingest(&second, &rosters, now())?.accepted, 1);
+    assert_eq!(
+        inbox
+            .ingest_ephemeral_v1(&second, &rosters, now())?
+            .accepted,
+        1
+    );
     let third = ReorderedMailbox {
         raw: vec![raw[2].clone(), raw[1].clone(), raw[0].clone()],
     };
-    assert_eq!(inbox.ingest(&third, &rosters, now())?.accepted, 1);
+    assert_eq!(
+        inbox.ingest_ephemeral_v1(&third, &rosters, now())?.accepted,
+        1
+    );
     assert_eq!(inbox.stats()?.pending_route, 3);
 
     let reassembler = DurableFrameReassemblerV2::create(&frames_root, frame_config(0xb2))?;

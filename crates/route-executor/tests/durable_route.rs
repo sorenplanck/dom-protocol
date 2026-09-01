@@ -382,6 +382,52 @@ fn journal_replay_matches_the_materialized_multidimensional_snapshot() {
 }
 
 #[test]
+fn production_external_custody_audit_accepts_only_custody_history_after_restart() {
+    let mut fixture = Fixture::new(10_000);
+    fixture.arm_refunds();
+    fixture.apply(RouteEventV1::CommitAction(ActionIntentV1 {
+        leg: LegIdV1::Upstream,
+        kind: ActionKindV1::Funding,
+        semantic_digest: id(31),
+        contains_route_secret: false,
+        dispatch: EffectDispatchV1::ExternalCustody {
+            custody_digest: id(32),
+            transaction_id: id(33),
+        },
+    }));
+    let expected = fixture.store.load_snapshot(id(1)).expect("snapshot");
+    assert_eq!(
+        fixture.store.audit_external_custody_only_v1(id(1)),
+        Ok(expected.clone())
+    );
+
+    let database = fixture.database.clone();
+    drop(fixture.store);
+    assert_eq!(
+        reopen(&database).audit_external_custody_only_v1(id(1)),
+        Ok(expected)
+    );
+}
+
+#[test]
+fn production_external_custody_audit_rejects_completed_historical_runner_effect() {
+    let mut fixture = Fixture::new(10_000);
+    fixture.arm_refunds();
+    fixture.fund_and_finalize(LegIdV1::Upstream, 30);
+    assert_eq!(
+        fixture.store.audit_external_custody_only_v1(id(1)),
+        Err(RouteStoreErrorV1::CorruptState)
+    );
+
+    let database = fixture.database.clone();
+    drop(fixture.store);
+    assert_eq!(
+        reopen(&database).audit_external_custody_only_v1(id(1)),
+        Err(RouteStoreErrorV1::CorruptState)
+    );
+}
+
+#[test]
 fn v2_admission_checkpoint_is_replayed_exactly_and_v1_never_becomes_a_recovery_checkpoint() {
     let mut fixture = Fixture::new(10_000);
     let checkpoint = frozen_admission_v2();

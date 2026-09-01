@@ -237,7 +237,10 @@ impl TerminalEvidenceV1 {
     /// exposures contribute a digest only when their complete canonical bytes
     /// are byte-identical; a conflicting tie uses the normative zero sentinel.
     #[cfg(any(test, feature = "evidence-only"))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+    )]
     pub(crate) fn select_restore_union(
         identity: NonceIdentityV1,
         target_claim: Option<&SessionClaimV1>,

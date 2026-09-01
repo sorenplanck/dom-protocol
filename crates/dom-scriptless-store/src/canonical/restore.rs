@@ -72,7 +72,10 @@ pub struct RestoreManifestV1 {
 impl RestoreManifestV1 {
     /// Constructs the existing-device restore manifest.
     #[cfg(any(test, feature = "evidence-only"))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+    )]
     pub fn new_existing_device(
         restore_transaction_id: [u8; 16],
         contract_wallet_id: [u8; 32],
@@ -105,7 +108,10 @@ impl RestoreManifestV1 {
 
     /// Constructs the exact new-device target-sentinel manifest.
     #[cfg(any(test, feature = "evidence-only"))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+    )]
     pub fn new_restore_only(
         restore_transaction_id: [u8; 16],
         contract_wallet_id: [u8; 32],
@@ -133,7 +139,10 @@ impl RestoreManifestV1 {
     }
 
     #[cfg(any(test, feature = "evidence-only"))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+    )]
     fn construct(
         restore_transaction_id: [u8; 16],
         contract_wallet_id: [u8; 32],
@@ -771,7 +780,10 @@ pub struct EpochAdvancePayloadV1 {
 impl EpochAdvancePayloadV1 {
     /// Constructs the exact signed epoch/generation transition.
     #[cfg(any(test, feature = "evidence-only"))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+    )]
     pub fn new(
         contract_wallet_id: [u8; 32],
         predecessor_vault_id: [u8; 32],

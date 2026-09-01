@@ -32,7 +32,8 @@ pub use store::{
     LatchedFinalClaimSubmissionV2,
 };
 pub use wallet::{
-    DomOutputReservationV1, DomParticipantWalletSessionV1, DomParticipantWalletV1,
+    AuthenticatedDomPayoutFaceV1, DomOutputReservationV1, DomParticipantWalletSessionV1,
+    DomParticipantWalletV1, DomPayoutFaceRequestV1, DomPayoutFaceSelectionRequestV1,
     DomReservedOutputV1, DomWalletAuthorityBindingV1, DomWalletSessionLegV1,
     FundingSigningShareRequestV1, SharedOutputSpendSigningShareRequestV1,
     WalletReservationRequestV1,

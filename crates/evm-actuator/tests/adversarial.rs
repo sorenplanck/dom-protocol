@@ -21,14 +21,17 @@ use deployment_registry::{
     ResolvedEvmDeploymentV1, SignedRegistryV1,
 };
 use evm_actuator::{
-    BroadcastDispositionV1, Digest32, DurableEvmActuatorV1, Eip1559SignatureV1,
-    Eip1559SigningRequestV1, EvmActuatorErrorV1, EvmActuatorLeaseV1, EvmAddressV1,
-    EvmClaimSecretV1, EvmFeesV1, EvmObservationMutationRequestV1, EvmOperationKindV1,
-    EvmOperationMutationRequestV1, EvmOperationPreparationRequestV1, EvmRetainedMutationKindV1,
-    EvmRpcErrorV1, EvmRpcV1, EvmSignerRoleV1, EvmTxStageV1, MutationStatusV1, ReconciliationKindV1,
-    RpcAllowanceV1, RpcFinalizedTimeV1, RpcLogV1, RpcPendingNonceV1, RpcReceiptLookupV1,
-    RpcReceiptV1, RpcTransactionLookupV1, RpcTransactionV1, ScopedEip1559SignerV1,
-    ScopedEvmClaimV1, ScopedEvmOpenV1, ScopedEvmRefundV1, SignerRefusalV1,
+    remote_open_unsigned_call_digest_v1, remote_signed_raw_digest_v1, BroadcastDispositionV1,
+    Digest32, DurableEvmActuatorV1, Eip1559SignatureV1, Eip1559SigningRequestV1,
+    EvmActuatorErrorV1, EvmActuatorLeaseV1, EvmAddressV1, EvmClaimSecretV1, EvmFeesV1,
+    EvmObservationMutationRequestV1, EvmOperationKindV1, EvmOperationMutationRequestV1,
+    EvmOperationPreparationRequestV1, EvmRetainedMutationKindV1, EvmRpcErrorV1, EvmRpcV1,
+    EvmSignerRoleV1, EvmTxStageV1, MutationStatusV1, ReconciliationKindV1,
+    RemoteEvmActionMutationRequestV1, RemoteEvmActionRequestInputV1, RemoteEvmActionRequestV1,
+    RemoteEvmObservationMutationRequestV1, RemoteEvmOperationCustodyResumeInputV1,
+    RemoteEvmSignedActionV1, RpcAllowanceV1, RpcFinalizedTimeV1, RpcLogV1, RpcPendingNonceV1,
+    RpcReceiptLookupV1, RpcReceiptV1, RpcTransactionLookupV1, RpcTransactionV1,
+    ScopedEip1559SignerV1, ScopedEvmClaimV1, ScopedEvmOpenV1, ScopedEvmRefundV1, SignerRefusalV1,
 };
 use k256::ecdsa::SigningKey;
 use kaystra_core::types::{AssetId, ChainId, FinalityPolicyV1};
@@ -39,6 +42,7 @@ use tempfile::TempDir;
 assert_not_impl_any!(EvmClaimSecretV1: Clone, Copy, core::fmt::Debug);
 assert_not_impl_any!(ScopedEvmClaimV1: Clone, Copy, core::fmt::Debug);
 assert_not_impl_any!(Eip1559SigningRequestV1: Clone, Copy);
+assert_not_impl_any!(RemoteEvmSignedActionV1: Clone, Copy, core::fmt::Debug);
 
 const NETWORK: Digest32 = [0x90; 32];
 const DOM_CHAIN: ChainId = ChainId([
@@ -670,6 +674,23 @@ fn fresh_time_durable_snapshot(path: &Path, authority_id: Digest32) -> FreshTime
         nonce_hex,
         allowance_hex,
     }
+}
+
+fn remote_custody_durable_snapshot(path: &Path, custody_id: Digest32) -> (String, String, String) {
+    let connection = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .unwrap();
+    connection.pragma_update(None, "query_only", "ON").unwrap();
+    connection
+        .query_row(
+            "SELECT hex(fencing_epoch_be),hex(lease_until_be),hex(clock_high_water_be)
+             FROM evm_remote_custodies WHERE custody_id=?1",
+            rusqlite::params![custody_id.as_slice()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap()
 }
 
 struct TerminalFixture {
@@ -3903,4 +3924,392 @@ fn takeover_expiry_after_lookup_does_not_refence_or_advance_clock() {
         fresh_time_durable_snapshot(&fixture.path, takeover.authority_id()),
         before
     );
+}
+
+#[test]
+fn remote_signed_action_is_verified_fenced_durable_and_nonce_lease_free() {
+    let mut fixture = Fixture::new(EVM_NATIVE);
+    let (_, prepared) = prepare_native(&mut fixture, 0x20);
+    let signed_local = sign_current(&mut fixture, 0x20, prepared.revision);
+    fixture
+        .store
+        .broadcast_current(
+            EvmOperationMutationRequestV1::new(
+                fixture.lease,
+                id(0x24),
+                id(0x20),
+                signed_local.revision,
+                NOW + 4,
+            ),
+            &mut fixture.rpc,
+            || Ok(NOW + 4),
+        )
+        .unwrap();
+    let raw = fixture.rpc.sent[0].clone();
+    let (scope, _) = fixture.scope(0x20, 0x21, 50);
+    let config = fixture.deployment.adapter_config();
+    let request = RemoteEvmActionRequestV1::new(RemoteEvmActionRequestInputV1 {
+        kind: EvmOperationKindV1::Open,
+        role: EvmSignerRoleV1::Funder,
+        owner_id: id(0x30),
+        owner_epoch: 7,
+        action_id: id(0x31),
+        route_id: scope.route_id(),
+        settlement_id: id(0x32),
+        composition_binding_digest: id(0x33),
+        execution_plan_digest: id(0x34),
+        unsigned_call_digest: remote_open_unsigned_call_digest_v1(&scope).unwrap(),
+        request_message_digest: id(0x35),
+        requester_id: id(0x36),
+        signer_id: id(0x37),
+        chain_id: CHAIN_ID,
+        contract: config.contract,
+        signer_account: fixture.lease.account(),
+    })
+    .unwrap();
+    let short = fixture
+        .store
+        .acquire_remote_action_custody(request, NOW + 4, 2)
+        .unwrap()
+        .custody();
+    let response = || {
+        RemoteEvmSignedActionV1::new(
+            request.request_message_digest(),
+            remote_signed_raw_digest_v1(&raw).unwrap(),
+            keccak256(&raw),
+            raw.clone(),
+        )
+        .unwrap()
+    };
+    let wrong_request_response = RemoteEvmSignedActionV1::new(
+        id(0x7f),
+        remote_signed_raw_digest_v1(&raw).unwrap(),
+        keccak256(&raw),
+        raw.clone(),
+    )
+    .unwrap();
+    assert!(matches!(
+        fixture.store.import_remote_open_signed(
+            RemoteEvmActionMutationRequestV1::new(short, id(0x78), id(0x79), 0, NOW + 4),
+            &scope,
+            wrong_request_response,
+            || Ok(NOW + 5),
+        ),
+        Err(EvmActuatorErrorV1::InvalidScope)
+    ));
+    let (transplanted_scope, _) = fixture.scope(0x21, 0x22, 50);
+    assert!(matches!(
+        fixture.store.import_remote_open_signed(
+            RemoteEvmActionMutationRequestV1::new(short, id(0x7a), id(0x7b), 0, NOW + 4),
+            &transplanted_scope,
+            response(),
+            || Ok(NOW + 5),
+        ),
+        Err(EvmActuatorErrorV1::InvalidScope)
+    ));
+    assert!(matches!(
+        fixture.store.import_remote_open_signed(
+            RemoteEvmActionMutationRequestV1::new(short, id(0x38), id(0x39), 0, NOW + 4),
+            &scope,
+            response(),
+            || Ok(NOW + 7),
+        ),
+        Err(EvmActuatorErrorV1::StaleFencing)
+    ));
+    assert!(matches!(
+        fixture.store.operation(id(0x39)),
+        Err(EvmActuatorErrorV1::OperationNotFound)
+    ));
+
+    let custody = fixture
+        .store
+        .acquire_remote_action_custody(request, NOW + 7, LEASE_MS)
+        .unwrap()
+        .custody();
+    assert!(custody.fencing_epoch() > short.fencing_epoch());
+    let imported = fixture
+        .store
+        .import_remote_open_signed(
+            RemoteEvmActionMutationRequestV1::new(custody, id(0x38), id(0x39), 0, NOW + 7),
+            &scope,
+            response(),
+            || Ok(NOW + 8),
+        )
+        .unwrap();
+    assert_eq!(imported.status, MutationStatusV1::Committed);
+    assert_eq!(imported.value.stage, EvmTxStageV1::Signed);
+    assert_eq!(imported.value.nonce, signed_local.nonce);
+    let duplicate = fixture
+        .store
+        .import_remote_open_signed(
+            RemoteEvmActionMutationRequestV1::new(custody, id(0x38), id(0x39), 0, NOW + 8),
+            &scope,
+            response(),
+            || Ok(NOW + 9),
+        )
+        .unwrap();
+    assert_eq!(duplicate.status, MutationStatusV1::DuplicateSameBytes);
+
+    let read_only = rusqlite::Connection::open_with_flags(
+        &fixture.path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .unwrap();
+    read_only.pragma_update(None, "query_only", "ON").unwrap();
+    let allocation: Vec<u8> = read_only
+        .query_row(
+            "SELECT allocation_revision_be FROM evm_nonce_snapshots WHERE authority_id=?1",
+            rusqlite::params![fixture.lease.authority_id().as_slice()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(u64::from_be_bytes(allocation.try_into().unwrap()), 1);
+    drop(read_only);
+
+    let path = fixture.path.clone();
+    let mut rpc = fixture.rpc;
+    let restart_input = RemoteEvmOperationCustodyResumeInputV1 {
+        operation_id: id(0x39),
+        owner_id: id(0x30),
+        owner_epoch: 7,
+        route_id: scope.route_id(),
+        settlement_id: id(0x32),
+        composition_binding_digest: id(0x33),
+        effect_id: scope.effect_id(),
+        semantic_digest: scope.semantic_digest(),
+        terms_digest: fixture.deployment.adapter_config().terms_hash,
+        registry_digest: fixture.deployment.registry_digest(),
+        profile_digest: fixture.deployment.profile_digest(),
+        deployment_digest: fixture.deployment.deployment().deployment_digest,
+        kind: EvmOperationKindV1::Open,
+        role: EvmSignerRoleV1::Funder,
+        chain_id: CHAIN_ID,
+        contract: config.contract,
+        signer_account: fixture.lease.account(),
+        transaction_hash: keccak256(&raw),
+    };
+    drop(fixture.store);
+    let mut reopened = DurableEvmActuatorV1::open_existing(&path).unwrap();
+    let restart_now = NOW + 10;
+    let resumed = reopened
+        .acquire_existing_remote_operation_custody(restart_input, restart_now, LEASE_MS)
+        .unwrap()
+        .custody();
+    assert_eq!(resumed.fencing_epoch(), custody.fencing_epoch());
+    assert!(matches!(
+        reopened.acquire_existing_remote_operation_custody(
+            RemoteEvmOperationCustodyResumeInputV1 {
+                route_id: id(0x7f),
+                ..restart_input
+            },
+            restart_now,
+            LEASE_MS,
+        ),
+        Err(EvmActuatorErrorV1::InvalidScope)
+    ));
+    let broadcast = reopened
+        .broadcast_remote_current(
+            RemoteEvmActionMutationRequestV1::new(
+                resumed,
+                id(0x3a),
+                id(0x39),
+                imported.value.revision,
+                restart_now + 1,
+            ),
+            &mut rpc,
+            || Ok(restart_now + 2),
+        )
+        .unwrap();
+    assert_eq!(broadcast.disposition, BroadcastDispositionV1::Accepted);
+    assert_eq!(rpc.sent.last().unwrap(), &raw);
+
+    let attempted = reopened.operation(id(0x39)).unwrap();
+    let takeover_now = resumed.lease_until_unix_ms() + 1;
+    let before_refusal = remote_custody_durable_snapshot(&path, resumed.custody_id());
+    assert!(matches!(
+        reopened.acquire_existing_remote_operation_custody(
+            RemoteEvmOperationCustodyResumeInputV1 {
+                transaction_hash: id(0x7e),
+                ..restart_input
+            },
+            takeover_now,
+            LEASE_MS,
+        ),
+        Err(EvmActuatorErrorV1::InvalidScope)
+    ));
+    assert_eq!(
+        remote_custody_durable_snapshot(&path, resumed.custody_id()),
+        before_refusal
+    );
+    let takeover = reopened
+        .acquire_existing_remote_operation_custody(restart_input, takeover_now, LEASE_MS)
+        .unwrap()
+        .custody();
+    assert!(takeover.fencing_epoch() > resumed.fencing_epoch());
+    assert_eq!(
+        reopened
+            .remote_operation_binding(takeover, id(0x39), takeover_now)
+            .unwrap()
+            .operation(),
+        &attempted
+    );
+    assert!(matches!(
+        reopened.remote_operation_binding(resumed, id(0x39), takeover_now),
+        Err(EvmActuatorErrorV1::StaleFencing)
+    ));
+}
+
+#[test]
+fn remote_erc20_open_requires_custody_scoped_finalized_allowance() {
+    let mut fixture = Fixture::new(EVM_TOKEN);
+    let nonce = fixture.nonce();
+    fixture.rpc.allowance = word_u128(100);
+    fixture
+        .store
+        .refresh_finalized_allowance(
+            EvmObservationMutationRequestV1::new(
+                fixture.lease,
+                id(0x41),
+                0,
+                NOW + 2,
+                OBSERVATION_MS,
+            ),
+            &fixture.deployment,
+            &mut fixture.rpc,
+            || Ok(NOW + 2),
+        )
+        .unwrap();
+    let (scope, _) = fixture.scope(0x42, 0x43, 60);
+    let prepared = fixture
+        .store
+        .prepare_open(
+            EvmOperationPreparationRequestV1::new(
+                fixture.lease,
+                id(0x44),
+                id(0x45),
+                nonce,
+                EvmFeesV1::new(20_000_000_000, 1_000_000_000).unwrap(),
+                NOW + 3,
+            ),
+            &scope,
+        )
+        .unwrap()
+        .value;
+    let signed = sign_current(&mut fixture, 0x45, prepared.revision);
+    fixture
+        .store
+        .broadcast_current(
+            EvmOperationMutationRequestV1::new(
+                fixture.lease,
+                id(0x54),
+                id(0x45),
+                signed.revision,
+                NOW + 4,
+            ),
+            &mut fixture.rpc,
+            || Ok(NOW + 4),
+        )
+        .unwrap();
+    let raw = fixture.rpc.sent.last().unwrap().clone();
+    let config = fixture.deployment.adapter_config();
+    let remote_request = RemoteEvmActionRequestV1::new(RemoteEvmActionRequestInputV1 {
+        kind: EvmOperationKindV1::Open,
+        role: EvmSignerRoleV1::Funder,
+        owner_id: id(0x49),
+        owner_epoch: 9,
+        action_id: id(0x4a),
+        route_id: scope.route_id(),
+        settlement_id: id(0x4b),
+        composition_binding_digest: id(0x4c),
+        execution_plan_digest: id(0x4d),
+        unsigned_call_digest: remote_open_unsigned_call_digest_v1(&scope).unwrap(),
+        request_message_digest: id(0x4e),
+        requester_id: id(0x4f),
+        signer_id: id(0x50),
+        chain_id: CHAIN_ID,
+        contract: config.contract,
+        signer_account: fixture.lease.account(),
+    })
+    .unwrap();
+    let custody = fixture
+        .store
+        .acquire_remote_action_custody(remote_request, NOW + 5, LEASE_MS)
+        .unwrap()
+        .custody();
+    let response = || {
+        RemoteEvmSignedActionV1::new(
+            remote_request.request_message_digest(),
+            remote_signed_raw_digest_v1(&raw).unwrap(),
+            keccak256(&raw),
+            raw.clone(),
+        )
+        .unwrap()
+    };
+    assert!(matches!(
+        fixture.store.import_remote_open_signed(
+            RemoteEvmActionMutationRequestV1::new(custody, id(0x51), id(0x52), 0, NOW + 6,),
+            &scope,
+            response(),
+            || Ok(NOW + 6),
+        ),
+        Err(EvmActuatorErrorV1::AllowanceRequired)
+    ));
+    fixture
+        .store
+        .refresh_remote_finalized_allowance(
+            RemoteEvmObservationMutationRequestV1::new(
+                custody,
+                id(0x53),
+                0,
+                NOW + 6,
+                OBSERVATION_MS,
+            ),
+            &fixture.deployment,
+            &mut fixture.rpc,
+            || Ok(NOW + 7),
+        )
+        .unwrap();
+    fixture.rpc.allowance = word_u128(101);
+    assert!(matches!(
+        fixture.store.refresh_remote_finalized_allowance(
+            RemoteEvmObservationMutationRequestV1::new(
+                custody,
+                id(0x55),
+                1,
+                NOW + 7,
+                OBSERVATION_MS,
+            ),
+            &fixture.deployment,
+            &mut fixture.rpc,
+            || Ok(NOW + 8),
+        ),
+        Err(EvmActuatorErrorV1::ObservationMismatch)
+    ));
+    fixture.rpc.allowance = word_u128(100);
+    let imported = fixture
+        .store
+        .import_remote_open_signed(
+            RemoteEvmActionMutationRequestV1::new(custody, id(0x51), id(0x52), 0, NOW + 7),
+            &scope,
+            response(),
+            || Ok(NOW + 8),
+        )
+        .unwrap();
+    assert_eq!(imported.value.stage, EvmTxStageV1::Signed);
+
+    let path = fixture.path.clone();
+    drop(fixture.store);
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "UPDATE evm_remote_allowances SET valid_until_be=observed_at_be
+             WHERE custody_id=?1",
+            rusqlite::params![custody.custody_id().as_slice()],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        DurableEvmActuatorV1::open_existing(&path),
+        Err(EvmActuatorErrorV1::CorruptState)
+    ));
 }
