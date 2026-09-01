@@ -45,6 +45,8 @@ mod production_materializer;
 #[cfg(any(feature = "production", feature = "config-only"))]
 mod production_node;
 #[cfg(feature = "production")]
+mod production_plan_authority;
+#[cfg(feature = "production")]
 mod production_plan_source;
 #[cfg(feature = "production")]
 mod production_provisioning;
