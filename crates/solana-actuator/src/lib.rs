@@ -141,13 +141,11 @@ impl DurableSolanaActuatorV1 {
             MUTATION_BROADCAST,
             now_unix_ms,
             |current| match current.stage {
-                SolanaTxStageV1::Signed | SolanaTxStageV1::SendAttempted => {
-                    Ok(StageTransitionV1 {
-                        stage: SolanaTxStageV1::SendAttempted,
-                        finality: None,
-                        reconciliation: None,
-                    })
-                }
+                SolanaTxStageV1::Signed | SolanaTxStageV1::SendAttempted => Ok(StageTransitionV1 {
+                    stage: SolanaTxStageV1::SendAttempted,
+                    finality: None,
+                    reconciliation: None,
+                }),
                 _ => Err(SolanaActuatorErrorV1::Conflict),
             },
         )?;
@@ -211,7 +209,15 @@ impl DurableSolanaActuatorV1 {
         }
         if status.confirmation == Commitment::Finalized {
             let facts = self.finality_facts(pool, &view)?;
-            return self.promote_final(lease, locator, attempt_id, MUTATION_OBSERVE, facts, None, now_unix_ms);
+            return self.promote_final(
+                lease,
+                locator,
+                attempt_id,
+                MUTATION_OBSERVE,
+                facts,
+                None,
+                now_unix_ms,
+            );
         }
         self.store.apply_mutation(
             lease,
@@ -333,18 +339,14 @@ impl DurableSolanaActuatorV1 {
                     MUTATION_RECONCILE,
                     now_unix_ms,
                     |current| {
-                        if stage_rank(current.stage)
-                            > stage_rank(SolanaTxStageV1::SendAttempted)
-                        {
+                        if stage_rank(current.stage) > stage_rank(SolanaTxStageV1::SendAttempted) {
                             // Evidence already recorded beats a later absence.
                             return Err(SolanaActuatorErrorV1::Conflict);
                         }
                         Ok(StageTransitionV1 {
                             stage: SolanaTxStageV1::Reconciled,
                             finality: None,
-                            reconciliation: Some(
-                                SolanaReconciliationKindV1::ExpiredNeverLanded,
-                            ),
+                            reconciliation: Some(SolanaReconciliationKindV1::ExpiredNeverLanded),
                         })
                     },
                 )?;
@@ -410,9 +412,7 @@ impl DurableSolanaActuatorV1 {
                     }
                 }
                 match current.stage {
-                    SolanaTxStageV1::FinalityInvalidated => {
-                        Err(SolanaActuatorErrorV1::Conflict)
-                    }
+                    SolanaTxStageV1::FinalityInvalidated => Err(SolanaActuatorErrorV1::Conflict),
                     _ => Ok(StageTransitionV1 {
                         stage: SolanaTxStageV1::Final,
                         finality: Some(facts),

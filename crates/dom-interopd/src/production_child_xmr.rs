@@ -460,8 +460,7 @@ where
             .actuator
             .retained(view.locator)
             .map_err(map_actuator_error)?;
-        if xmr_actuator::custody_digest_v1(&raw).map_err(map_actuator_error)?
-            != view.custody_digest
+        if xmr_actuator::custody_digest_v1(&raw).map_err(map_actuator_error)? != view.custody_digest
         {
             return Err(ChildAuthorityRefusalV1::Conflict);
         }
@@ -553,7 +552,10 @@ where
                 // Idempotent reopen: re-verify the retained bytes' consensus
                 // hash rather than rebuilding a sweep (the sidecar owns
                 // construction and is not byte-deterministic across calls).
-                let raw = self.actuator.retained(locator).map_err(map_actuator_error)?;
+                let raw = self
+                    .actuator
+                    .retained(locator)
+                    .map_err(map_actuator_error)?;
                 verify_exact_raw_transaction(&raw, view.tx_hash)
                     .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
                 view
@@ -818,11 +820,9 @@ where
                         .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
                 })
             }
-            XmrReconciliationKindV1::Observed | XmrReconciliationKindV1::Final => {
-                Ok(ChildReconciliationOutcomeV1::Externalized(
-                    Self::externalized_receipt(dispatch)?,
-                ))
-            }
+            XmrReconciliationKindV1::Observed | XmrReconciliationKindV1::Final => Ok(
+                ChildReconciliationOutcomeV1::Externalized(Self::externalized_receipt(dispatch)?),
+            ),
             XmrReconciliationKindV1::Unknown => Ok(ChildReconciliationOutcomeV1::Unknown {
                 evidence_digest: unknown_evidence_v1(&binding)
                     .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,

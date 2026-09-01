@@ -48,10 +48,7 @@ pub struct XmrTxInclusionV1 {
 /// one node's view. The actuator treats every answer as already verified.
 pub trait XmrObservationPortV1 {
     /// Inclusion facts for an exact txid, `None` when absent everywhere.
-    fn transaction_inclusion(
-        &mut self,
-        tx_hash: Digest32,
-    ) -> Result<Option<XmrTxInclusionV1>>;
+    fn transaction_inclusion(&mut self, tx_hash: Digest32) -> Result<Option<XmrTxInclusionV1>>;
 
     /// Whether the exact key image is spent anywhere the quorum can see.
     fn key_image_spent(&mut self, key_image: Digest32) -> Result<bool>;
@@ -92,10 +89,7 @@ const fn stage_rank(stage: XmrTxStageV1) -> u8 {
     }
 }
 
-fn final_evidence_digest_v1(
-    tx_hash: Digest32,
-    inclusion: &XmrTxInclusionV1,
-) -> Result<Digest32> {
+fn final_evidence_digest_v1(tx_hash: Digest32, inclusion: &XmrTxInclusionV1) -> Result<Digest32> {
     let mut hasher = Blake2bVar::new(32).map_err(|_| XmrActuatorErrorV1::StorageUnavailable)?;
     hasher.update(FINAL_EVIDENCE_DOMAIN_V1);
     for part in [
@@ -135,8 +129,14 @@ impl DurableXmrActuatorV1 {
         raw_transaction: &[u8],
         now_unix_ms: u64,
     ) -> Result<XmrOperationViewV1> {
-        self.store
-            .prepare_signed(lease, locator, tx_hash, key_image, raw_transaction, now_unix_ms)
+        self.store.prepare_signed(
+            lease,
+            locator,
+            tx_hash,
+            key_image,
+            raw_transaction,
+            now_unix_ms,
+        )
     }
 
     /// Current durable projection.
@@ -220,7 +220,15 @@ impl DurableXmrActuatorV1 {
                 final_block_hash: inclusion.block_hash,
                 final_evidence_digest: final_evidence_digest_v1(view.tx_hash, &inclusion)?,
             };
-            return self.promote_final(lease, locator, attempt_id, MUTATION_OBSERVE, facts, None, now_unix_ms);
+            return self.promote_final(
+                lease,
+                locator,
+                attempt_id,
+                MUTATION_OBSERVE,
+                facts,
+                None,
+                now_unix_ms,
+            );
         }
         self.store.apply_mutation(
             lease,
@@ -324,16 +332,13 @@ impl DurableXmrActuatorV1 {
                     MUTATION_RECONCILE,
                     now_unix_ms,
                     |current| {
-                        if stage_rank(current.stage) > stage_rank(XmrTxStageV1::SendAttempted)
-                        {
+                        if stage_rank(current.stage) > stage_rank(XmrTxStageV1::SendAttempted) {
                             return Err(XmrActuatorErrorV1::Conflict);
                         }
                         Ok(StageTransitionV1 {
                             stage: XmrTxStageV1::Reconciled,
                             finality: None,
-                            reconciliation: Some(
-                                XmrReconciliationKindV1::KeyImageUnspentAbsent,
-                            ),
+                            reconciliation: Some(XmrReconciliationKindV1::KeyImageUnspentAbsent),
                         })
                     },
                 )?;

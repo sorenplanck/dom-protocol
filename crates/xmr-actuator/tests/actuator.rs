@@ -102,8 +102,8 @@ fn prepare_is_idempotent_and_conflicts_on_divergent_bytes() {
 #[test]
 fn prepare_refuses_zero_fields_oversize_and_expired_lease() {
     let dir = tempfile::tempdir().unwrap_or_else(|_| panic!("tempdir"));
-    let store = XmrOperationStoreV1::open(dir.path().join("a.sqlite"))
-        .unwrap_or_else(|_| panic!("open"));
+    let store =
+        XmrOperationStoreV1::open(dir.path().join("a.sqlite")).unwrap_or_else(|_| panic!("open"));
     let actuator = DurableXmrActuatorV1::new(store);
     assert_eq!(
         actuator.prepare_signed(&lease(1), locator(), [0; 32], [0x67; 32], &raw(), NOW),
@@ -194,7 +194,14 @@ fn observe_promotes_only_at_the_required_depth() {
         ..Default::default()
     };
     let observed = actuator
-        .observe_current(&lease(1), locator(), [0x04; 32], &mut port, MIN_CONFIRMATIONS, NOW)
+        .observe_current(
+            &lease(1),
+            locator(),
+            [0x04; 32],
+            &mut port,
+            MIN_CONFIRMATIONS,
+            NOW,
+        )
         .unwrap_or_else(|_| panic!("observe"));
     assert_eq!(observed.stage, XmrTxStageV1::Observed);
     assert!(observed.finality.is_none());
@@ -204,7 +211,14 @@ fn observe_promotes_only_at_the_required_depth() {
         confirmations: MIN_CONFIRMATIONS,
     });
     let finalized = actuator
-        .observe_current(&lease(1), locator(), [0x05; 32], &mut port, MIN_CONFIRMATIONS, NOW)
+        .observe_current(
+            &lease(1),
+            locator(),
+            [0x05; 32],
+            &mut port,
+            MIN_CONFIRMATIONS,
+            NOW,
+        )
         .unwrap_or_else(|_| panic!("finalize"));
     assert_eq!(finalized.stage, XmrTxStageV1::Final);
     let facts = finalized.finality.unwrap_or_else(|| panic!("facts"));
@@ -222,7 +236,14 @@ fn observe_refuses_zero_depth_and_absent_changes_nothing() {
         Err(XmrActuatorErrorV1::InvalidInput)
     );
     let view = actuator
-        .observe_current(&lease(1), locator(), [0x07; 32], &mut port, MIN_CONFIRMATIONS, NOW)
+        .observe_current(
+            &lease(1),
+            locator(),
+            [0x07; 32],
+            &mut port,
+            MIN_CONFIRMATIONS,
+            NOW,
+        )
         .unwrap_or_else(|_| panic!("observe"));
     assert_eq!(view.stage, XmrTxStageV1::Signed);
     assert_eq!(view.revision, 1);
@@ -272,7 +293,14 @@ fn reconcile_absent_with_unspent_key_image_records_the_statement() {
         .unwrap_or_else(|_| panic!("broadcast"));
     let mut port = MockObservation::default();
     let outcome = actuator
-        .reconcile_takeover(&lease(2), locator(), [0x0C; 32], &mut port, MIN_CONFIRMATIONS, NOW)
+        .reconcile_takeover(
+            &lease(2),
+            locator(),
+            [0x0C; 32],
+            &mut port,
+            MIN_CONFIRMATIONS,
+            NOW,
+        )
         .unwrap_or_else(|_| panic!("reconcile"));
     assert_eq!(outcome.kind, XmrReconciliationKindV1::KeyImageUnspentAbsent);
     assert_eq!(outcome.view.stage, XmrTxStageV1::Reconciled);
@@ -297,7 +325,14 @@ fn reconcile_spent_key_image_with_absent_txid_stays_unknown_and_writes_nothing()
         ..Default::default()
     };
     let outcome = actuator
-        .reconcile_takeover(&lease(2), locator(), [0x0E; 32], &mut port, MIN_CONFIRMATIONS, NOW)
+        .reconcile_takeover(
+            &lease(2),
+            locator(),
+            [0x0E; 32],
+            &mut port,
+            MIN_CONFIRMATIONS,
+            NOW,
+        )
         .unwrap_or_else(|_| panic!("reconcile"));
     assert_eq!(outcome.kind, XmrReconciliationKindV1::Unknown);
     assert_eq!(outcome.view.stage, XmrTxStageV1::SendAttempted);
@@ -315,7 +350,14 @@ fn reconcile_finds_inclusion_and_promotes_to_final_with_facts() {
         ..Default::default()
     };
     let outcome = actuator
-        .reconcile_takeover(&lease(2), locator(), [0x0F; 32], &mut port, MIN_CONFIRMATIONS, NOW)
+        .reconcile_takeover(
+            &lease(2),
+            locator(),
+            [0x0F; 32],
+            &mut port,
+            MIN_CONFIRMATIONS,
+            NOW,
+        )
         .unwrap_or_else(|_| panic!("reconcile"));
     assert_eq!(outcome.kind, XmrReconciliationKindV1::Final);
     assert_eq!(outcome.view.stage, XmrTxStageV1::Final);
@@ -338,12 +380,26 @@ fn reconcile_absence_never_downgrades_recorded_evidence() {
         ..Default::default()
     };
     actuator
-        .observe_current(&lease(1), locator(), [0x10; 32], &mut port, MIN_CONFIRMATIONS, NOW)
+        .observe_current(
+            &lease(1),
+            locator(),
+            [0x10; 32],
+            &mut port,
+            MIN_CONFIRMATIONS,
+            NOW,
+        )
         .unwrap_or_else(|_| panic!("observe"));
     port.inclusion = None;
     assert_eq!(
         actuator
-            .reconcile_takeover(&lease(2), locator(), [0x11; 32], &mut port, MIN_CONFIRMATIONS, NOW)
+            .reconcile_takeover(
+                &lease(2),
+                locator(),
+                [0x11; 32],
+                &mut port,
+                MIN_CONFIRMATIONS,
+                NOW
+            )
             .map(|outcome| outcome.kind),
         Err(XmrActuatorErrorV1::Conflict)
     );
@@ -358,7 +414,14 @@ fn reconcile_refuses_when_the_boundary_is_dark() {
     };
     assert_eq!(
         actuator
-            .reconcile_takeover(&lease(2), locator(), [0x12; 32], &mut port, MIN_CONFIRMATIONS, NOW)
+            .reconcile_takeover(
+                &lease(2),
+                locator(),
+                [0x12; 32],
+                &mut port,
+                MIN_CONFIRMATIONS,
+                NOW
+            )
             .map(|outcome| outcome.kind),
         Err(XmrActuatorErrorV1::ObservationUnavailable)
     );
@@ -369,7 +432,9 @@ fn retained_bytes_round_trip_and_custody_digest_binds_them() {
     let (_dir, actuator) = prepared();
     let view = actuator.view(locator()).unwrap_or_else(|_| panic!("view"));
     assert_eq!(
-        actuator.retained(locator()).unwrap_or_else(|_| panic!("retained")),
+        actuator
+            .retained(locator())
+            .unwrap_or_else(|_| panic!("retained")),
         raw()
     );
     assert_eq!(

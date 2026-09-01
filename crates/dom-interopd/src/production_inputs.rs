@@ -34,16 +34,6 @@ use participant_binding::{
 use relay::auth::{RosterMemberV1, RosterRegistryV1, RosterSnapshotV1};
 use relay::SenderRoleV1;
 use route_composer::ComposedBindingV2;
-use solana_profile::{
-    validate_setup as validate_solana_setup, SolanaAdapterProfileV1, SolanaAssetV1,
-    SolanaNetwork as SolanaAdapterNetworkV1, SolanaSetupBindingV1, ValidatedSolanaSetup,
-};
-use solana_types::SolanaPubkey;
-use xmr_dleq_sigma::{BoundCrossCurveProofV1, CrossCurveProofBytes, CrossCurvePublicClaim};
-use xmr_setup_profile::{
-    validate_setup as validate_xmr_setup, ValidatedXmrSetup, XmrAdapterProfileV1, XmrNetwork,
-    XmrSetupBindingV1,
-};
 use route_executor::{
     CanonicalCodecV1, CommitOutcomeV1, DurableRouteStoreV1, FrozenRouteAdmissionCheckpointV2,
     LegIdV1, RouteEventV1, RouteIdV1, RouteStoreErrorV1,
@@ -53,6 +43,16 @@ use route_time_anchor::{
     FrozenRouteTimeProofCheckpointV2, RouteTimeAnchorErrorV2, RouteTimeAnchorStoreConfigV2,
     RouteTimeEvidenceV2, RouteTimeEvidenceVerificationContextV2, RouteTimePolicyV2,
     RouteTimePolicyVerificationContextV2, SignedRouteTimeEvidenceV2, SignedRouteTimePolicyV2,
+};
+use solana_profile::{
+    validate_setup as validate_solana_setup, SolanaAdapterProfileV1, SolanaAssetV1,
+    SolanaNetwork as SolanaAdapterNetworkV1, SolanaSetupBindingV1, ValidatedSolanaSetup,
+};
+use solana_types::SolanaPubkey;
+use xmr_dleq_sigma::{BoundCrossCurveProofV1, CrossCurveProofBytes, CrossCurvePublicClaim};
+use xmr_setup_profile::{
+    validate_setup as validate_xmr_setup, ValidatedXmrSetup, XmrAdapterProfileV1, XmrNetwork,
+    XmrSetupBindingV1,
 };
 
 use crate::admission::{
@@ -97,7 +97,8 @@ pub const MAX_PRODUCTION_PARTICIPANT_BUNDLE_EXTENDED_BYTES_V1: usize =
         + 4
         + 2 * (4 + SOLANA_LEG_SETUP_FIXED_BYTES_V1 + xmr_dleq_sigma::MAX_PROOF_BYTES)
         + 4
-        + 2 * (4 + XMR_LEG_SETUP_FIXED_BYTES_V1
+        + 2 * (4
+            + XMR_LEG_SETUP_FIXED_BYTES_V1
             + xmr_dleq_sigma::MAX_PROOF_BYTES
             + xmr_live_sidecar_api::MAX_DESTINATION_BYTES);
 /// Fixed-width prefix of one Monero leg setup: adapter profile plus every
@@ -1087,8 +1088,7 @@ impl ProductionXmrLegSetupV1 {
         let funding_tx_hash = cursor.take::<32>()?;
         let expected_amount_piconero = u64::from_be_bytes(cursor.take::<8>()?);
         let destination_len = usize::from(cursor.u16()?);
-        if destination_len == 0 || destination_len > xmr_live_sidecar_api::MAX_DESTINATION_BYTES
-        {
+        if destination_len == 0 || destination_len > xmr_live_sidecar_api::MAX_DESTINATION_BYTES {
             return Err(ProductionInputErrorV1::InvalidParticipantBundle);
         }
         let destination = String::from_utf8(cursor.bytes(destination_len)?.to_vec())
@@ -2899,9 +2899,8 @@ fn authenticate_participant_bundle(
                 // The DLEQ inside the binding is the authentication anchor:
                 // validate_setup verifies it against the frozen terms, the
                 // adaptor point, the closed role byte and the derived PDAs.
-                let setup =
-                    validate_solana_setup(&leg.profile, terms, leg.binding.clone())
-                        .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?;
+                let setup = validate_solana_setup(&leg.profile, terms, leg.binding.clone())
+                    .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?;
                 solana_sessions[index] = Some(AuthenticatedSolanaSessionBindingsV1 {
                     position,
                     network_id: context.registry.manifest().network_id,
@@ -2937,9 +2936,8 @@ fn authenticate_participant_bundle(
                 // validate_setup verifies it against the frozen terms, the
                 // adaptor point and the closed shared-spend role, under the
                 // ratified mechanism (no admission token).
-                let setup =
-                    validate_xmr_setup(terms, &leg.profile, leg.binding.clone(), None)
-                        .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?;
+                let setup = validate_xmr_setup(terms, &leg.profile, leg.binding.clone(), None)
+                    .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?;
                 monero_sessions[index] = Some(AuthenticatedXmrSessionBindingsV1 {
                     position,
                     network_id: context.registry.manifest().network_id,

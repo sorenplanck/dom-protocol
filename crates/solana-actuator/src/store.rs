@@ -27,13 +27,15 @@ type Result<T> = core::result::Result<T, SolanaActuatorErrorV1>;
 pub fn custody_digest_v1(raw_transaction: &[u8]) -> Result<Digest32> {
     digest_parts(
         CUSTODY_DOMAIN_V1,
-        &[&(raw_transaction.len() as u64).to_be_bytes(), raw_transaction],
+        &[
+            &(raw_transaction.len() as u64).to_be_bytes(),
+            raw_transaction,
+        ],
     )
 }
 
 fn digest_parts(domain: &[u8], parts: &[&[u8]]) -> Result<Digest32> {
-    let mut hasher =
-        Blake2bVar::new(32).map_err(|_| SolanaActuatorErrorV1::StorageUnavailable)?;
+    let mut hasher = Blake2bVar::new(32).map_err(|_| SolanaActuatorErrorV1::StorageUnavailable)?;
     hasher.update(domain);
     for part in parts {
         hasher.update(&(part.len() as u64).to_be_bytes());
@@ -293,7 +295,8 @@ impl SolanaOperationStoreV1 {
                         .map_err(|_| SolanaActuatorErrorV1::Corrupt)?,
                     step.finality.map(|f| f.final_blockhash.0.to_vec()),
                     step.finality.map(|f| f.final_evidence_digest.to_vec()),
-                    step.reconciliation.map(|k| i64::from(reconciliation_tag(k))),
+                    step.reconciliation
+                        .map(|k| i64::from(reconciliation_tag(k))),
                     locator.settlement_id.as_slice(),
                     i64::from(locator.kind.tag()),
                 ],
@@ -422,15 +425,15 @@ fn read_row(
     let blockhash_bytes: Digest32 = blockhash
         .try_into()
         .map_err(|_| SolanaActuatorErrorV1::Corrupt)?;
-    let stage = SolanaTxStageV1::from_tag(
-        u8::try_from(stage).map_err(|_| SolanaActuatorErrorV1::Corrupt)?,
-    )
-    .ok_or(SolanaActuatorErrorV1::Corrupt)?;
+    let stage =
+        SolanaTxStageV1::from_tag(u8::try_from(stage).map_err(|_| SolanaActuatorErrorV1::Corrupt)?)
+            .ok_or(SolanaActuatorErrorV1::Corrupt)?;
     let finality = match (final_slot, final_blockhash, final_evidence) {
         (Some(slot), Some(hash), Some(evidence)) => Some(SolanaFinalityFactsV1 {
             final_slot: u64::try_from(slot).map_err(|_| SolanaActuatorErrorV1::Corrupt)?,
             final_blockhash: SolanaHash(
-                hash.try_into().map_err(|_| SolanaActuatorErrorV1::Corrupt)?,
+                hash.try_into()
+                    .map_err(|_| SolanaActuatorErrorV1::Corrupt)?,
             ),
             final_evidence_digest: evidence
                 .try_into()
@@ -447,9 +450,7 @@ fn read_row(
         return Err(SolanaActuatorErrorV1::Corrupt);
     }
     let reconciliation = match reconciliation {
-        Some(value) => {
-            Some(reconciliation_from_tag(value).ok_or(SolanaActuatorErrorV1::Corrupt)?)
-        }
+        Some(value) => Some(reconciliation_from_tag(value).ok_or(SolanaActuatorErrorV1::Corrupt)?),
         None => None,
     };
     Ok(Some(RetainedRowV1 {

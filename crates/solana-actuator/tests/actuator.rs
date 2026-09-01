@@ -148,7 +148,15 @@ fn fixture() -> (tempfile::TempDir, DurableSolanaActuatorV1) {
 fn prepared() -> (tempfile::TempDir, DurableSolanaActuatorV1) {
     let (dir, actuator) = fixture();
     actuator
-        .prepare_signed(&lease(1), locator(), signature(), &raw(), blockhash(), 500, NOW)
+        .prepare_signed(
+            &lease(1),
+            locator(),
+            signature(),
+            &raw(),
+            blockhash(),
+            500,
+            NOW,
+        )
         .unwrap_or_else(|_| panic!("prepare"));
     (dir, actuator)
 }
@@ -161,7 +169,15 @@ fn pool(node: &Arc<MockRpc>) -> SolanaRpcPool<MockRpc> {
 fn prepare_is_idempotent_on_identical_replay_and_conflicts_on_divergence() {
     let (_dir, actuator) = prepared();
     let replay = actuator
-        .prepare_signed(&lease(1), locator(), signature(), &raw(), blockhash(), 500, NOW)
+        .prepare_signed(
+            &lease(1),
+            locator(),
+            signature(),
+            &raw(),
+            blockhash(),
+            500,
+            NOW,
+        )
         .unwrap_or_else(|_| panic!("replay"));
     assert_eq!(replay.revision, 1);
     assert_eq!(replay.stage, SolanaTxStageV1::Signed);
@@ -169,7 +185,15 @@ fn prepare_is_idempotent_on_identical_replay_and_conflicts_on_divergence() {
     let mut other = raw();
     other[0] ^= 1;
     assert_eq!(
-        actuator.prepare_signed(&lease(1), locator(), signature(), &other, blockhash(), 500, NOW),
+        actuator.prepare_signed(
+            &lease(1),
+            locator(),
+            signature(),
+            &other,
+            blockhash(),
+            500,
+            NOW
+        ),
         Err(SolanaActuatorErrorV1::Conflict)
     );
 }
@@ -182,11 +206,27 @@ fn prepare_refuses_out_of_bounds_inputs_and_expired_leases() {
         kind: SolanaOperationKindV1::Fund,
     };
     assert_eq!(
-        actuator.prepare_signed(&lease(1), zero_id, signature(), &raw(), blockhash(), 500, NOW),
+        actuator.prepare_signed(
+            &lease(1),
+            zero_id,
+            signature(),
+            &raw(),
+            blockhash(),
+            500,
+            NOW
+        ),
         Err(SolanaActuatorErrorV1::InvalidInput)
     );
     assert_eq!(
-        actuator.prepare_signed(&lease(1), locator(), signature(), &[], blockhash(), 500, NOW),
+        actuator.prepare_signed(
+            &lease(1),
+            locator(),
+            signature(),
+            &[],
+            blockhash(),
+            500,
+            NOW
+        ),
         Err(SolanaActuatorErrorV1::InvalidInput)
     );
     assert_eq!(
@@ -214,7 +254,15 @@ fn prepare_refuses_out_of_bounds_inputs_and_expired_leases() {
         Err(SolanaActuatorErrorV1::InvalidInput)
     );
     assert_eq!(
-        actuator.prepare_signed(&lease(1), locator(), signature(), &raw(), blockhash(), 0, NOW),
+        actuator.prepare_signed(
+            &lease(1),
+            locator(),
+            signature(),
+            &raw(),
+            blockhash(),
+            0,
+            NOW
+        ),
         Err(SolanaActuatorErrorV1::InvalidInput)
     );
     assert_eq!(

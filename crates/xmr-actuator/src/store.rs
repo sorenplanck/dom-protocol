@@ -26,7 +26,10 @@ type Result<T> = core::result::Result<T, XmrActuatorErrorV1>;
 pub fn custody_digest_v1(raw_transaction: &[u8]) -> Result<Digest32> {
     digest_parts(
         CUSTODY_DOMAIN_V1,
-        &[&(raw_transaction.len() as u64).to_be_bytes(), raw_transaction],
+        &[
+            &(raw_transaction.len() as u64).to_be_bytes(),
+            raw_transaction,
+        ],
     )
 }
 
@@ -275,7 +278,8 @@ impl XmrOperationStoreV1 {
                         .map_err(|_| XmrActuatorErrorV1::Corrupt)?,
                     step.finality.map(|f| f.final_block_hash.to_vec()),
                     step.finality.map(|f| f.final_evidence_digest.to_vec()),
-                    step.reconciliation.map(|k| i64::from(reconciliation_tag(k))),
+                    step.reconciliation
+                        .map(|k| i64::from(reconciliation_tag(k))),
                     locator.settlement_id.as_slice(),
                     i64::from(locator.kind.tag()),
                 ],

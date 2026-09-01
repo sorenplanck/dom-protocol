@@ -398,10 +398,12 @@ impl<R: SolanaRpc, C: ProductionSolanaChildClockV1> ProductionSolanaChildPortV1<
                 solana_program_client::fund(&self.setup, None)
                     .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
             ]),
-            (SettlementActionV1::Claim, Some(secret)) => {
-                Ok(vec![solana_program_client::claim(&self.setup, secret, None)
-                    .map_err(|_| ChildAuthorityRefusalV1::Conflict)?])
-            }
+            (SettlementActionV1::Claim, Some(secret)) => Ok(vec![solana_program_client::claim(
+                &self.setup,
+                secret,
+                None,
+            )
+            .map_err(|_| ChildAuthorityRefusalV1::Conflict)?]),
             (SettlementActionV1::Refund, None) => {
                 Ok(vec![solana_program_client::refund(&self.setup, None)
                     .map_err(|_| ChildAuthorityRefusalV1::Conflict)?])
@@ -417,8 +419,7 @@ impl<R: SolanaRpc, C: ProductionSolanaChildClockV1> ProductionSolanaChildPortV1<
             .finalized_block_height_floor(MAX_QUORUM_HEIGHT_SPREAD_V1)
             .map_err(|_| ChildAuthorityRefusalV1::Unavailable)?;
         for node in self.pool.nodes() {
-            if let Ok((hash, last_valid_block_height)) = node.get_latest_blockhash_with_validity()
-            {
+            if let Ok((hash, last_valid_block_height)) = node.get_latest_blockhash_with_validity() {
                 if hash.0 != [0; 32]
                     && last_valid_block_height > floor
                     && last_valid_block_height <= floor.saturating_add(MAX_BLOCKHASH_HORIZON_V1)
@@ -608,7 +609,8 @@ impl<R: SolanaRpc, C: ProductionSolanaChildClockV1> ProductionSolanaChildPortV1<
             }
             None => None,
         };
-        let result = self.materialize_with_secret(action, lease, locator, claim_secret_arg, authority);
+        let result =
+            self.materialize_with_secret(action, lease, locator, claim_secret_arg, authority);
         claim_secret.zeroize();
         result
     }
@@ -629,12 +631,10 @@ impl<R: SolanaRpc, C: ProductionSolanaChildClockV1> ProductionSolanaChildPortV1<
                 // Idempotent reopen: the exact bytes are already retained.
                 // Re-verify custody against the authenticated instruction
                 // set at the retained blockhash before answering.
-                let plan =
-                    build_legacy_message(fee_payer, view.recent_blockhash, &instructions)
-                        .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
-                let expected =
-                    assemble_signed_transaction(&plan, &[(fee_payer, view.signature)])
-                        .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
+                let plan = build_legacy_message(fee_payer, view.recent_blockhash, &instructions)
+                    .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
+                let expected = assemble_signed_transaction(&plan, &[(fee_payer, view.signature)])
+                    .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
                 let retained = self.retained(locator).map_err(map_actuator_error)?;
                 if expected != retained {
                     zeroize_instruction_data(&mut instructions);
@@ -844,11 +844,9 @@ impl<R: SolanaRpc, C: ProductionSolanaChildClockV1> ProductionSettlementChildPor
                         .map_err(|_| ChildAuthorityRefusalV1::Conflict)?,
                 })
             }
-            SolanaReconciliationKindV1::Observed | SolanaReconciliationKindV1::Final => {
-                Ok(ChildReconciliationOutcomeV1::Externalized(
-                    Self::externalized_receipt(dispatch)?,
-                ))
-            }
+            SolanaReconciliationKindV1::Observed | SolanaReconciliationKindV1::Final => Ok(
+                ChildReconciliationOutcomeV1::Externalized(Self::externalized_receipt(dispatch)?),
+            ),
             SolanaReconciliationKindV1::Unknown => {
                 if outcome.view.stage == SolanaTxStageV1::FinalityInvalidated {
                     // Landed and failed: the bytes are public even though the
