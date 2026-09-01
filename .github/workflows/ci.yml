@@ -10,14 +10,14 @@ name: CI
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, mainnetswap]
     paths-ignore:
       - '**/*.md'
       - 'docs/**'
       - 'LICENSE'
       - '.gitignore'
   pull_request:
-    branches: [main]
+    branches: [main, mainnetswap]
     paths-ignore:
       - '**/*.md'
       - 'docs/**'
@@ -272,11 +272,27 @@ jobs:
   interop-real-backend:
     name: "interop: real cryptographic backend + layer guards"
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # The interop absorption tripled this workspace. A cold-cache run of the
+    # real-backend suites alone exceeds the previous 45-minute budget, which
+    # cancelled the job after every one of its gates had already passed.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+
+      # Every other build job here caches cargo; this one compiled the whole
+      # tree cold on every run. Same gates, nothing weakened.
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-interop-real-backend-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-interop-real-backend-
 
       # G-F2 requires the full F1 regression to stay green against the REAL
       # cryptographic backend rather than the disabled one. The suites live in

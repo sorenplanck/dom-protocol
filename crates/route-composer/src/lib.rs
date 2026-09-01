@@ -99,6 +99,7 @@ pub use dom_final_claim_binding::{
     ComposedFinalClaimRolePlanInputV1, ComposedFinalClaimRolePlanV1, ComposedSettlementLegV1,
     FinalClaimBindingError, FinalClaimRevealModeV1, FinalClaimRoleSelectionV1,
     FinalClaimSecretSourceScopeInputV1, FinalClaimSecretSourceScopeV1, FinalClaimSecretSourceV1,
+    COMPOSED_FINAL_CLAIM_ROLE_PLAN_ENCODED_LEN, FINAL_CLAIM_SECRET_SOURCE_SCOPE_ENCODED_LEN,
 };
 use kaystra_core::state::SettlementState;
 use kaystra_core::terms::SettlementTermsV1;

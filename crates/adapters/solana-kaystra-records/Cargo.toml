@@ -1,0 +1,12 @@
+[package]
+name = "solana-kaystra-records"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+thiserror = { workspace = true }
+kaystra-core = { path = "../../kaystra-core" }
+solana-evidence = { path = "../solana-evidence" }

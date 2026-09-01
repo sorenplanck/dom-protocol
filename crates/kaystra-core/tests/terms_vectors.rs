@@ -181,6 +181,71 @@ fn invalid_mutations() -> Vec<(&'static str, Vec<u8>, TermsError)> {
     out
 }
 
+/// The DOM leg's mechanism byte, derived from the DOM role byte and the fixed
+/// field order `role || chain_id(32) || asset_id(32) || amount(16) ||
+/// beneficiary(32) || refund_to(32)`.
+const OFF_DOM_MECHANISM: usize = OFF_DOM_ROLE + 1 + 32 + 32 + 16 + 32 + 32;
+
+#[test]
+fn the_cross_curve_mechanism_round_trips_and_an_unknown_tag_still_fails_closed() {
+    let mut terms = valid_minimal();
+    terms.counterparty_leg.mechanism = LockMechanism::CrossCurveSharedSpend;
+    let bytes = terms.canonical_bytes().expect("valid encodes");
+    assert_eq!(
+        SettlementTermsV1::decode(&bytes).expect("decodes"),
+        terms,
+        "0x05 must survive the canonical round trip"
+    );
+
+    // The byte after the last ratified tag is still refused. Adding a
+    // mechanism widens the frozen set by exactly one value, never opens it.
+    let base = valid_minimal().canonical_bytes().expect("valid encodes");
+    assert_eq!(base[OFF_DOM_MECHANISM], LockMechanism::DomAdaptor2of2 as u8);
+    let mut unknown = base.clone();
+    unknown[OFF_DOM_MECHANISM] = 0x07;
+    assert_eq!(
+        SettlementTermsV1::decode(&unknown).unwrap_err(),
+        TermsError::UnknownTag
+    );
+
+    // And the new tags decode where the old ones do, at the same offset.
+    for mechanism in [
+        LockMechanism::CrossCurveSharedSpend,
+        LockMechanism::CrossCurveConditionLock,
+    ] {
+        let mut cross_curve = base.clone();
+        cross_curve[OFF_DOM_MECHANISM] = mechanism as u8;
+        assert_eq!(
+            SettlementTermsV1::decode(&cross_curve)
+                .expect("decodes")
+                .dom_leg
+                .mechanism,
+            mechanism
+        );
+    }
+}
+
+#[test]
+fn adding_a_mechanism_does_not_move_any_frozen_terms_hash() {
+    // The whole argument for leaving TERMS_VERSION at 1 is that terms which do
+    // not use the new mechanism encode and hash exactly as before. The frozen
+    // vectors are the evidence, so this asserts it directly rather than
+    // relying on the vector test noticing.
+    for (hex_name, hash_name, terms) in [
+        ("valid-minimal.hex", "valid-minimal.hash", valid_minimal()),
+        ("valid-full.hex", "valid-full.hash", valid_full()),
+    ] {
+        assert_eq!(
+            terms.canonical_bytes().expect("encodes"),
+            read_hex(hex_name)
+        );
+        assert_eq!(
+            terms.terms_hash().expect("hashes").to_vec(),
+            read_hex(hash_name)
+        );
+    }
+}
+
 #[test]
 fn valid_vectors_are_frozen_and_roundtrip() {
     for (hex_name, hash_name, terms) in [
@@ -260,6 +325,7 @@ fn arb_mechanism() -> impl Strategy<Value = LockMechanism> {
         Just(LockMechanism::ConditionLock),
         Just(LockMechanism::SchnorrAdaptor),
         Just(LockMechanism::HashlockFallback),
+        Just(LockMechanism::CrossCurveSharedSpend),
     ]
 }
 

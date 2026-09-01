@@ -26,10 +26,6 @@ use crate::production_relay_stage12::ProductionRelayStage12OwnerV1;
 /// Redacted refusal from the productive F7/M.8 composition boundary.
 #[derive(Debug, thiserror::Error)]
 #[expect(
-    dead_code,
-    reason = "frozen F7-to-M8 settlement round surface; fails the build when first wired"
-)]
-#[expect(
     clippy::enum_variant_names,
     reason = "fail-closed refusal naming is the daemon-wide convention"
 )]
@@ -65,10 +61,6 @@ impl From<ProductionContractsPostAnchorErrorV2> for ProductionF7M8ErrorV2 {
 /// presented again, preventing a route-local handoff from being transplanted
 /// to the peer signer.
 #[must_use = "the local Bitcoin M.8 authority must reach its participant signer"]
-#[expect(
-    dead_code,
-    reason = "frozen F7-to-M8 settlement round surface; fails the build when first wired"
-)]
 pub(crate) struct ProductionLocalBitcoinM8AuthorizationV2 {
     authorization: AnchoredCrossChainWindowV1,
     leg: LegIdV1,
@@ -109,10 +101,6 @@ impl ProductionLocalBitcoinM8AuthorizationV2 {
 /// F7 validation and select its own local capability; a future BTC DSC1 edge
 /// needs a separate fully bound canonical type.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[expect(
-    dead_code,
-    reason = "frozen F7-to-M8 settlement round surface; fails the build when first wired"
-)]
 pub(crate) struct ProductionPeerBitcoinM8ComparisonV2 {
     settlement_terms_hash: [u8; 32],
     window: CrossChainWindowV1,
@@ -165,10 +153,6 @@ impl ProductionPeerBitcoinM8ComparisonV2 {
 
 /// Participant-separated Bitcoin output of the unique F7 aggregate.
 #[must_use = "the local capability and peer public result must be routed"]
-#[expect(
-    dead_code,
-    reason = "frozen F7-to-M8 settlement round surface; fails the build when first wired"
-)]
 pub(crate) struct ProductionBitcoinM8ParticipantHandoffV2 {
     local: ProductionLocalBitcoinM8AuthorizationV2,
     peer_comparison: ProductionPeerBitcoinM8ComparisonV2,
@@ -190,19 +174,11 @@ impl ProductionBitcoinM8ParticipantHandoffV2 {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[expect(
-    dead_code,
-    reason = "frozen F7-to-M8 settlement round surface; fails the build when first wired"
-)]
 enum LocalBitcoinAuthorizationSideV2 {
     Maker,
     Taker,
 }
 
-#[expect(
-    dead_code,
-    reason = "frozen F7-to-M8 settlement round surface; fails the build when first wired"
-)]
 const fn participant_authorization_selection(
     role: BitcoinParticipantRoleV1,
 ) -> (LocalBitcoinAuthorizationSideV2, BitcoinParticipantRoleV1) {
@@ -223,10 +199,6 @@ const fn participant_authorization_selection(
 /// The Contracts capability and participant-separated Bitcoin handoff remain
 /// move-only. No peer network authorization is emitted by this type.
 #[must_use = "the unique F7 aggregate must reach both settlement owners"]
-#[expect(
-    dead_code,
-    reason = "frozen F7-to-M8 settlement round surface; fails the build when first wired"
-)]
 pub(crate) struct ProductionF7M8ContractsIssuedV2 {
     contracts: ProductionContractsPostAnchorV2,
     bitcoin: ProductionBitcoinM8ParticipantHandoffV2,

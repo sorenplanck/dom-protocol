@@ -96,18 +96,7 @@ impl ProductionDomChildClockV1 for SystemProductionDomChildClockV1 {
 /// DOM Stores under the live participant lease.
 pub(crate) struct AuthenticatedDomDispatchCallV1 {
     binding: DomSettlementChildBindingV1,
-    #[expect(
-        dead_code,
-        reason = "retained surface not yet wired by the stage-7 composition root"
-    )]
     coordinator_attempt_id: Digest32,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "retained surface not yet wired by the stage-7 composition root"
-        )
-    )]
     request_digest: Digest32,
     refund_context: Option<DomTransactionValidationContextV1>,
 }
@@ -151,18 +140,7 @@ impl AuthenticatedDomDispatchCallV1 {
 /// Move-only proof for an exact reconciliation request.
 pub(crate) struct AuthenticatedDomReconciliationCallV1 {
     binding: DomSettlementChildBindingV1,
-    #[expect(
-        dead_code,
-        reason = "retained surface not yet wired by the stage-7 composition root"
-    )]
     coordinator_attempt_id: Digest32,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "retained surface not yet wired by the stage-7 composition root"
-        )
-    )]
     request_digest: Digest32,
     refund_context: Option<DomTransactionValidationContextV1>,
 }
@@ -624,10 +602,6 @@ impl ProductionDomF7ScannerAuthorityV1 {
 
     /// Runs the only productive F7 V2 verifier against the child-owned
     /// runtime after both funding transactions have canonical anchors.
-    #[expect(
-        dead_code,
-        reason = "retained surface not yet wired by the stage-7 composition root"
-    )]
     pub(crate) fn verify_f7_route_anchor_authority_v2(
         &self,
         request: F7AnchorValidationRequestV2<'_>,
@@ -2144,6 +2118,8 @@ const fn face_tag(value: SettlementFaceV1) -> u8 {
         SettlementFaceV1::Dom => 1,
         SettlementFaceV1::Evm => 2,
         SettlementFaceV1::Bitcoin => 3,
+        SettlementFaceV1::Monero => 4,
+        SettlementFaceV1::Solana => 5,
     }
 }
 

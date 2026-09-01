@@ -43,6 +43,32 @@ production = [
     "dep:dom-vault",
     "dom-vault/real-dom-adaptor",
     "dep:evm-actuator",
+    "dep:solana-delivery",
+    "dep:solana-delivery-sqlite",
+    "dep:solana-escrow-wire",
+    "dep:solana-observer",
+    "dep:solana-actuator",
+    "dep:solana-profile",
+    "dep:solana-program-attestation",
+    "dep:solana-program-client",
+    "dep:solana-rpc",
+    "dep:solana-rpc-pool",
+    "dep:solana-transaction-builder",
+    "dep:solana-types",
+    "dep:xmr-delivery",
+    "dep:xmr-delivery-sqlite",
+    "dep:xmr-dleq-sigma",
+    "dep:xmr-actuator",
+    "dep:xmr-live-sidecar-api",
+    "dep:xmr-observer",
+    "dep:xmr-raw-tx-verify",
+    "dep:xmr-refund-adaptor",
+    "dep:xmr-refund-policy",
+    "dep:xmr-rpc-broadcast-blocking",
+    "dep:xmr-secret-store",
+    "dep:xmr-setup-profile",
+    "dep:xmr-sidecar-auth",
+    "dep:xmr-spend-port",
     "dep:fs2",
     "dep:k256",
     "dep:f6-engine",
@@ -133,6 +159,32 @@ dom-scriptless-store = { path = "../dom-scriptless-store", default-features = fa
 dom-scriptless-transport = { path = "../dom-scriptless-transport", optional = true }
 dom-vault = { path = "../dom-vault", default-features = false, optional = true }
 evm-actuator = { path = "../evm-actuator", default-features = false, optional = true }
+solana-delivery = { path = "../adapters/solana-delivery", optional = true }
+solana-delivery-sqlite = { path = "../adapters/solana-delivery-sqlite", optional = true }
+solana-escrow-wire = { path = "../adapters/solana-escrow-wire", optional = true }
+solana-observer = { path = "../adapters/solana-observer", optional = true }
+solana-actuator = { path = "../solana-actuator", optional = true }
+solana-profile = { path = "../adapters/solana-profile", optional = true }
+solana-program-attestation = { path = "../adapters/solana-program-attestation", optional = true }
+solana-program-client = { path = "../adapters/solana-program-client", optional = true }
+solana-rpc = { path = "../adapters/solana-rpc", optional = true }
+solana-rpc-pool = { path = "../adapters/solana-rpc-pool", optional = true }
+solana-transaction-builder = { path = "../adapters/solana-transaction-builder", optional = true }
+solana-types = { path = "../adapters/solana-types", optional = true }
+xmr-delivery = { path = "../adapters/xmr-delivery", optional = true }
+xmr-delivery-sqlite = { path = "../adapters/xmr-delivery-sqlite", optional = true }
+xmr-dleq-sigma = { path = "../adapters/xmr-dleq-sigma", optional = true }
+xmr-actuator = { path = "../xmr-actuator", optional = true }
+xmr-live-sidecar-api = { path = "../adapters/xmr-live-sidecar-api", optional = true }
+xmr-observer = { path = "../adapters/xmr-observer", optional = true }
+xmr-raw-tx-verify = { path = "../adapters/xmr-raw-tx-verify", optional = true }
+xmr-refund-adaptor = { path = "../adapters/xmr-refund-adaptor", optional = true }
+xmr-refund-policy = { path = "../adapters/xmr-refund-policy", optional = true }
+xmr-rpc-broadcast-blocking = { path = "../adapters/xmr-rpc-broadcast-blocking", optional = true }
+xmr-secret-store = { path = "../adapters/xmr-secret-store", optional = true }
+xmr-setup-profile = { path = "../adapters/xmr-setup-profile", optional = true }
+xmr-sidecar-auth = { path = "../adapters/xmr-sidecar-auth", optional = true }
+xmr-spend-port = { path = "../adapters/xmr-spend-port", optional = true }
 nix = { version = "=0.31.3", default-features = false, features = ["pthread", "signal"], optional = true }
 relay = { path = "../relay", default-features = true, optional = true }
 route-transport = { path = "../route-transport", optional = true }

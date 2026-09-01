@@ -3249,7 +3249,16 @@ fn map_reorg_error(error: RealDomError) -> DomActuatorError {
 
 fn action_for_purpose(purpose: PurposeV1) -> DomActuatorResult<DomActionV1> {
     match purpose {
-        PurposeV1::Refund => Ok(DomActionV1::PresignRefund),
+        // A refund adaptor round produces this participant's refund signing
+        // artifacts, which is exactly what `PresignRefund` authorizes: the same
+        // refund transaction, the same beneficiary, the same artifacts. What
+        // differs is that the signature is adaptor-bound and therefore reveals
+        // a witness the participant itself chose to commit, which grants no
+        // additional authority over funds and so needs no additional
+        // capability. The session store reaches the same conclusion: the refund
+        // adaptor signs under `SessionPhaseV1::RefundSigning`, against the
+        // refund template.
+        PurposeV1::Refund | PurposeV1::RefundAdaptor => Ok(DomActionV1::PresignRefund),
         PurposeV1::ClaimAdaptor => Ok(DomActionV1::PresignClaimAdaptor),
         PurposeV1::Funding => Ok(DomActionV1::BroadcastFunding),
         PurposeV1::Sponsor => Err(DomActuatorError::CapabilityMismatch),
@@ -4363,5 +4372,32 @@ mod tests {
             Err(DomActuatorError::UnsupportedFormat)
         );
         Ok(())
+    }
+
+    #[test]
+    fn the_refund_adaptor_purpose_maps_to_the_refund_signing_capability() {
+        // A refund adaptor round produces refund signing artifacts, so it is
+        // authorized by the same capability as a plain refund. Mapping it
+        // anywhere else would either invent a capability or, by failing closed,
+        // make cross-curve routes unreachable through the actuator.
+        assert_eq!(
+            action_for_purpose(PurposeV1::RefundAdaptor),
+            Ok(DomActionV1::PresignRefund)
+        );
+        assert_eq!(
+            action_for_purpose(PurposeV1::Refund),
+            Ok(DomActionV1::PresignRefund)
+        );
+        // The claim path keeps its own capability: the two are not
+        // interchangeable.
+        assert_eq!(
+            action_for_purpose(PurposeV1::ClaimAdaptor),
+            Ok(DomActionV1::PresignClaimAdaptor)
+        );
+        // Sponsor stays unauthorized.
+        assert_eq!(
+            action_for_purpose(PurposeV1::Sponsor),
+            Err(DomActuatorError::CapabilityMismatch)
+        );
     }
 }

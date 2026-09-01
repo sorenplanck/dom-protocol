@@ -111,6 +111,41 @@ pub(crate) fn production_deadline_bindings_v2(
     Ok(bindings)
 }
 
+/// Canonical derivation of one deadline timer's context digest.
+///
+/// The composition root builds the authority's admitted map with this, and
+/// whatever schedules a deadline timer must derive its context the same way:
+/// one derivation, owned here, so the authority and the scheduler can never
+/// drift apart.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "SOL/XMR settlement surface awaiting its wiring into the stage-7 composition root; fails the build when first wired"
+    )
+)]
+pub(crate) fn deadline_context_digest_v1(
+    route_id: RouteIdV1,
+    leg_tag: u8,
+    face_tag: u8,
+    terms_digest: Digest32,
+    deadline_unix_ms: u64,
+) -> Result<Digest32, AuthorityRefusalV1> {
+    let mut hash = Blake2bVar::new(32).map_err(|_| AuthorityRefusalV1::Inconsistent)?;
+    hash.update(b"DOM-INTEROPD/DEADLINE-CONTEXT/V1\0");
+    hash.update(&route_id);
+    hash.update(&[leg_tag, face_tag]);
+    hash.update(&terms_digest);
+    hash.update(&deadline_unix_ms.to_be_bytes());
+    let mut output = ZERO_DIGEST;
+    hash.finalize_variable(&mut output)
+        .map_err(|_| AuthorityRefusalV1::Inconsistent)?;
+    if output == ZERO_DIGEST {
+        return Err(AuthorityRefusalV1::Inconsistent);
+    }
+    Ok(output)
+}
+
 /// Deterministic, route-scoped authority for durable deadline delivery.
 pub(crate) struct ProductionDeadlineTimerAuthorityV1 {
     route_id: RouteIdV1,

@@ -660,14 +660,18 @@ mod tests {
     #[test]
     fn identity_accepts_only_the_closed_signed_purpose_registry() -> Result<(), CanonicalCodecError>
     {
-        for purpose in 0x01..=0x04 {
+        // 0x05 joined the closed registry with PurposeV1::RefundAdaptor
+        // (NAR-DC-P1-009 §4.1): the refund adaptor round persists its own
+        // nonces, so the store must accept exactly the same byte the signer
+        // registry ratified — and still nothing past it.
+        for purpose in 0x01..=0x05 {
             let bytes = identity_bytes(purpose);
             let identity = parse_nonce_identity(&bytes)?;
             assert_eq!(identity.purpose_byte(), purpose);
             assert_eq!(encode_nonce_identity(&identity), bytes);
         }
         assert!(parse_nonce_identity(&identity_bytes(0)).is_err());
-        for purpose in 0x05..=u8::MAX {
+        for purpose in 0x06..=u8::MAX {
             assert!(parse_nonce_identity(&identity_bytes(purpose)).is_err());
         }
         Ok(())

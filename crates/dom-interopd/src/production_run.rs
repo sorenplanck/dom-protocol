@@ -1298,6 +1298,10 @@ pub fn run_production_v1(options: &ProductionRunOptionsV1) -> Result<(), Product
         // resolves. See `PRODUCTION_KNOWN_LIMITS_V1`.
         Option::<ProductionDomPublicSecretSourceV1>::None,
         Some(bitcoin_secret_source),
+        // No Solana reextraction source is composed by this run yet: the
+        // Solana leg enters the router when the SOL/XMR children are wired
+        // into this composition root (the source itself already exists).
+        Option::<ProductionDomPublicSecretSourceV1>::None,
     )
     .map_err(|_| ProductionRunErrorV1::PlanSource)?;
 

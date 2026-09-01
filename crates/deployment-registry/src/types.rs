@@ -8,7 +8,7 @@ use blake2::{
     digest::{Update, VariableOutput},
     Blake2bVar,
 };
-use chain_profile::{ChainKindV1, ChainProfileV1};
+use chain_profile::{ChainKindV1, ChainProfileV1, MoneroNetworkV1};
 use dom_consensus::derive_chain_id;
 use dom_core::{
     configured_genesis_hash_for_network_magic, Hash256, NETWORK_MAGIC_MAINNET,
@@ -171,6 +171,36 @@ pub struct BitcoinDeploymentV1 {
     pub min_relay_fee_sat_kvb: u64,
 }
 
+/// Monero deployment facts. Deliberately narrow: the XMR leg holds no
+/// contract and no script, so the only deployment truths are which chain this
+/// is and the fee ceiling the route authorized. Everything else about a sweep
+/// is decided by the adapter profile and proved by the raw-transaction
+/// verifier.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct MoneroDeploymentV1 {
+    /// Genesis block hash of the selected Monero network — the chain identity
+    /// an observer must reproduce before any evidence from it is believed.
+    pub genesis_hash: Digest32,
+    /// Maximum route-authorized sweep fee, in piconero. Zero refuses: an
+    /// unbounded fee is an unbounded loss on the leg the operator funds.
+    pub max_fee_piconero: u64,
+}
+
+/// Solana deployment facts.
+///
+/// The program pinning (program id, programdata hash) lives in
+/// `ChainKindV1::Solana`, next to the EVM contract pinning; what remains
+/// here is the cluster identity and the fee ceiling the route authorized.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct SolanaDeploymentV1 {
+    /// Genesis blockhash of the selected cluster — the chain identity an
+    /// observer must reproduce before any evidence from it is believed.
+    pub genesis_hash: Digest32,
+    /// Maximum route-authorized transaction fee, in lamports. Zero refuses:
+    /// an unbounded fee is an unbounded loss on the leg the operator funds.
+    pub max_fee_lamports: u64,
+}
+
 /// Kind-specific deployment facts paired with a generic chain profile.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ChainDeploymentV1 {
@@ -178,6 +208,10 @@ pub enum ChainDeploymentV1 {
     Evm(EvmDeploymentV1),
     /// A Bitcoin network profile.
     Bitcoin(BitcoinDeploymentV1),
+    /// A Monero network profile.
+    Monero(MoneroDeploymentV1),
+    /// A Solana cluster profile.
+    Solana(SolanaDeploymentV1),
 }
 
 /// One counterparty profile and the deployment facts that realize it.
@@ -313,6 +347,32 @@ pub struct ResolvedBitcoinDeploymentV1 {
     asset_binding: AssetBindingV1,
 }
 
+/// Complete public Monero capability for one authenticated chain.
+/// Daemon endpoint and wallet material remain local operator authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedMoneroDeploymentV1 {
+    registry_digest: Digest32,
+    registry_epoch: u64,
+    profile_digest: Digest32,
+    asset_binding_digest: Digest32,
+    profile: ChainProfileV1,
+    deployment: MoneroDeploymentV1,
+    asset_binding: AssetBindingV1,
+}
+
+/// Complete public Solana capability for one authenticated chain.
+/// RPC endpoints and the fee-payer key remain local operator authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedSolanaDeploymentV1 {
+    registry_digest: Digest32,
+    registry_epoch: u64,
+    profile_digest: Digest32,
+    asset_binding_digest: Digest32,
+    profile: ChainProfileV1,
+    deployment: SolanaDeploymentV1,
+    asset_binding: AssetBindingV1,
+}
+
 impl RegistryManifestV1 {
     /// Validates all cross-field, uniqueness, deployment and asset rules.
     pub fn validate(&self) -> Result<()> {
@@ -334,6 +394,8 @@ impl RegistryManifestV1 {
         let mut previous_chain_id: Option<[u8; 32]> = None;
         let mut evm_identities = BTreeSet::new();
         let mut bitcoin_identities = BTreeSet::new();
+        let mut monero_identities = BTreeSet::new();
+        let mut solana_identities = BTreeSet::new();
         chains.insert(self.dom.chain_id.0);
         for entry in &self.chains {
             if entry.profile.chain_id.0 == [0u8; 32] || entry.profile.native_asset.0 == [0u8; 32] {
@@ -374,6 +436,16 @@ impl RegistryManifestV1 {
                         deployment.genesis_hash,
                         deployment.signet_challenge.clone(),
                     )) {
+                        return Err(RegistryError::DuplicateEntry);
+                    }
+                }
+                (ChainKindV1::Monero { network }, ChainDeploymentV1::Monero(deployment)) => {
+                    if !monero_identities.insert((*network as u8, deployment.genesis_hash)) {
+                        return Err(RegistryError::DuplicateEntry);
+                    }
+                }
+                (ChainKindV1::Solana { network, .. }, ChainDeploymentV1::Solana(deployment)) => {
+                    if !solana_identities.insert((*network as u8, deployment.genesis_hash)) {
                         return Err(RegistryError::DuplicateEntry);
                     }
                 }
@@ -620,7 +692,9 @@ impl<'a> ResolvedChainProfileV1<'a> {
         }
         let deployment = match &self.entry.deployment {
             ChainDeploymentV1::Evm(value) => value,
-            ChainDeploymentV1::Bitcoin(_) => return Err(RegistryError::DeploymentMismatch),
+            ChainDeploymentV1::Bitcoin(_)
+            | ChainDeploymentV1::Monero(_)
+            | ChainDeploymentV1::Solana(_) => return Err(RegistryError::DeploymentMismatch),
         };
         let (evm_chain_id, native_contract, native_hash, erc20) = match self.entry.profile.kind {
             ChainKindV1::Evm {
@@ -634,7 +708,9 @@ impl<'a> ResolvedChainProfileV1<'a> {
                 native_code_hash,
                 erc20_lock_contract,
             ),
-            ChainKindV1::Bitcoin { .. } => return Err(RegistryError::DeploymentMismatch),
+            ChainKindV1::Bitcoin { .. }
+            | ChainKindV1::Monero { .. }
+            | ChainKindV1::Solana { .. } => return Err(RegistryError::DeploymentMismatch),
         };
         let asset = self
             .registry
@@ -701,7 +777,9 @@ impl<'a> ResolvedChainProfileV1<'a> {
     pub fn bitcoin_deployment_capability(&self) -> Result<ResolvedBitcoinDeploymentV1> {
         let deployment = match &self.entry.deployment {
             ChainDeploymentV1::Bitcoin(value) => value.clone(),
-            ChainDeploymentV1::Evm(_) => return Err(RegistryError::DeploymentMismatch),
+            ChainDeploymentV1::Evm(_)
+            | ChainDeploymentV1::Monero(_)
+            | ChainDeploymentV1::Solana(_) => return Err(RegistryError::DeploymentMismatch),
         };
         let asset_binding = *self
             .registry
@@ -716,6 +794,78 @@ impl<'a> ResolvedChainProfileV1<'a> {
             .registry
             .asset_binding_digest(self.entry.profile.chain_id, self.entry.profile.native_asset)?;
         Ok(ResolvedBitcoinDeploymentV1 {
+            registry_digest: self.registry.manifest_digest,
+            registry_epoch: self.registry.manifest.epoch,
+            profile_digest,
+            asset_binding_digest,
+            profile: self.entry.profile.clone(),
+            deployment,
+            asset_binding,
+        })
+    }
+
+    /// Constructs a complete public Monero capability. Daemon endpoints and
+    /// wallet/sidecar material can only be attached by the Monero authority
+    /// after verifying these network/genesis and fee-policy facts.
+    pub fn monero_deployment_capability(&self) -> Result<ResolvedMoneroDeploymentV1> {
+        let deployment = match &self.entry.deployment {
+            ChainDeploymentV1::Monero(value) => value.clone(),
+            ChainDeploymentV1::Evm(_)
+            | ChainDeploymentV1::Bitcoin(_)
+            | ChainDeploymentV1::Solana(_) => return Err(RegistryError::DeploymentMismatch),
+        };
+        let asset_binding = *self
+            .registry
+            .resolve_asset(self.entry.profile.chain_id, self.entry.profile.native_asset)
+            .ok_or(RegistryError::InvalidAssetBinding)?;
+        let profile_digest = self
+            .entry
+            .profile
+            .profile_digest()
+            .map_err(|_| RegistryError::InvalidChainProfile)?;
+        let asset_binding_digest = self
+            .registry
+            .asset_binding_digest(self.entry.profile.chain_id, self.entry.profile.native_asset)?;
+        Ok(ResolvedMoneroDeploymentV1 {
+            registry_digest: self.registry.manifest_digest,
+            registry_epoch: self.registry.manifest.epoch,
+            profile_digest,
+            asset_binding_digest,
+            profile: self.entry.profile.clone(),
+            deployment,
+            asset_binding,
+        })
+    }
+
+    /// Constructs a complete public Solana capability. RPC endpoints and the
+    /// fee payer can only be attached by the Solana authority after verifying
+    /// these cluster/program-pinning and fee-policy facts.
+    pub fn solana_deployment_capability(&self) -> Result<ResolvedSolanaDeploymentV1> {
+        let deployment = match &self.entry.deployment {
+            ChainDeploymentV1::Solana(value) => value.clone(),
+            ChainDeploymentV1::Evm(_)
+            | ChainDeploymentV1::Bitcoin(_)
+            | ChainDeploymentV1::Monero(_) => return Err(RegistryError::DeploymentMismatch),
+        };
+        // The safety-critical half of the pinning lives in the kind; a
+        // capability is only issued for a profile that actually names it.
+        match self.entry.profile.kind {
+            ChainKindV1::Solana { .. } => {}
+            _ => return Err(RegistryError::DeploymentMismatch),
+        }
+        let asset_binding = *self
+            .registry
+            .resolve_asset(self.entry.profile.chain_id, self.entry.profile.native_asset)
+            .ok_or(RegistryError::InvalidAssetBinding)?;
+        let profile_digest = self
+            .entry
+            .profile
+            .profile_digest()
+            .map_err(|_| RegistryError::InvalidChainProfile)?;
+        let asset_binding_digest = self
+            .registry
+            .asset_binding_digest(self.entry.profile.chain_id, self.entry.profile.native_asset)?;
+        Ok(ResolvedSolanaDeploymentV1 {
             registry_digest: self.registry.manifest_digest,
             registry_epoch: self.registry.manifest.epoch,
             profile_digest,
@@ -828,6 +978,80 @@ impl ResolvedBitcoinDeploymentV1 {
     }
 }
 
+impl ResolvedMoneroDeploymentV1 {
+    /// Authenticated registry manifest digest.
+    pub const fn registry_digest(&self) -> Digest32 {
+        self.registry_digest
+    }
+
+    /// Authenticated registry epoch.
+    pub const fn registry_epoch(&self) -> u64 {
+        self.registry_epoch
+    }
+
+    /// Digest of the exact generic chain profile.
+    pub const fn profile_digest(&self) -> Digest32 {
+        self.profile_digest
+    }
+
+    /// Digest of the exact native Monero asset binding.
+    pub const fn asset_binding_digest(&self) -> Digest32 {
+        self.asset_binding_digest
+    }
+
+    /// Full authenticated Monero chain profile.
+    pub const fn profile(&self) -> &ChainProfileV1 {
+        &self.profile
+    }
+
+    /// Monero genesis and fee-policy facts.
+    pub const fn deployment(&self) -> &MoneroDeploymentV1 {
+        &self.deployment
+    }
+
+    /// Exact native Monero asset binding.
+    pub const fn asset_binding(&self) -> AssetBindingV1 {
+        self.asset_binding
+    }
+}
+
+impl ResolvedSolanaDeploymentV1 {
+    /// Authenticated registry manifest digest.
+    pub const fn registry_digest(&self) -> Digest32 {
+        self.registry_digest
+    }
+
+    /// Authenticated registry epoch.
+    pub const fn registry_epoch(&self) -> u64 {
+        self.registry_epoch
+    }
+
+    /// Digest of the exact generic chain profile.
+    pub const fn profile_digest(&self) -> Digest32 {
+        self.profile_digest
+    }
+
+    /// Digest of the exact native SOL asset binding.
+    pub const fn asset_binding_digest(&self) -> Digest32 {
+        self.asset_binding_digest
+    }
+
+    /// Full authenticated Solana chain profile.
+    pub const fn profile(&self) -> &ChainProfileV1 {
+        &self.profile
+    }
+
+    /// Solana cluster genesis and fee-policy facts.
+    pub const fn deployment(&self) -> &SolanaDeploymentV1 {
+        &self.deployment
+    }
+
+    /// Exact native SOL asset binding.
+    pub const fn asset_binding(&self) -> AssetBindingV1 {
+        self.asset_binding
+    }
+}
+
 fn validate_dom(dom: &DomDeploymentV1) -> Result<()> {
     if dom.chain_id.0 == [0u8; 32]
         || dom.genesis_hash == [0u8; 32]
@@ -898,6 +1122,39 @@ fn validate_deployment(entry: &RegistryChainProfileV1) -> Result<()> {
                 return Err(RegistryError::DeploymentMismatch);
             }
         }
+        (ChainKindV1::Monero { network }, ChainDeploymentV1::Monero(deployment)) => {
+            // The genesis is compared against the ratified value, never merely
+            // accepted from the manifest: a manifest that could choose its own
+            // chain identity could point the leg at a chain nobody agreed to.
+            let ratified =
+                ratified_monero_genesis(*network).ok_or(RegistryError::MoneroGenesisUnratified)?;
+            if deployment.genesis_hash != ratified
+                || deployment.max_fee_piconero == 0
+                // The XMR leg has no token representation to allow: Monero's
+                // only asset is Monero.
+                || !entry.profile.allowed_assets.is_empty()
+            {
+                return Err(RegistryError::DeploymentMismatch);
+            }
+        }
+        (ChainKindV1::Solana { .. }, ChainDeploymentV1::Solana(deployment)) => {
+            // Solana cluster genesis hashes are live facts, not source-code
+            // derivations (devnet and testnet reset; a local validator mints
+            // its own), so the registry pins whatever nonzero identity the
+            // manifest names and deduplicates on it, exactly as EVM does.
+            // The safety-critical pinning for this kind is the immutable
+            // program, checked in ChainProfileV1::validate.
+            if deployment.genesis_hash == [0u8; 32]
+                || deployment.max_fee_lamports == 0
+                // Native SOL only, for now: admitting an SPL mint needs its
+                // own AssetRepresentationV1 variant and its own ratification,
+                // and until that happens a profile must not be able to name
+                // one here.
+                || !entry.profile.allowed_assets.is_empty()
+            {
+                return Err(RegistryError::DeploymentMismatch);
+            }
+        }
         (ChainKindV1::Bitcoin { network }, ChainDeploymentV1::Bitcoin(deployment)) => {
             if deployment.genesis_hash == [0u8; 32]
                 || deployment.genesis_hash != canonical_bitcoin_genesis(*network)
@@ -923,6 +1180,63 @@ fn validate_deployment(entry: &RegistryChainProfileV1) -> Result<()> {
         _ => return Err(RegistryError::DeploymentMismatch),
     }
     Ok(())
+}
+
+/// The genesis block hash of each ratified Monero network.
+///
+/// These are not transcribed constants. Each one is the block hash *derived*
+/// from that network's `GENESIS_TX` and `GENESIS_NONCE` — the same two facts
+/// the Monero daemon builds its own genesis block from — and
+/// `the_ratified_genesis_is_the_hash_derived_from_the_genesis_transaction`
+/// rebuilds the block and recomputes the hash, so a wrong byte here fails the
+/// test rather than silently repointing chain identity. That test is the
+/// analogue of Bitcoin's `genesis_block(network).block_hash()`: `monero-oxide`
+/// exposes no genesis block, so the derivation is performed here instead of
+/// being borrowed from the library.
+///
+/// Both values are independently corroborated by monero-project's own
+/// height-0 checkpoints in `src/checkpoints/checkpoints.cpp`, which is a
+/// different file and a different code path from the `src/cryptonote_config.h`
+/// constants the derivation consumes.
+///
+/// Monero mainnet is absent because [`MoneroNetworkV1`] has no mainnet
+/// variant, not because its genesis is unknown.
+const RATIFIED_MONERO_GENESIS: &[(MoneroNetworkV1, Digest32)] = &[
+    (
+        MoneroNetworkV1::Stagenet,
+        hex_digest(b"76ee3cc98646292206cd3e86f74d88b4dcc1d937088645e9b0cbca84b7ce74eb"),
+    ),
+    (
+        MoneroNetworkV1::Testnet,
+        hex_digest(b"48ca7cd3c8de5b6a4d53d2861fbdaedca141553559f9be9520068053cda8430b"),
+    ),
+];
+
+/// Decode 64 lower-case hex characters at compile time. Writing the digests as
+/// hex keeps them comparable by eye against the upstream sources they were
+/// checked against; a malformed literal fails the build, not a run.
+const fn hex_digest(hex: &[u8; 64]) -> Digest32 {
+    const fn nibble(c: u8) -> u8 {
+        match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            _ => panic!("digest literal must be lower-case hex"),
+        }
+    }
+    let mut out = [0u8; 32];
+    let mut i = 0;
+    while i < 32 {
+        out[i] = (nibble(hex[2 * i]) << 4) | nibble(hex[2 * i + 1]);
+        i += 1;
+    }
+    out
+}
+
+fn ratified_monero_genesis(network: MoneroNetworkV1) -> Option<Digest32> {
+    RATIFIED_MONERO_GENESIS
+        .iter()
+        .find(|(candidate, _)| *candidate == network)
+        .map(|(_, genesis)| *genesis)
 }
 
 fn canonical_bitcoin_genesis(network: BitcoinNetworkV1) -> Digest32 {
@@ -978,4 +1292,92 @@ where
         previous = Some(value);
     }
     true
+}
+
+#[cfg(test)]
+mod monero_genesis_tests {
+    use super::{ratified_monero_genesis, MoneroNetworkV1};
+    use monero_oxide::{
+        block::{Block, BlockHeader},
+        transaction::{NotPruned, Transaction},
+    };
+
+    /// `GENESIS_TX` and `GENESIS_NONCE` from monero-project's
+    /// `src/cryptonote_config.h`. Testnet reuses mainnet's genesis transaction
+    /// and differs only in the nonce; stagenet has its own.
+    const TESTNET_GENESIS_TX: &str = "013c01ff0001ffffffffffff03029b2e4c0281c0b02e7c53291a94d1d0cbff8883f8024f5142ee494ffbbd08807121017767aafcde9be00dcfd098715ebcf7f410daebc582fda69d24a28e9d0bc890d1";
+    const STAGENET_GENESIS_TX: &str = "013c01ff0001ffffffffffff0302df5d56da0c7d643ddd1ce61901c7bdc5fb1738bfe39fbe69c28a3a7032729c0f2101168d0c4ca86fb55a4cf6a36d31431be1c53a3bd7411bb24e8832410289fa6f3b";
+
+    /// Rebuild a network's genesis block the way the Monero daemon does:
+    /// the network's genesis transaction as the miner transaction, in a header
+    /// with major version 1, minor version 0, timestamp 0, a zero previous
+    /// hash and the network's genesis nonce.
+    fn derive_genesis(genesis_tx_hex: &str, nonce: u32) -> [u8; 32] {
+        let bytes = decode_hex(genesis_tx_hex);
+        let mut cursor = bytes.as_slice();
+        let miner: Transaction<NotPruned> =
+            Transaction::read(&mut cursor).expect("genesis transaction parses");
+        assert!(cursor.is_empty(), "genesis transaction has trailing bytes");
+        let header = BlockHeader {
+            hardfork_version: 1,
+            hardfork_signal: 0,
+            timestamp: 0,
+            previous: [0u8; 32],
+            nonce,
+        };
+        let block = Block::new(header, miner, Vec::new()).expect("genesis block is well formed");
+        assert_eq!(block.number(), 0, "the genesis block must be block zero");
+        block.hash()
+    }
+
+    fn decode_hex(value: &str) -> Vec<u8> {
+        assert!(value.len().is_multiple_of(2), "hex must be byte aligned");
+        (0..value.len() / 2)
+            .map(|i| u8::from_str_radix(&value[2 * i..2 * i + 2], 16).expect("hex digit"))
+            .collect()
+    }
+
+    #[test]
+    fn the_ratified_genesis_is_the_hash_derived_from_the_genesis_transaction() {
+        // This is the analogue of Bitcoin's `genesis_block(network).block_hash()`.
+        // The constants in RATIFIED_MONERO_GENESIS are not trusted: they are
+        // required to equal the hash recomputed here from the upstream genesis
+        // transaction and nonce.
+        assert_eq!(
+            ratified_monero_genesis(MoneroNetworkV1::Stagenet),
+            Some(derive_genesis(STAGENET_GENESIS_TX, 10002))
+        );
+        assert_eq!(
+            ratified_monero_genesis(MoneroNetworkV1::Testnet),
+            Some(derive_genesis(TESTNET_GENESIS_TX, 10001))
+        );
+    }
+
+    #[test]
+    fn every_profileable_monero_network_has_a_ratified_genesis() {
+        // Exhaustive over MoneroNetworkV1 on purpose: adding a network without
+        // ratifying its genesis must fail here rather than pass silently and
+        // refuse only at run time.
+        for network in [MoneroNetworkV1::Stagenet, MoneroNetworkV1::Testnet] {
+            assert!(
+                ratified_monero_genesis(network).is_some(),
+                "{network:?} has no ratified genesis"
+            );
+            match network {
+                // If a variant is added, this match stops compiling until the
+                // loop above is extended to cover it.
+                MoneroNetworkV1::Stagenet | MoneroNetworkV1::Testnet => {}
+            }
+        }
+    }
+
+    #[test]
+    fn the_two_networks_do_not_share_a_genesis() {
+        // A shared genesis would let a profile for one network accept evidence
+        // observed on the other.
+        assert_ne!(
+            ratified_monero_genesis(MoneroNetworkV1::Stagenet),
+            ratified_monero_genesis(MoneroNetworkV1::Testnet)
+        );
+    }
 }

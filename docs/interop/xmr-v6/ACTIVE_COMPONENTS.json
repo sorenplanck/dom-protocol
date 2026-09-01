@@ -1,0 +1,52 @@
+{
+  "version": "6.1",
+  "cumulative_from": "dom-xmr-e2e-v6-final.zip",
+  "dom_target": {
+    "repository": "sorenplanck/dom-protocol",
+    "branch": "mainnetswap",
+    "commit_required_by_default": "7ea7f96836730a2b79fb4eaf1f3b8c34b1b511ff"
+  },
+  "workspace_members": [
+    "crates/adapters/xmr-crypto",
+    "crates/adapters/xmr-dleq-sigma",
+    "crates/adapters/xmr-route-secret",
+    "crates/adapters/xmr-profile",
+    "crates/adapters/xmr-claim-registry",
+    "crates/adapters/xmr-evidence",
+    "crates/adapters/xmr-observer",
+    "crates/adapters/xmr-kaystra-records",
+    "crates/adapters/xmr-secret-store",
+    "crates/adapters/xmr-sidecar-auth",
+    "crates/adapters/xmr-live-sidecar-api",
+    "crates/adapters/xmr-live-sidecar-uds-client",
+    "crates/adapters/xmr-raw-tx-verify",
+    "crates/adapters/xmr-spend-port",
+    "crates/adapters/xmr-delivery",
+    "crates/adapters/xmr-delivery-sqlite",
+    "crates/adapters/xmr-settlement-observer",
+    "crates/adapters/xmr-kaystra-bridge",
+    "crates/f8-xmr-kaystra-e2e"
+  ],
+  "external_sidecar": "sidecar-gpl/xmr-live-sidecar-eigenwallet",
+  "non_auto_applied_proposals": [
+    "patches/kaystra-terms-v2-cross-curve.patch"
+  ],
+  "replaces_previous_experimental_crates": [
+    "xmr-adapter",
+    "xmr-vault",
+    "xmr-engine",
+    "xmr-engine-store",
+    "xmr-final-coordinator",
+    "xmr-sweep-backend",
+    "xmr-tx-builder",
+    "xmr-rpc-broadcast",
+    "xmr-live-sidecar-client",
+    "xmr-setup-profile",
+    "f8-xmr-model",
+    "f8-xmr-e2e"
+  ],
+  "applied_patches": [
+    "patches/dom-real-xmr-secret-forwarding.patch",
+    "patches/store-rustix-std-feature.patch"
+  ]
+}

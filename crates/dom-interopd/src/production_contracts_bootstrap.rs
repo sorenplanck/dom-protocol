@@ -118,18 +118,7 @@ pub(crate) struct AuthenticatedContractsLegV1 {
     position: ProductionRoutePositionV1,
     session_id: [u8; 32],
     terms_hash: [u8; 32],
-    #[expect(
-        dead_code,
-        reason = "retained surface not yet wired by the stage-7 composition root"
-    )]
     roster_snapshot: [u8; 32],
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "retained surface not yet wired by the stage-7 composition root"
-        )
-    )]
     policy_version: u32,
     participants: [AuthenticatedContractsParticipantV1; 2],
     recovery_capsule: [u8; RECOVERY_CAPSULE_BYTES_V1],
@@ -182,10 +171,6 @@ impl AuthenticatedContractsLegV1 {
 /// verified provenance attached to this exact instance until the Contracts
 /// stores consume it.
 pub(crate) struct AuthenticatedContractsBootstrapV1 {
-    #[expect(
-        dead_code,
-        reason = "retained surface not yet wired by the stage-7 composition root"
-    )]
     network_id: [u8; 32],
     route_id: [u8; 32],
     registry_digest: [u8; 32],

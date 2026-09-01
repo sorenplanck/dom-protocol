@@ -1,0 +1,16 @@
+[package]
+name = "xmr-observation-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+kaystra-core = { path = "../../kaystra-core" }
+rusqlite = { workspace = true }
+thiserror = { workspace = true }
+xmr-kaystra-source = { path = "../xmr-kaystra-source" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

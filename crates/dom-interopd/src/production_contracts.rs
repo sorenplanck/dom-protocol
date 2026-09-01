@@ -85,10 +85,6 @@ pub(crate) enum ProductionContractsOutboundErrorV1 {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[expect(
-    dead_code,
-    reason = "retained surface not yet wired by the stage-7 composition root"
-)]
 pub(crate) enum ProductionContractsInboundErrorV1 {
     #[error("real DOM observation failed closed")]
     Observation(#[source] RealDomError),
@@ -110,10 +106,6 @@ pub(crate) enum ProductionContractsF6RecoveryErrorV2 {
 
 /// Redacted refusal from the productive F7/M.8 Contracts boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[expect(
-    dead_code,
-    reason = "retained surface not yet wired by the stage-7 composition root"
-)]
 pub(crate) enum ProductionContractsPostAnchorErrorV2 {
     /// The verified authorization does not belong to this retained owner or
     /// the durable Store refused its exact post-anchor transition.
@@ -129,10 +121,6 @@ pub(crate) enum ProductionContractsPostAnchorErrorV2 {
 /// Keeping the `Rc` beside the linear authorization prevents a later stage
 /// from reopening or substituting a different Contracts authority.
 #[must_use = "the productive post-anchor Contracts authority is linear"]
-#[expect(
-    dead_code,
-    reason = "retained surface not yet wired by the stage-7 composition root"
-)]
 pub(crate) struct ProductionContractsPostAnchorV2 {
     store: Rc<ContractsSessionStoreV1>,
     authorization: ClaimSigningAuthorizationV2,
@@ -146,10 +134,6 @@ impl core::fmt::Debug for ProductionContractsPostAnchorV2 {
 
 /// Durable consumed form retained with the same physical Contracts Store.
 #[must_use = "the consumed post-anchor Contracts authority remains linear"]
-#[expect(
-    dead_code,
-    reason = "retained surface not yet wired by the stage-7 composition root"
-)]
 pub(crate) struct ProductionContractsConsumedPostAnchorV2 {
     store: Rc<ContractsSessionStoreV1>,
     authorization: ConsumedClaimSigningAuthorizationV2,
@@ -269,10 +253,6 @@ impl From<RelayWorkerOutboundErrorV1> for ProductionContractsOutboundErrorV1 {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[expect(
-    dead_code,
-    reason = "retained surface not yet wired by the stage-7 composition root"
-)]
 pub(crate) enum ProductionContractsResumeV1 {
     Idle,
     Staged(RouteApplicationDispositionV2),
@@ -999,10 +979,6 @@ where
     /// Consumes the Contracts share of one real F7 V2 aggregate into this
     /// owner's exact Store, or reauthenticates the same durable issuance after
     /// a publication-boundary crash, and retains that opening beside it.
-    #[expect(
-        dead_code,
-        reason = "retained surface not yet wired by the stage-7 composition root"
-    )]
     pub(crate) fn issue_post_anchor_v2(
         &self,
         verified_anchors: VerifiedF7AnchorAuthorizationV2,
@@ -1295,10 +1271,6 @@ where
         )
     }
 
-    #[expect(
-        dead_code,
-        reason = "retained surface not yet wired by the stage-7 composition root"
-    )]
     pub(crate) fn sign_commit_and_stage(
         &mut self,
         request: PreparedDsc1SigningRequestV1,

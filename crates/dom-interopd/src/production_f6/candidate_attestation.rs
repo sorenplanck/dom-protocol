@@ -291,23 +291,8 @@ impl core::fmt::Debug for ProductionF6CandidateAttestationAuthorityStoreV2 {
 
 #[derive(Clone, Copy)]
 enum StoreOpenModeV2 {
-    #[expect(
-        dead_code,
-        reason = "retained surface not yet wired by the stage-7 composition root"
-    )]
     Create,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "retained surface not yet wired by the stage-7 composition root"
-        )
-    )]
     Open,
-    #[expect(
-        dead_code,
-        reason = "retained surface not yet wired by the stage-7 composition root"
-    )]
     Resume,
     Prepared(Digest32),
 }

@@ -1,0 +1,11 @@
+# PROPOSAL ONLY — DO NOT AUTO-APPLY.
+# A ratified terms V2 must add a truthful mechanism tag rather than treating
+# Monero shared-spend as SchnorrAdaptor. At minimum it must:
+#
+# 1. add LockMechanism::CrossCurveSharedSpend = 0x05;
+# 2. bump the canonical terms wire version;
+# 3. preserve a strict V1 decoder for historical terms;
+# 4. update vectors, route composer, registry profiles and audit documents;
+# 5. refuse silent V1/V2 downgrade.
+#
+# The actual protocol ratification must determine the exact migration shape.

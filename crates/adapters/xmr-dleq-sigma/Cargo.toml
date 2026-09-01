@@ -1,0 +1,18 @@
+[package]
+name = "xmr-dleq-sigma"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+rand_chacha = "=0.3.1"
+zeroize = { workspace = true }
+sigma_fun = { version = "=0.7.0", default-features = false, features = ["ed25519", "serde", "secp256k1", "alloc"] }
+curve25519-dalek-ng = { package = "curve25519-dalek-ng", version = "=4.1.1" }

@@ -1,0 +1,21 @@
+[package]
+name = "solana-profile"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true }
+blake2 = { workspace = true }
+kaystra-core = { path = "../../kaystra-core" }
+solana-types = { path = "../solana-types" }
+solana-pda = { path = "../solana-pda" }
+solana-route-secret = { path = "../solana-route-secret" }
+xmr-dleq-sigma = { path = "../xmr-dleq-sigma" }
+
+[dev-dependencies]
+chain-profile = { path = "../../chain-profile" }
+rand = { workspace = true }

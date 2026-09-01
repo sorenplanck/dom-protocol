@@ -152,10 +152,6 @@ impl core::fmt::Debug for ProductionF6ActivationPathsV2 {
 /// candidate signer producer, adapter terms authority and terminal route
 /// authority already bundled in [`ProductionF6AuthoritiesV2`]. There is no
 /// constructor taking booleans, digests, decoded files or generic signers.
-#[expect(
-    dead_code,
-    reason = "retained surface not yet wired by the stage-7 composition root"
-)]
 pub(crate) struct ProductionReadyF6ActivationAuthorityV2 {
     binding: ProductionSolverF6BindingV2,
     solver: rfq::ParticipantId,
@@ -203,13 +199,6 @@ impl ProductionReadyF6ActivationAuthorityV2 {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "retained surface not yet wired by the stage-7 composition root"
-        )
-    )]
     fn open(
         mode: ProductionF6ActivationOpenModeV2,
         paths: ProductionF6PathsV2<'_>,

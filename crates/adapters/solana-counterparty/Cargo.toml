@@ -1,0 +1,12 @@
+[package]
+name = "solana-counterparty"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+thiserror = { workspace = true }
+counterparty-api = { workspace = true }
+solana-evidence = { path = "../solana-evidence" }

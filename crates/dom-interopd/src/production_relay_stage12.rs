@@ -109,10 +109,6 @@ pub(crate) struct ProductionRelayStage12LegOwnerV1 {
     contracts: ProductionContractsV1<ProductionF6LifecyclePortV2>,
     wire: RouteWireContextV1,
     trusted_chain_id: TrustedChainIdV1,
-    #[expect(
-        dead_code,
-        reason = "retained surface not yet wired by the stage-7 composition root"
-    )]
     shared_blinding_bindings: [SharedBlindingBindingV1; 2],
     noise_identity_references: [SessionTransportIdentityReferenceV1; 2],
     f6_pair_provenance: ProductionF6PairProvenanceV2,

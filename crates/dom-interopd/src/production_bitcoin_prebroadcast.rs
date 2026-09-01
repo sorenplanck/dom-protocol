@@ -58,10 +58,6 @@ pub(crate) enum ProductionBitcoinPrebroadcastErrorV7 {
 pub(crate) struct ProductionBitcoinPrebroadcastChildHandoffV7 {
     pub(crate) funding: ProductionBitcoinFundingAuthorityV1,
     recovered_claim: Option<ReopenedFreshBitcoinClaimV1>,
-    #[expect(
-        dead_code,
-        reason = "bitcoin claim path frozen until the authenticated M8 round"
-    )]
     leg: LegIdV1,
 }
 

@@ -65,10 +65,6 @@ const OUTBOUND_QUOTE_RECEIPT_KIND: u16 = 0xF621;
 const OUTBOUND_QUOTE_RECEIPT_VERSION: u16 = 2;
 const MAX_OUTBOUND_QUOTE_REVISIONS: usize = 256;
 const MAX_OUTBOUND_QUOTE_DELIVERY_BYTES: usize = 12_288;
-#[expect(
-    dead_code,
-    reason = "retained surface not yet wired by the stage-7 composition root"
-)]
 const MAX_F6_INVENTORY_LEASE_DURATION_MS: u64 = 86_400_000;
 
 /// Exact files jointly provisioned for one F6 V2 position.
@@ -560,10 +556,6 @@ pub(crate) struct ProductionF6LegSharedAuthoritiesV2 {
 struct ProductionF6LegInventoryLeaseV2 {
     lease: Rc<Cell<InventoryLeaseV1>>,
     position: SettlementPositionV2,
-    #[expect(
-        dead_code,
-        reason = "retained surface not yet wired by the stage-7 composition root"
-    )]
     solver: ParticipantId,
     owner_id: Digest32,
     duration_ms: u64,
@@ -697,10 +689,6 @@ impl ProductionF6LegSharedAuthoritiesV2 {
 
     /// Renews only the retained exact solver/owner lease. The runtime cannot
     /// substitute an identity, fencing generation, duration, or wall time.
-    #[expect(
-        dead_code,
-        reason = "retained surface not yet wired by the stage-7 composition root"
-    )]
     fn renew_inventory_lease_at(&self, now_unix_ms: u64) -> Result<(), ProductionF6ErrorV2> {
         let mut inventory = self.inventory_mut()?;
         renew_exact_inventory_lease_at(
@@ -722,10 +710,6 @@ impl ProductionF6LegSharedAuthoritiesV2 {
     }
 }
 
-#[expect(
-    dead_code,
-    reason = "retained surface not yet wired by the stage-7 composition root"
-)]
 fn renew_exact_inventory_lease_at(
     inventory: &mut DurableInventoryStoreV1,
     retained_lease: &Cell<InventoryLeaseV1>,
@@ -884,15 +868,7 @@ pub(crate) struct ProductionF6AuthoritiesV2 {
 
 #[derive(Clone, Copy)]
 enum OpenModeV2 {
-    #[expect(
-        dead_code,
-        reason = "retained surface not yet wired by the stage-7 composition root"
-    )]
     Create,
-    #[expect(
-        dead_code,
-        reason = "retained surface not yet wired by the stage-7 composition root"
-    )]
     Open,
     Resume,
     Prepared(ProductionF6PreparedBindingsV2),
@@ -918,13 +894,6 @@ impl ProductionSolverF6AuthorityV2 {
 
     /// Creates both empty local F6 authorities after a global provisioning
     /// journal has durably authorized the step.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "retained surface not yet wired by the stage-7 composition root"
-        )
-    )]
     pub(crate) fn create_production(
         paths: ProductionF6PathsV2<'_>,
         binding: ProductionSolverF6BindingV2,

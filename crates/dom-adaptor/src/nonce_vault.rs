@@ -1753,22 +1753,29 @@ mod tests {
             PurposeV1::ClaimAdaptor,
             PurposeV1::Funding,
             PurposeV1::Sponsor,
+            PurposeV1::RefundAdaptor,
         ];
-        assert_eq!(purposes.len(), 4);
+        assert_eq!(purposes.len(), 5);
+        // Everything except Sponsor is authorized for strict Phase 1,
+        // including the refund adaptor purpose ratified by NAR-DC-P1-009.
         assert!(purposes[..3]
             .iter()
             .all(|purpose| purpose.is_strict_v1_authorized()));
+        assert!(PurposeV1::RefundAdaptor.is_strict_v1_authorized());
         assert!(!PurposeV1::Sponsor.is_strict_v1_authorized());
         for (byte, purpose) in [
             (1, PurposeV1::Refund),
             (2, PurposeV1::ClaimAdaptor),
             (3, PurposeV1::Funding),
             (4, PurposeV1::Sponsor),
+            (5, PurposeV1::RefundAdaptor),
         ] {
             assert_eq!(PurposeV1::try_from(byte), Ok(purpose));
             assert_eq!(purpose.to_byte(), byte);
         }
+        // The registry stays closed on both sides: 0x00 below it and 0x06
+        // above it are still refused.
         assert!(PurposeV1::try_from(0).is_err());
-        assert!(PurposeV1::try_from(5).is_err());
+        assert!(PurposeV1::try_from(6).is_err());
     }
 }

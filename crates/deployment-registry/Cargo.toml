@@ -27,4 +27,8 @@ thiserror = { workspace = true }
 rustix = { version = "=1.1.4", default-features = false, features = ["process"] }
 
 [dev-dependencies]
+# Only to re-derive the Monero genesis block hashes in a test, so the
+# constants in `RATIFIED_MONERO_GENESIS` are computed rather than trusted.
+# The same pinned revision the XMR raw-transaction verifier uses.
+monero-oxide = { git = "https://github.com/kayabaNerve/monero-oxide", rev = "c8be5d3d1287669946a83fbfcb296ce2a8852e47" }
 tempfile = { workspace = true }

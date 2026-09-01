@@ -1,0 +1,12 @@
+[package]
+name = "xmr-raw-tx-verify"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.85"
+license.workspace = true
+publish = false
+
+[dependencies]
+thiserror = { workspace = true }
+blake2 = { version = "=0.10.6", default-features = false }
+monero-oxide = { git = "https://github.com/kayabaNerve/monero-oxide", rev = "c8be5d3d1287669946a83fbfcb296ce2a8852e47" }

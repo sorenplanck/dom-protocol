@@ -1,0 +1,24 @@
+[package]
+name = "f8-xmr-kaystra-e2e"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+adapter-dom-real = { path = "../adapters/dom-real" }
+counterparty-api = { workspace = true }
+curve25519-dalek = { version = "=4.1.3", default-features = false, features = ["alloc", "zeroize"] }
+kaystra-core = { path = "../kaystra-core" }
+rand = { workspace = true }
+tempfile = { workspace = true }
+xmr-crypto = { path = "../adapters/xmr-crypto" }
+xmr-delivery-sqlite = { path = "../adapters/xmr-delivery-sqlite" }
+xmr-dleq-sigma = { path = "../adapters/xmr-dleq-sigma" }
+xmr-kaystra-bridge = { path = "../adapters/xmr-kaystra-bridge" }
+xmr-route-secret = { path = "../adapters/xmr-route-secret" }
+xmr-secret-store = { path = "../adapters/xmr-secret-store" }
+xmr-setup-profile = { path = "../adapters/xmr-setup-profile" }
+xmr-spend-port = { path = "../adapters/xmr-spend-port" }
+xmr-live-sidecar-api = { path = "../adapters/xmr-live-sidecar-api" }

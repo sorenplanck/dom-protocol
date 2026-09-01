@@ -1,0 +1,16 @@
+[package]
+name = "xmr-actuator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+blake2 = { workspace = true }
+rusqlite = { workspace = true }
+thiserror = { workspace = true }
+xmr-spend-port = { path = "../adapters/xmr-spend-port" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

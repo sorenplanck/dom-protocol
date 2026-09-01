@@ -11,11 +11,22 @@
 use std::path::Path;
 
 /// Every path the workspace is allowed to exclude, and why.
-const ALLOWED_EXCLUSIONS: &[(&str, &str)] = &[(
-    "wallet-desktop",
-    "the node's own Tauri desktop wallet: needs a frontend dist/ that would \
+const ALLOWED_EXCLUSIONS: &[(&str, &str)] = &[
+    (
+        "wallet-desktop",
+        "the node's own Tauri desktop wallet: needs a frontend dist/ that would \
          break `cargo build --workspace`; built from wallet-desktop/ instead",
-)];
+    ),
+    (
+        "programs/dom-solana-escrow",
+        "the on-chain Solana escrow program: pins solana-program 2.3 whose \
+         dependency tree conflicts with the workspace's, and its deployable \
+         artifact is built by the platform-tools toolchain against a pinned \
+         lockfile (scripts/build-solana-program-v8.sh). It is NOT ungated: \
+         its own workspace runs 11 tests including the syscall-stubbed \
+         native-path suite, and scripts/run-solana-v8-gates.sh drives them",
+    ),
+];
 
 fn declared_exclusions(manifest: &str) -> Vec<String> {
     let start = manifest

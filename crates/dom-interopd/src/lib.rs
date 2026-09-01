@@ -25,6 +25,33 @@ mod production_child_evm;
 #[cfg(feature = "production")]
 mod production_child_router;
 #[cfg(feature = "production")]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "SOL/XMR settlement children awaiting their wiring into the stage-7 composition root; fails the build when first wired"
+    )
+)]
+mod production_child_solana;
+#[cfg(feature = "production")]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "SOL/XMR settlement children awaiting their wiring into the stage-7 composition root; fails the build when first wired"
+    )
+)]
+mod production_child_xmr;
+#[cfg(feature = "production")]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "SOL/XMR settlement children awaiting their wiring into the stage-7 composition root; fails the build when first wired"
+    )
+)]
+mod production_children;
+#[cfg(feature = "production")]
 mod production_evm_remote_signer;
 #[cfg(feature = "production")]
 mod production_evm_signer;

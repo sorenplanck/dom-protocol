@@ -1,0 +1,15 @@
+[package]
+name = "xmr-live-sidecar-blocking-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+xmr-raw-tx-verify = { path = "../xmr-raw-tx-verify" }
+reqwest = { workspace = true }
+thiserror = { workspace = true }
+xmr-live-sidecar-api = { path = "../xmr-live-sidecar-api" }
+xmr-sidecar-auth = { path = "../xmr-sidecar-auth" }
+xmr-spend-port = { path = "../xmr-spend-port" }

@@ -74,6 +74,10 @@ pub enum SettlementFaceV1 {
     Evm,
     /// Bitcoin Taproot/scriptless face.
     Bitcoin,
+    /// Monero shared-spend face.
+    Monero,
+    /// Solana cross-curve condition-lock face.
+    Solana,
 }
 
 impl SettlementFaceV1 {
@@ -82,6 +86,8 @@ impl SettlementFaceV1 {
             Self::Dom => 1,
             Self::Evm => 2,
             Self::Bitcoin => 3,
+            Self::Monero => 4,
+            Self::Solana => 5,
         }
     }
 
@@ -90,12 +96,17 @@ impl SettlementFaceV1 {
             1 => Ok(Self::Dom),
             2 => Ok(Self::Evm),
             3 => Ok(Self::Bitcoin),
+            4 => Ok(Self::Monero),
+            5 => Ok(Self::Solana),
             _ => Err(CoordinatorErrorV1::InvalidCanonicalMaterial),
         }
     }
 
     pub(crate) const fn is_counterparty(self) -> bool {
-        matches!(self, Self::Evm | Self::Bitcoin)
+        matches!(
+            self,
+            Self::Evm | Self::Bitcoin | Self::Monero | Self::Solana
+        )
     }
 }
 

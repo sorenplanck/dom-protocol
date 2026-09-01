@@ -61,10 +61,6 @@ const RECONCILIATION_REQUEST_DOMAIN_V1: &[u8] =
     b"DOM-INTEROP/INTEROPD/BTC-CHILD/RECONCILIATION-REQUEST/V1\0";
 const OBSERVATION_REQUEST_DOMAIN_V1: &[u8] =
     b"DOM-INTEROP/INTEROPD/BTC-CHILD/OBSERVATION-REQUEST/V1\0";
-#[expect(
-    dead_code,
-    reason = "bitcoin claim path frozen until the authenticated M8 round"
-)]
 const FRESH_CLAIM_FUNDING_OWNER_DOMAIN_V1: &[u8] =
     b"DOM-INTEROP/INTEROPD/BTC-CHILD/FRESH-CLAIM-FUNDING-OWNER/V1\0";
 
@@ -78,19 +74,11 @@ pub(crate) struct ProductionBitcoinClaimMaterializationAuthorityV1 {
     composition_digest: Digest32,
     role_plan_digest: Digest32,
     source_scope_digest: Digest32,
-    #[expect(
-        dead_code,
-        reason = "bitcoin claim path frozen until the authenticated M8 round"
-    )]
     fresh_funding_owner_digest: Option<Digest32>,
     fresh_public: Option<FreshBitcoinPreparedClaimPublicV1>,
 }
 
 enum ProductionBitcoinClaimMaterializationStateV1 {
-    #[expect(
-        dead_code,
-        reason = "bitcoin claim path frozen until the authenticated M8 round"
-    )]
     ActuatorReady(BitcoinPreSignatureV1),
     Finalized {
         exact: ExactBitcoinTransactionV1,
@@ -549,10 +537,6 @@ impl ProductionBitcoinClaimMaterializationAuthorityV1 {
     }
 }
 
-#[expect(
-    dead_code,
-    reason = "bitcoin claim path frozen until the authenticated M8 round"
-)]
 fn validate_fresh_claim_session(
     session: &BitcoinClaimSessionV1,
     public: &FreshBitcoinPreparedClaimPublicV1,
@@ -2256,10 +2240,6 @@ fn validate_external_funding_custody(
     Ok(())
 }
 
-#[expect(
-    dead_code,
-    reason = "bitcoin claim path frozen until the authenticated M8 round"
-)]
 fn authenticate_fresh_claim_funding_owner_fields(
     public: &FreshBitcoinPreparedClaimPublicV1,
     prepared_record_digest: Digest32,
@@ -2581,6 +2561,8 @@ const fn face_tag(value: SettlementFaceV1) -> u8 {
         SettlementFaceV1::Dom => 1,
         SettlementFaceV1::Evm => 2,
         SettlementFaceV1::Bitcoin => 3,
+        SettlementFaceV1::Monero => 4,
+        SettlementFaceV1::Solana => 5,
     }
 }
 

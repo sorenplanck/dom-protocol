@@ -29,7 +29,9 @@ use std::sync::Arc;
 
 use adapter_dom_real::{RealDomClaimConsumerV1, RealDomClaimVerifierV1, RealDomRpcRuntimeV1};
 use adapter_evm::{evm_counterparty_chain_id, EvidenceKind, EvmAdapter, JsonRpc, LockTerms};
+use chain_profile::ChainKindV1;
 use counterparty_api::{AdapterError, RevealedSecretBytes, VerifiedOutcome};
+use deployment_registry::ResolvedSolanaDeploymentV1;
 use dom_actuator::{
     DomActuatorError, DomClaimCustodyClassificationV1, DomContractsActuatorV1, DomSessionBindingV1,
 };
@@ -49,6 +51,12 @@ use settlement_coordinator::{
     DeferredChildMaterializationResultV1, SecretRequirementV1, SettlementChildPlanV1,
     SettlementChildrenV1, SettlementLegV1,
 };
+use solana_escrow_wire::{EscrowStateV1, EscrowStatus};
+use solana_profile::ValidatedSolanaSetup;
+use solana_rpc::HttpSolanaRpc;
+use solana_rpc_pool::SolanaRpcPool;
+use solana_types::Commitment;
+use xmr_dleq_sigma::{revealed_dom_secret_to_xmr_scalar, CrossCurvePublicClaim};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::production_child_btc::ProductionBitcoinPublicExtractionHandoffV1;
@@ -820,10 +828,6 @@ fn map_dom_secret_source_error(error: DomActuatorError) -> AuthorityRefusalV1 {
 /// retained by the route, and runs the adapter's full static plus on-chain
 /// verification for the one pre-registered lock before returning the redacted
 /// scalar wrapper.
-#[expect(
-    dead_code,
-    reason = "EVM public-secret re-extraction surface excluded by the stage-7 composition"
-)]
 pub(crate) struct ProductionEvmPublicSecretSourceV1<R: JsonRpc> {
     route_id: RouteIdV1,
     composition_digest: Digest32,
@@ -933,10 +937,6 @@ impl<R: JsonRpc> ProductionChainPublicSecretSourceV1 for ProductionEvmPublicSecr
     }
 }
 
-#[expect(
-    dead_code,
-    reason = "EVM public-secret re-extraction surface excluded by the stage-7 composition"
-)]
 fn map_evm_secret_source_error(error: AdapterError) -> AuthorityRefusalV1 {
     match error {
         AdapterError::AdapterUnavailable => AuthorityRefusalV1::Unavailable,
@@ -1191,15 +1191,217 @@ fn map_child_secret_source_refusal(
     }
 }
 
-/// Exact-chain router for DOM, EVM and Bitcoin secret sources.
+/// Exact expected identity of one Solana escrow claim, frozen at binding time.
+///
+/// Every field is a public commitment already authenticated by the DLEQ setup
+/// (`ValidatedSolanaSetup`); the context exists so the extraction core can be
+/// exercised against adversarial account states without a live quorum.
+pub(crate) struct SolanaClaimExtractionContextV1 {
+    settlement_id: Digest32,
+    terms_hash: Digest32,
+    setup_id: Digest32,
+    funder: Digest32,
+    recipient: Digest32,
+    refund_recipient: Digest32,
+    vault: Digest32,
+    amount: u64,
+    refund_after_unix: i64,
+    claim: CrossCurvePublicClaim,
+}
+
+impl SolanaClaimExtractionContextV1 {
+    fn from_setup(setup: &ValidatedSolanaSetup) -> Self {
+        Self {
+            settlement_id: setup.settlement_id(),
+            terms_hash: setup.terms_hash(),
+            setup_id: setup.setup_id(),
+            funder: setup.funder().0,
+            recipient: setup.recipient().0,
+            refund_recipient: setup.refund_recipient().0,
+            vault: setup.vault_pda().0,
+            amount: setup.amount(),
+            refund_after_unix: setup.refund_after_unix(),
+            claim: setup.claim(),
+        }
+    }
+}
+
+/// Re-extract the revealed scalar from one exact finalized escrow state.
+///
+/// The program only writes `revealed_secret_be` after its own on-chain
+/// `t·G_ed = claim_point_ed25519` syscall check passed inside the Claim that
+/// moved the funds. This host-side pass re-verifies the scalar against BOTH
+/// DLEQ-certified curve points, so a quorum answer cannot substitute a scalar
+/// that satisfies only the ed25519 relation for a different secp point.
+///
+/// `Refunded` is a conflicting terminal outcome once the route journal says
+/// the scalar is public: that is `Inconsistent`, never a silent fallback. A
+/// pre-terminal status and an absent account are `Unavailable`: RPC lag, a
+/// post-exposure reorg, or a post-claim `Close` that drained the state PDA all
+/// require the sealed vault record for recovery, not a weaker re-read.
+fn extract_solana_revealed_secret_v1(
+    context: &SolanaClaimExtractionContextV1,
+    state: &EscrowStateV1,
+) -> Result<RevealedSecretBytes, AuthorityRefusalV1> {
+    if state.settlement_id != context.settlement_id
+        || state.terms_hash != context.terms_hash
+        || state.setup_id != context.setup_id
+        || state.funder != context.funder
+        || state.recipient != context.recipient
+        || state.refund_recipient != context.refund_recipient
+        || state.vault != context.vault
+        || state.amount != context.amount
+        || state.refund_after_unix != context.refund_after_unix
+        || state.dom_adaptor_point != context.claim.secp_compressed
+        || state.claim_point_ed25519 != context.claim.ed_compressed
+    {
+        return Err(AuthorityRefusalV1::Inconsistent);
+    }
+    match state.status {
+        EscrowStatus::Claimed => {}
+        EscrowStatus::Refunded => return Err(AuthorityRefusalV1::Inconsistent),
+        EscrowStatus::Initialized | EscrowStatus::Funded | EscrowStatus::Closed => {
+            return Err(AuthorityRefusalV1::Unavailable)
+        }
+    }
+    if state.funded_amount != 0
+        || state.terminal_slot == 0
+        || state.revealed_secret_be == ZERO_DIGEST
+    {
+        return Err(AuthorityRefusalV1::Inconsistent);
+    }
+    if revealed_dom_secret_to_xmr_scalar(state.revealed_secret_be, &context.claim).is_err() {
+        return Err(AuthorityRefusalV1::Inconsistent);
+    }
+    Ok(RevealedSecretBytes::new(state.revealed_secret_be))
+}
+
+/// Restart-safe Solana extraction authority for one exact condition-lock claim.
+///
+/// The counterparty's Claim instruction is the only path that reveals the
+/// scalar on the Solana chain, and the program persists it in the state PDA it
+/// verified. Every call re-reads that account at finalized commitment through
+/// the quorum pool and re-verifies the full escrow identity plus the
+/// cross-curve relation before returning the redacted wrapper.
+pub(crate) struct ProductionSolanaPublicSecretSourceV1 {
+    route_id: RouteIdV1,
+    composition_digest: Digest32,
+    chain_id: Digest32,
+    expected_claim_transaction_id: Digest32,
+    context: SolanaClaimExtractionContextV1,
+    state_pda: solana_types::SolanaPubkey,
+    pool: SolanaRpcPool<HttpSolanaRpc>,
+}
+
+impl core::fmt::Debug for ProductionSolanaPublicSecretSourceV1 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("ProductionSolanaPublicSecretSourceV1")
+            .field("route_id", &self.route_id)
+            .field("composition_digest", &self.composition_digest)
+            .field("chain_id", &self.chain_id)
+            .field(
+                "expected_claim_transaction_id",
+                &self.expected_claim_transaction_id,
+            )
+            .field("state_pda", &self.state_pda)
+            .field("pool", &"<authority redacted>")
+            .finish()
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "SOL/XMR settlement surface awaiting its wiring into the stage-7 composition root; fails the build when first wired"
+    )
+)]
+impl ProductionSolanaPublicSecretSourceV1 {
+    pub(crate) fn new(
+        route_id: RouteIdV1,
+        composition_digest: Digest32,
+        expected_claim_transaction_id: Digest32,
+        pool: SolanaRpcPool<HttpSolanaRpc>,
+        setup: ValidatedSolanaSetup,
+        deployment: &ResolvedSolanaDeploymentV1,
+    ) -> Result<Self, AuthorityRefusalV1> {
+        let pinned_program = match deployment.profile().kind {
+            ChainKindV1::Solana { escrow_program, .. } => escrow_program,
+            _ => return Err(AuthorityRefusalV1::Inconsistent),
+        };
+        let chain_id = deployment.profile().chain_id.0;
+        if [
+            route_id,
+            composition_digest,
+            chain_id,
+            expected_claim_transaction_id,
+        ]
+        .contains(&ZERO_DIGEST)
+            || setup.program_id().0 != pinned_program
+        {
+            return Err(AuthorityRefusalV1::Inconsistent);
+        }
+        Ok(Self {
+            route_id,
+            composition_digest,
+            chain_id,
+            expected_claim_transaction_id,
+            state_pda: setup.state_pda(),
+            context: SolanaClaimExtractionContextV1::from_setup(&setup),
+            pool,
+        })
+    }
+}
+
+impl ProductionChainPublicSecretSourceV1 for ProductionSolanaPublicSecretSourceV1 {
+    fn chain_id(&self) -> Digest32 {
+        self.chain_id
+    }
+
+    fn reextract_for_chain(
+        &mut self,
+        request: ProductionPublicSecretRequestV1<'_>,
+    ) -> Result<RevealedSecretBytes, AuthorityRefusalV1> {
+        let exposure = request.exposure();
+        if request.route_id() != self.route_id
+            || request.composition_digest() != self.composition_digest
+            || exposure.chain_id != self.chain_id
+            || exposure.transaction_id != self.expected_claim_transaction_id
+            || exposure.evidence_digest == ZERO_DIGEST
+            || exposure.observed_at_unix_ms == 0
+        {
+            return Err(AuthorityRefusalV1::Inconsistent);
+        }
+        let snapshot = self
+            .pool
+            .account(self.state_pda, Commitment::Finalized)
+            .map_err(|_| AuthorityRefusalV1::Unavailable)?
+            .ok_or(AuthorityRefusalV1::Unavailable)?;
+        let state =
+            EscrowStateV1::decode(&snapshot.data).map_err(|_| AuthorityRefusalV1::Inconsistent)?;
+        extract_solana_revealed_secret_v1(&self.context, &state)
+    }
+}
+
+/// Exact-chain router for DOM, EVM, Bitcoin and Solana secret sources.
 ///
 /// It routes by the authenticated chain digest only. Missing and duplicate
 /// chain identities are refused; an exposure is never offered to a different
 /// installed source as a fallback.
+///
+/// Monero deliberately has no slot: a CLSAG ring signature never places the
+/// scalar on the Monero chain, so a Monero-chain exposure is unextractable by
+/// construction. The reveal for an XMR leg happens on the DOM chain via
+/// adaptor completion and is served by the DOM source; a role plan that pins
+/// the secret source to the Monero chain is refused upstream at
+/// materialization, and an exposure carrying an unknown chain digest is
+/// refused here.
 pub(crate) struct ProductionPublicSecretSourceRouterV1 {
     dom: Box<dyn ProductionChainPublicSecretSourceV1>,
     evm: Option<Box<dyn ProductionChainPublicSecretSourceV1>>,
     bitcoin: Option<Box<dyn ProductionChainPublicSecretSourceV1>>,
+    solana: Option<Box<dyn ProductionChainPublicSecretSourceV1>>,
 }
 
 impl core::fmt::Debug for ProductionPublicSecretSourceRouterV1 {
@@ -1209,15 +1411,17 @@ impl core::fmt::Debug for ProductionPublicSecretSourceRouterV1 {
 }
 
 impl ProductionPublicSecretSourceRouterV1 {
-    pub(crate) fn new<D, E, B>(
+    pub(crate) fn new<D, E, B, S>(
         dom: D,
         evm: Option<E>,
         bitcoin: Option<B>,
+        solana: Option<S>,
     ) -> Result<Self, AuthorityRefusalV1>
     where
         D: ProductionChainPublicSecretSourceV1 + 'static,
         E: ProductionChainPublicSecretSourceV1 + 'static,
         B: ProductionChainPublicSecretSourceV1 + 'static,
+        S: ProductionChainPublicSecretSourceV1 + 'static,
     {
         let dom_chain = dom.chain_id();
         let evm_chain = evm
@@ -1226,10 +1430,19 @@ impl ProductionPublicSecretSourceRouterV1 {
         let bitcoin_chain = bitcoin
             .as_ref()
             .map(ProductionChainPublicSecretSourceV1::chain_id);
+        let solana_chain = solana
+            .as_ref()
+            .map(ProductionChainPublicSecretSourceV1::chain_id);
         if dom_chain == ZERO_DIGEST
             || evm_chain.is_some_and(|chain| chain == ZERO_DIGEST || chain == dom_chain)
             || bitcoin_chain.is_some_and(|chain| {
                 chain == ZERO_DIGEST || chain == dom_chain || Some(chain) == evm_chain
+            })
+            || solana_chain.is_some_and(|chain| {
+                chain == ZERO_DIGEST
+                    || chain == dom_chain
+                    || Some(chain) == evm_chain
+                    || Some(chain) == bitcoin_chain
             })
         {
             return Err(AuthorityRefusalV1::Inconsistent);
@@ -1238,6 +1451,8 @@ impl ProductionPublicSecretSourceRouterV1 {
             dom: Box::new(dom),
             evm: evm.map(|source| Box::new(source) as Box<dyn ProductionChainPublicSecretSourceV1>),
             bitcoin: bitcoin
+                .map(|source| Box::new(source) as Box<dyn ProductionChainPublicSecretSourceV1>),
+            solana: solana
                 .map(|source| Box::new(source) as Box<dyn ProductionChainPublicSecretSourceV1>),
         })
     }
@@ -1259,6 +1474,12 @@ impl ProductionPublicSecretSourceV1 for ProductionPublicSecretSourceRouterV1 {
             source.as_mut()
         } else if let Some(source) = self
             .bitcoin
+            .as_mut()
+            .filter(|source| source.chain_id() == chain_id)
+        {
+            source.as_mut()
+        } else if let Some(source) = self
+            .solana
             .as_mut()
             .filter(|source| source.chain_id() == chain_id)
         {
@@ -2401,12 +2622,14 @@ mod tests {
         let dom_calls = Rc::new(RefCell::new(Vec::new()));
         let evm_calls = Rc::new(RefCell::new(Vec::new()));
         let bitcoin_calls = Rc::new(RefCell::new(Vec::new()));
+        let solana_calls = Rc::new(RefCell::new(Vec::new()));
         let mut router = ProductionPublicSecretSourceRouterV1::new(
             source([1; 32], Rc::clone(&dom_calls), None),
             Some(source([2; 32], Rc::clone(&evm_calls), None)),
             Some(source([3; 32], Rc::clone(&bitcoin_calls), None)),
+            Some(source([6; 32], Rc::clone(&solana_calls), None)),
         )
-        .expect("three distinct authorities");
+        .expect("four distinct authorities");
         let observed = exposure([2; 32]);
         let secret = router
             .reextract_public_secret(ProductionPublicSecretRequestV1 {
@@ -2419,10 +2642,25 @@ mod tests {
         assert_eq!(secret.expose_scalar_bytes(), [0x31; 32]);
         assert!(dom_calls.borrow().is_empty());
         assert!(bitcoin_calls.borrow().is_empty());
+        assert!(solana_calls.borrow().is_empty());
         assert_eq!(
             evm_calls.borrow().as_slice(),
             &[([4; 32], [5; 32], [0x42; 32])]
         );
+
+        let solana_observed = exposure([6; 32]);
+        router
+            .reextract_public_secret(ProductionPublicSecretRequestV1 {
+                route_id: [4; 32],
+                composition_digest: [5; 32],
+                exposure: &solana_observed,
+            })
+            .expect("exact Solana source");
+        assert_eq!(
+            solana_calls.borrow().as_slice(),
+            &[([4; 32], [5; 32], [0x42; 32])]
+        );
+        assert_eq!(evm_calls.borrow().len(), 1);
     }
 
     #[test]
@@ -2438,6 +2676,7 @@ mod tests {
                 Some(AuthorityRefusalV1::Unavailable),
             )),
             Some(source([3; 32], Rc::clone(&bitcoin_calls), None)),
+            None::<RecordingSecretSourceV1>,
         )
         .expect("three distinct authorities");
         let observed = exposure([2; 32]);
@@ -2462,18 +2701,32 @@ mod tests {
             source([0; 32], Rc::clone(&calls), None),
             None::<RecordingSecretSourceV1>,
             Some(source([3; 32], Rc::clone(&calls), None)),
+            None::<RecordingSecretSourceV1>,
         )
         .is_err());
         assert!(ProductionPublicSecretSourceRouterV1::new(
             source([1; 32], Rc::clone(&calls), None),
             Some(source([1; 32], Rc::clone(&calls), None)),
             None::<RecordingSecretSourceV1>,
+            None::<RecordingSecretSourceV1>,
         )
         .is_err());
+        // A Solana slot may not shadow any installed chain identity, nor be
+        // zero.
+        for duplicate in [[1u8; 32], [2; 32], [3; 32], [0; 32]] {
+            assert!(ProductionPublicSecretSourceRouterV1::new(
+                source([1; 32], Rc::clone(&calls), None),
+                Some(source([2; 32], Rc::clone(&calls), None)),
+                Some(source([3; 32], Rc::clone(&calls), None)),
+                Some(source(duplicate, Rc::clone(&calls), None)),
+            )
+            .is_err());
+        }
 
         let mut router = ProductionPublicSecretSourceRouterV1::new(
             source([1; 32], Rc::clone(&calls), None),
             Some(source([2; 32], Rc::clone(&calls), None)),
+            None::<RecordingSecretSourceV1>,
             None::<RecordingSecretSourceV1>,
         )
         .expect("valid installed authorities");
@@ -2487,5 +2740,166 @@ mod tests {
             Err(AuthorityRefusalV1::Refused)
         ));
         assert!(calls.borrow().is_empty());
+    }
+
+    fn solana_witness() -> (Digest32, xmr_dleq_sigma::CrossCurvePublicClaim) {
+        // A fixed witness inside the 252-bit domain (top nibble of the
+        // little-endian high byte clear), matching the DLEQ constraints.
+        let mut little_endian = [0x5Au8; 32];
+        little_endian[31] = 0x05;
+        let secret = xmr_dleq_sigma::CrossCurveSecret252::from_little_endian(little_endian)
+            .expect("witness inside the 252-bit domain");
+        let claim = secret.public_claim().expect("public claim");
+        (secret.dom_secret_big_endian(), claim)
+    }
+
+    fn claimed_solana_state(
+        secret_be: Digest32,
+        claim: &xmr_dleq_sigma::CrossCurvePublicClaim,
+    ) -> (SolanaClaimExtractionContextV1, EscrowStateV1) {
+        let context = SolanaClaimExtractionContextV1 {
+            settlement_id: [0x61; 32],
+            terms_hash: [0x62; 32],
+            setup_id: [0x63; 32],
+            funder: [0x64; 32],
+            recipient: [0x65; 32],
+            refund_recipient: [0x66; 32],
+            vault: [0x67; 32],
+            amount: 5_000_000,
+            refund_after_unix: 1_900_000_000,
+            claim: *claim,
+        };
+        let state = EscrowStateV1 {
+            status: EscrowStatus::Claimed,
+            asset_kind: solana_escrow_wire::AssetKind::NativeSol,
+            state_bump: 254,
+            vault_bump: 253,
+            authority_bump: 252,
+            token_decimals: 0,
+            settlement_id: context.settlement_id,
+            terms_hash: context.terms_hash,
+            setup_id: context.setup_id,
+            funder: context.funder,
+            recipient: context.recipient,
+            refund_recipient: context.refund_recipient,
+            token_program: [0; 32],
+            mint: [0; 32],
+            vault: context.vault,
+            dom_adaptor_point: claim.secp_compressed,
+            claim_point_ed25519: claim.ed_compressed,
+            amount: context.amount,
+            funded_amount: 0,
+            refund_after_unix: context.refund_after_unix,
+            terminal_slot: 987_654,
+            revealed_secret_be: secret_be,
+        };
+        (context, state)
+    }
+
+    #[test]
+    fn solana_extraction_returns_the_dleq_bound_scalar_from_the_claimed_state() {
+        let (secret_be, claim) = solana_witness();
+        let (context, state) = claimed_solana_state(secret_be, &claim);
+        let revealed = extract_solana_revealed_secret_v1(&context, &state)
+            .expect("exact claimed escrow state");
+        assert_eq!(revealed.expose_scalar_bytes(), secret_be);
+    }
+
+    #[test]
+    fn solana_extraction_maps_each_terminal_status_to_its_exact_refusal() {
+        let (secret_be, claim) = solana_witness();
+        let (context, base) = claimed_solana_state(secret_be, &claim);
+        for (status, expected) in [
+            (EscrowStatus::Initialized, AuthorityRefusalV1::Unavailable),
+            (EscrowStatus::Funded, AuthorityRefusalV1::Unavailable),
+            (EscrowStatus::Refunded, AuthorityRefusalV1::Inconsistent),
+            (EscrowStatus::Closed, AuthorityRefusalV1::Unavailable),
+        ] {
+            let mut state = base;
+            state.status = status;
+            // Only the status is under test; keep the rest byte-identical so
+            // a wrong refusal cannot hide behind an identity mismatch. The
+            // pre-terminal shapes still carry the funded amount.
+            if matches!(status, EscrowStatus::Initialized | EscrowStatus::Funded) {
+                state.funded_amount = state.amount;
+                state.terminal_slot = 0;
+                state.revealed_secret_be = [0; 32];
+            }
+            assert_eq!(
+                extract_solana_revealed_secret_v1(&context, &state).unwrap_err(),
+                expected,
+                "status {status:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn solana_extraction_rejects_every_single_field_transplant() {
+        let (secret_be, claim) = solana_witness();
+        let (context, base) = claimed_solana_state(secret_be, &claim);
+        let mutations: [&dyn Fn(&mut EscrowStateV1); 12] = [
+            &|state| state.settlement_id = [0xEE; 32],
+            &|state| state.terms_hash = [0xEE; 32],
+            &|state| state.setup_id = [0xEE; 32],
+            &|state| state.funder = [0xEE; 32],
+            &|state| state.recipient = [0xEE; 32],
+            &|state| state.refund_recipient = [0xEE; 32],
+            &|state| state.vault = [0xEE; 32],
+            &|state| state.amount ^= 1,
+            &|state| state.refund_after_unix ^= 1,
+            &|state| state.dom_adaptor_point[1] ^= 1,
+            &|state| state.claim_point_ed25519[0] ^= 1,
+            &|state| state.funded_amount = 1,
+        ];
+        for (index, mutate) in mutations.iter().enumerate() {
+            let mut state = base;
+            mutate(&mut state);
+            assert_eq!(
+                extract_solana_revealed_secret_v1(&context, &state).unwrap_err(),
+                AuthorityRefusalV1::Inconsistent,
+                "mutation {index}",
+            );
+        }
+        let mut zero_slot = base;
+        zero_slot.terminal_slot = 0;
+        assert_eq!(
+            extract_solana_revealed_secret_v1(&context, &zero_slot).unwrap_err(),
+            AuthorityRefusalV1::Inconsistent,
+        );
+    }
+
+    #[test]
+    fn solana_extraction_rejects_a_scalar_that_fails_either_curve_relation() {
+        let (secret_be, claim) = solana_witness();
+        let (context, base) = claimed_solana_state(secret_be, &claim);
+
+        // A flipped scalar bit no longer maps to either certified point.
+        let mut flipped = base;
+        flipped.revealed_secret_be[7] ^= 1;
+        assert_eq!(
+            extract_solana_revealed_secret_v1(&context, &flipped).unwrap_err(),
+            AuthorityRefusalV1::Inconsistent,
+        );
+
+        // A different valid witness satisfies its own points, not the pinned
+        // claim: substitution across escrows is refused.
+        let mut other_le = [0x33u8; 32];
+        other_le[31] = 0x0A;
+        let other = xmr_dleq_sigma::CrossCurveSecret252::from_little_endian(other_le)
+            .expect("second witness");
+        let mut substituted = base;
+        substituted.revealed_secret_be = other.dom_secret_big_endian();
+        assert_eq!(
+            extract_solana_revealed_secret_v1(&context, &substituted).unwrap_err(),
+            AuthorityRefusalV1::Inconsistent,
+        );
+
+        // Zero is refused before any curve work.
+        let mut zeroed = base;
+        zeroed.revealed_secret_be = [0; 32];
+        assert_eq!(
+            extract_solana_revealed_secret_v1(&context, &zeroed).unwrap_err(),
+            AuthorityRefusalV1::Inconsistent,
+        );
     }
 }

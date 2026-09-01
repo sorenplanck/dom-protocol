@@ -1,0 +1,13 @@
+[package]
+name = "solana-observation-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+thiserror = { workspace = true }
+rusqlite = { workspace = true }
+kaystra-core = { path = "../../kaystra-core" }
+solana-kaystra-source = { path = "../solana-kaystra-source" }

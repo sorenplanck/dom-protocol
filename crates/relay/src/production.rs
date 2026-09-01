@@ -3910,6 +3910,10 @@ fn validate_production_resume_entries(
             _ => return Err(ProductionRelayError::InvalidConfiguration),
         }
     }
+    #[expect(
+        clippy::nonminimal_bool,
+        reason = "the disjunction mirrors the audit cases one to one; the minimal form erases the case structure"
+    )]
     if state.lock && !state.identity
         || state.database && (!state.identity || !state.lock)
         || (state.wal || state.shm) && !state.database

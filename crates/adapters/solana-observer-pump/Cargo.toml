@@ -1,0 +1,18 @@
+[package]
+name = "solana-observer-pump"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+thiserror = { workspace = true }
+kaystra-core = { path = "../../kaystra-core" }
+solana-types = { path = "../solana-types" }
+solana-rpc = { path = "../solana-rpc" }
+solana-rpc-pool = { path = "../solana-rpc-pool" }
+solana-observer = { path = "../solana-observer" }
+solana-evidence = { path = "../solana-evidence" }
+solana-kaystra-source = { path = "../solana-kaystra-source" }
+solana-observation-store = { path = "../solana-observation-store" }

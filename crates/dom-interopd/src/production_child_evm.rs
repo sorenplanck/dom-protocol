@@ -243,10 +243,6 @@ impl<R, C> core::fmt::Debug for ProductionEvmChildPortV1<R, C> {
 }
 
 impl<R: EvmRpcV1, C: ProductionEvmChildClockV1> ProductionEvmChildPortV1<R, C> {
-    #[expect(
-        dead_code,
-        reason = "retained surface not yet wired by the stage-7 composition root"
-    )]
     pub(crate) fn new(
         actuator: DurableEvmActuatorV1,
         rpc: R,

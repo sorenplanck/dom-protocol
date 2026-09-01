@@ -1,0 +1,15 @@
+[package]
+name = "xmr-delivery-sqlite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rusqlite = { workspace = true }
+thiserror = { workspace = true }
+xmr-delivery = { path = "../xmr-delivery" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

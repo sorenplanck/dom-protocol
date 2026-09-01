@@ -1,0 +1,13 @@
+[package]
+name = "solana-live"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+thiserror = { workspace = true }
+solana-types = { path = "../solana-types" }
+solana-rpc = { path = "../solana-rpc" }
+solana-delivery = { path = "../solana-delivery" }

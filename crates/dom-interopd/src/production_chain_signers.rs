@@ -92,26 +92,8 @@ pub(crate) struct ProductionChainSignerAuthoritiesV1 {
     downstream: ProductionDomLegAuthorityV1,
     dom_wallet: DomParticipantWalletV1,
     bitcoin_leg: LegIdV1,
-    #[expect(
-        dead_code,
-        reason = "bitcoin claim path frozen until the authenticated M8 round"
-    )]
     bitcoin_authority: BitcoinParticipantClaimAuthorityV1,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "bitcoin claim path frozen until the authenticated M8 round"
-        )
-    )]
     bitcoin_state: BitcoinParticipantNonceVaultV1,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "bitcoin claim path frozen until the authenticated M8 round"
-        )
-    )]
     bitcoin_nonce_seal_key: BitcoinNonceSealKeyV1,
     binding_digest: Digest32,
 }
@@ -124,10 +106,6 @@ impl core::fmt::Debug for ProductionChainSignerAuthoritiesV1 {
 
 struct ProductionDomLegAuthorityV1 {
     binding: DomSessionBindingV1,
-    #[expect(
-        dead_code,
-        reason = "bitcoin claim path frozen until the authenticated M8 round"
-    )]
     state_binding_digest: Digest32,
     nonce_vault: DurableNonceVault,
 }
@@ -138,18 +116,7 @@ struct ProductionDomLegAuthorityV1 {
 /// both secret-bearing owners.  It cannot outlive the aggregate owner and it
 /// cannot be constructed by a caller.
 pub(crate) struct ProductionDomParticipantAuthorityV1<'authority> {
-    #[expect(
-        dead_code,
-        reason = "bitcoin claim path frozen until the authenticated M8 round"
-    )]
     binding: DomSessionBindingV1,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "bitcoin claim path frozen until the authenticated M8 round"
-        )
-    )]
     nonce_vault: &'authority mut DurableNonceVault,
     wallet: DomParticipantWalletSessionV1<'authority>,
 }
@@ -180,10 +147,6 @@ impl<'authority> ProductionDomParticipantAuthorityV1<'authority> {
 }
 
 /// Temporary Bitcoin participant authority paired with its sole nonce store.
-#[expect(
-    dead_code,
-    reason = "bitcoin claim path frozen until the authenticated M8 round"
-)]
 pub(crate) struct ProductionBitcoinParticipantAuthorityV1<'authority> {
     leg: LegIdV1,
     authority: &'authority BitcoinParticipantClaimAuthorityV1,
@@ -192,10 +155,6 @@ pub(crate) struct ProductionBitcoinParticipantAuthorityV1<'authority> {
 }
 
 impl ProductionBitcoinParticipantAuthorityV1<'_> {
-    #[expect(
-        dead_code,
-        reason = "bitcoin claim path frozen until the authenticated M8 round"
-    )]
     pub(crate) const fn leg(&self) -> LegIdV1 {
         self.leg
     }

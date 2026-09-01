@@ -1110,10 +1110,6 @@ struct ProductionF6UnixBondSignerV7 {
 /// Authenticated, purpose-limited request exposed to the independent signer
 /// service. Decoding verifies the client MAC and the canonical public bond
 /// statement before the HSM policy is allowed to consider signing it.
-#[expect(
-    dead_code,
-    reason = "retained surface not yet wired by the stage-7 composition root"
-)]
 pub(crate) struct ProductionF6HsmSigningRequestV7 {
     signer_index: u16,
     signer_public_key: [u8; 32],

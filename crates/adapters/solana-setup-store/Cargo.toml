@@ -1,0 +1,19 @@
+[package]
+name = "solana-setup-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+thiserror = { workspace = true }
+rusqlite = { workspace = true }
+bincode = { workspace = true }
+solana-profile = { path = "../solana-profile" }
+
+[dev-dependencies]
+rand = { workspace = true }
+solana-route-secret = { path = "../solana-route-secret" }
+solana-types = { path = "../solana-types" }
+tempfile = { workspace = true }

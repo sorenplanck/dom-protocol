@@ -279,10 +279,6 @@ impl SettlementChildObserverV1 for BoxedChildPortAuthorityV1 {
 /// Compatibility composition for callers whose dispatch and observation
 /// implementations are separate values.  It is still one owned child port in
 /// the bridge and holds no `RefCell`/lock across chain RPC.
-#[expect(
-    dead_code,
-    reason = "retained surface not yet wired by the stage-7 composition root"
-)]
 struct SplitSettlementChildPortV1<C, O> {
     authority: C,
     observer: O,
@@ -466,10 +462,6 @@ where
     )
 }
 
-#[expect(
-    dead_code,
-    reason = "retained surface not yet wired by the stage-7 composition root"
-)]
 struct ProductionSettlementBridgePartsV1<P, I, C, O, K> {
     coordinator: DurableSettlementCoordinatorV1,
     config: ProductionSettlementBridgeConfigV1,
@@ -480,10 +472,6 @@ struct ProductionSettlementBridgePartsV1<P, I, C, O, K> {
     clock: K,
 }
 
-#[expect(
-    dead_code,
-    reason = "retained surface not yet wired by the stage-7 composition root"
-)]
 fn assemble_production_settlement_authorities_with_clock_v1<P, I, C, O, K>(
     parts: ProductionSettlementBridgePartsV1<P, I, C, O, K>,
 ) -> ProductionSettlementAuthoritiesV1

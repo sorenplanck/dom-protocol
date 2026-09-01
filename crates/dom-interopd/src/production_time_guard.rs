@@ -45,22 +45,10 @@ use crate::{
     production_settlement::ProductionSettlementPlanPersistenceV1, supervisor::AuthorityRefusalV1,
 };
 
-#[expect(
-    dead_code,
-    reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-)]
 const FUNDING_TIME_AUTHORIZATION_DOMAIN_V2: &[u8] = b"DOM-INTEROPD/FUNDING-TIME-AUTHORIZATION/V2\0";
 #[cfg(feature = "production")]
-#[expect(
-    dead_code,
-    reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-)]
 const FUNDING_PLAN_AUTHORIZATION_EVIDENCE_DOMAIN_V2: &[u8] =
     b"DOM-INTEROPD/FUNDING-PLAN-AUTHORIZATION-EVIDENCE/V2\0";
-#[expect(
-    dead_code,
-    reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-)]
 const ZERO_DIGEST: [u8; 32] = [0; 32];
 
 /// Whether an economic action needs a newly-current time capability.
@@ -69,10 +57,6 @@ const ZERO_DIGEST: [u8; 32] = [0; 32];
 /// route store committed funding, exact replay/reconciliation is recovery.
 /// Claim and refund are always exits and remain available after expiry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[expect(
-    dead_code,
-    reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-)]
 pub(crate) enum EconomicBoundaryTimeRequirementV2 {
     /// Obtain and synchronously consume a current one-shot authorization.
     CurrentCapabilityForNewFunding,
@@ -100,10 +84,6 @@ pub(crate) const fn economic_boundary_time_requirement_v2(
 
 /// Exact route-action identity to which a current authorization is bound.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[expect(
-    dead_code,
-    reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-)]
 pub(crate) struct FundingTimeAuthorizationScopeV2 {
     route_id: RouteIdV1,
     leg: LegIdV1,
@@ -117,10 +97,6 @@ pub(crate) struct FundingTimeAuthorizationScopeV2 {
 impl FundingTimeAuthorizationScopeV2 {
     /// Constructs only a new-funding scope. Claim/refund cannot be smuggled
     /// through the expiring gate.
-    #[expect(
-        dead_code,
-        reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-    )]
     pub(crate) fn new(
         route_id: RouteIdV1,
         leg: LegIdV1,
@@ -160,13 +136,6 @@ impl FundingTimeAuthorizationScopeV2 {
         self.leg
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-        )
-    )]
     pub(crate) const fn action(self) -> ActionKindV1 {
         self.action
     }
@@ -189,10 +158,6 @@ impl FundingTimeAuthorizationScopeV2 {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-#[expect(
-    dead_code,
-    reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-)]
 struct FundingTimeAuthorizationFactsV2 {
     scope: FundingTimeAuthorizationScopeV2,
     route_scope_digest: [u8; 32],
@@ -218,10 +183,6 @@ struct FundingTimeAuthorizationFactsV2 {
 /// It intentionally implements neither `Clone`, `Copy`, `Debug`, a codec nor
 /// serialization. Its lifetime is tied to the exclusive durable-store borrow,
 /// and the `Rc` marker also prevents moving it to another thread.
-#[expect(
-    dead_code,
-    reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-)]
 pub(crate) struct FundingTimeAuthorizationV2<'authority> {
     facts: FundingTimeAuthorizationFactsV2,
     _exclusive_time_authority: PhantomData<&'authority mut ()>,
@@ -361,13 +322,6 @@ impl<'authority> FundingTimeAuthorizationV2<'authority> {
     }
 
     /// Commitment the plan authority must durably bind before returning.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-        )
-    )]
     pub(crate) const fn authorization_digest(&self) -> [u8; 32] {
         self.facts.authorization_digest
     }
@@ -393,10 +347,6 @@ impl<'authority> FundingTimeAuthorizationV2<'authority> {
 
 /// Successful synchronous consumption. It has no public constructor and does
 /// not retain the store-borrow lifetime or an unconsumed token.
-#[expect(
-    dead_code,
-    reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-)]
 pub(crate) struct ConsumedFundingTimeAuthorizationV2<T> {
     facts: FundingTimeAuthorizationFactsV2,
     value: T,
@@ -405,10 +355,6 @@ pub(crate) struct ConsumedFundingTimeAuthorizationV2<T> {
 /// Production time-guard refusal. Messages contain no path, endpoint, terms
 /// bytes or chain evidence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[expect(
-    dead_code,
-    reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-)]
 pub(crate) enum ProductionTimeGuardErrorV2 {
     #[error("durable route time authority refused the operation")]
     TimeAuthority(#[from] RouteTimeAnchorErrorV2),
@@ -433,10 +379,6 @@ pub(crate) enum ProductionTimeGuardErrorV2 {
 }
 
 /// Move-only production authority for one admitted V2 route.
-#[expect(
-    dead_code,
-    reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-)]
 pub(crate) struct ProductionRouteTimeGuardV2 {
     store: DurableRouteTimeAnchorStoreV2,
     policy_authorities: AuthoritySetV1,
@@ -451,10 +393,6 @@ pub(crate) struct ProductionRouteTimeGuardV2 {
 }
 
 /// Exact immutable inputs used to bind a route-time authority.
-#[expect(
-    dead_code,
-    reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-)]
 pub(crate) struct ProductionRouteTimeGuardContextV2 {
     pub(crate) policy_authorities: AuthoritySetV1,
     pub(crate) evidence_authorities: AuthoritySetV1,
@@ -474,10 +412,6 @@ impl ProductionRouteTimeGuardV2 {
     /// Binds an already-open route-time store to the exact authenticated route
     /// admission, registry and ordered settlement terms. Construction does not
     /// inspect expiry so recovery can reopen after the admission window.
-    #[expect(
-        dead_code,
-        reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-    )]
     pub(crate) fn new(
         store: DurableRouteTimeAnchorStoreV2,
         admission: &AuthenticatedRouteAdmissionV1,
@@ -531,13 +465,6 @@ impl ProductionRouteTimeGuardV2 {
     /// Installs one threshold-authenticated evidence refresh. The durable
     /// store itself enforces sequence, fixed anchors, extending tips and
     /// fail-closed invalidation before a later funding can use it.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-        )
-    )]
     pub(crate) fn install_evidence(
         &mut self,
         signed: &SignedRouteTimeEvidenceV2,
@@ -572,13 +499,6 @@ impl ProductionRouteTimeGuardV2 {
     /// `NotPrepared`, retry must enter this method again and revalidate that
     /// exact preinstalled plan. Only a committed route action is recovery and
     /// bypasses this expiring gate.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-        )
-    )]
     pub(crate) fn authorize_new_funding_with<T, E, F>(
         &mut self,
         now: u64,
@@ -667,10 +587,6 @@ impl ProductionRouteTimeGuardV2 {
 /// deliberately bypass only the *temporal* authority; they still require the
 /// authenticated base plan authority.
 #[cfg(feature = "production")]
-#[expect(
-    dead_code,
-    reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-)]
 pub(crate) struct ProductionTimeGuardedPlanPersistenceV2<A> {
     time_guard: ProductionRouteTimeGuardV2,
     base_plan_authority: A,
@@ -719,13 +635,6 @@ where
             .install_evidence(signed, trusted_now_seconds)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-        )
-    )]
     fn install_with_base_authority(
         &mut self,
         coordinator: &mut DurableSettlementCoordinatorV1,
@@ -747,13 +656,6 @@ where
         Ok(verified)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-        )
-    )]
     fn install_new_funding(
         &mut self,
         coordinator: &mut DurableSettlementCoordinatorV1,
@@ -796,13 +698,6 @@ where
         flatten_time_guard_result(result)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-        )
-    )]
     fn refence_new_funding(
         &mut self,
         coordinator: &mut DurableSettlementCoordinatorV1,
@@ -984,10 +879,6 @@ where
 }
 
 #[cfg(feature = "production")]
-#[expect(
-    dead_code,
-    reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-)]
 struct FundingBoundPlanAuthorityV2<'base, 'authorization, A>
 where
     A: SettlementPlanAuthorityV1,
@@ -1029,10 +920,6 @@ where
 
 #[cfg(feature = "production")]
 /// Domain-separates and binds the base plan evidence to one temporal token.
-#[expect(
-    dead_code,
-    reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-)]
 pub(crate) fn combine_plan_authorization(
     base: PlanAuthorizationV1,
     temporal_authorization_digest: [u8; 32],
@@ -1072,10 +959,6 @@ pub(crate) fn combine_plan_authorization(
 }
 
 #[cfg(feature = "production")]
-#[expect(
-    dead_code,
-    reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-)]
 fn temporal_last_valid_unix_ms(
     authorization: &FundingTimeAuthorizationV2<'_>,
 ) -> Result<u64, AuthorityRefusalV1> {
@@ -1088,10 +971,6 @@ fn temporal_last_valid_unix_ms(
 }
 
 #[cfg(feature = "production")]
-#[expect(
-    dead_code,
-    reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-)]
 fn funding_scope_from_plan(
     plan: &CompositeSettlementPlanV1,
     route_event_id: EventIdV1,
@@ -1131,10 +1010,6 @@ fn funding_scope_from_plan(
 }
 
 #[cfg(feature = "production")]
-#[expect(
-    dead_code,
-    reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-)]
 fn validate_pristine_funding_plan(
     stored: &StoredSettlementPlanV1,
 ) -> Result<(), AuthorityRefusalV1> {
@@ -1156,10 +1031,6 @@ fn validate_pristine_funding_plan(
 }
 
 #[cfg(feature = "production")]
-#[expect(
-    dead_code,
-    reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-)]
 fn verify_exact_stored_plan(
     stored: &StoredSettlementPlanV1,
     expected: &CompositeSettlementPlanV1,
@@ -1178,10 +1049,6 @@ fn verify_exact_stored_plan(
 }
 
 #[cfg(feature = "production")]
-#[expect(
-    dead_code,
-    reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-)]
 fn flatten_time_guard_result<T>(
     result: Result<Result<T, AuthorityRefusalV1>, ProductionTimeGuardErrorV2>,
 ) -> Result<T, AuthorityRefusalV1> {
@@ -1189,10 +1056,6 @@ fn flatten_time_guard_result<T>(
 }
 
 #[cfg(feature = "production")]
-#[expect(
-    dead_code,
-    reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-)]
 fn map_time_guard_error(error: ProductionTimeGuardErrorV2) -> AuthorityRefusalV1 {
     match error {
         ProductionTimeGuardErrorV2::TimeAuthority(RouteTimeAnchorErrorV2::StorageUnavailable) => {
@@ -1221,10 +1084,6 @@ fn map_time_guard_error(error: ProductionTimeGuardErrorV2) -> AuthorityRefusalV1
 }
 
 #[cfg(feature = "production")]
-#[expect(
-    dead_code,
-    reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-)]
 fn map_plan_persistence_coordinator_error(error: CoordinatorErrorV1) -> AuthorityRefusalV1 {
     match error {
         CoordinatorErrorV1::StorageUnavailable
@@ -1253,10 +1112,6 @@ fn map_plan_persistence_coordinator_error(error: CoordinatorErrorV1) -> Authorit
     }
 }
 
-#[expect(
-    dead_code,
-    reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-)]
 fn funding_time_authorization_token<'authority>(
     _current: &CurrentRouteTimeLadderV2<'authority>,
     facts: FundingTimeAuthorizationFactsV2,
@@ -1268,10 +1123,6 @@ fn funding_time_authorization_token<'authority>(
     }
 }
 
-#[expect(
-    dead_code,
-    reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-)]
 fn funding_time_authorization_digest(
     facts: &FundingTimeAuthorizationFactsV2,
 ) -> Result<[u8; 32], ProductionTimeGuardErrorV2> {
@@ -1317,10 +1168,6 @@ fn funding_time_authorization_digest(
     )
 }
 
-#[expect(
-    dead_code,
-    reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
-)]
 fn digest_parts(domain: &[u8], fields: &[&[u8]]) -> Result<[u8; 32], ProductionTimeGuardErrorV2> {
     let mut hash = Blake2bVar::new(32).map_err(|_| ProductionTimeGuardErrorV2::DigestFailure)?;
     hash.update(domain);

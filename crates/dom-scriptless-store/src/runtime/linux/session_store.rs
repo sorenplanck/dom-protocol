@@ -2887,8 +2887,14 @@ pub enum DurableTransportOutcomeV1 {
     /// The exact message and session successor are durable; an ACK may now be
     /// emitted with this receipt.
     Accepted(DurableTransportReceiptV1),
-    /// Different validly signed bytes reused one logical key. The supplied
-    /// `FailedClosed` successor is durable; no ACK may be emitted.
+    /// An equivocation stands durably persisted on this logical key: at some
+    /// point different validly signed bytes reused it, and the `FailedClosed`
+    /// successor is durable. No ACK may be emitted — **including for the
+    /// bytes that were accepted before the equivocation**: once the key is
+    /// poisoned, every re-presentation reports the poison, so a peer can
+    /// never be invited to keep progressing a dead session. (Adjudicated
+    /// against the alternative duplicate-ACK reading; the relay worker's
+    /// `was_failed_closed` handling and four restart tests encode this.)
     EquivocationPersisted,
 }
 
@@ -20749,6 +20755,10 @@ impl ContractsSessionStoreV1 {
         Ok(())
     }
 
+    /// Test-only entry point. Production reaches the same work through
+    /// `audit_locked_inner`, which calls `audit_consumptions_inner` with the
+    /// recovery plan in hand; this wrapper exists so a test can audit
+    /// consumptions on their own.
     #[cfg(test)]
     fn audit_consumptions(&self) -> Result<(), SessionStoreError> {
         self.audit_consumptions_inner(None)
@@ -36270,6 +36280,14 @@ impl PreRecoveryStagingInventoryV1 {
     ) -> Result<Self, SessionStoreError> {
         require_complete_pre_recovery_directory_set(directories)?;
         let mut entries = Vec::new();
+        // The census only sees finals: everything captured here is excluded
+        // from its scan. The two rules the census enforces byte-first —
+        // magic-matches-name, and V1-xor-V2 per session over the profile
+        // chain — therefore have to hold for staged M.8/F7 artifacts HERE,
+        // before staging recovery replays a single byte, or a crash cut
+        // becomes a way to smuggle a wrong-typed or profile-mixed artifact
+        // past the quarantine.
+        let mut staged_session_profiles = BTreeMap::<[u8; 32], u8>::new();
         for (directory_kind, directory) in directories {
             let mut finals = BTreeSet::new();
             let mut staged = Vec::new();
@@ -36284,20 +36302,41 @@ impl PreRecoveryStagingInventoryV1 {
                     let mut retained = directory.open_file(&staging, false)?;
                     let bytes = retained.read_bounded(PRE_RECOVERY_STAGING_MAX_LEN)?;
                     directory.require_named_file_identity(&staging, &retained)?;
+                    let magic_prefix: Option<[u8; 8]> =
+                        bytes.get(..8).and_then(|prefix| prefix.try_into().ok());
                     staged.push((
                         staging,
                         ValidatedComponent::registered(final_name)?,
                         retained,
                         tagged_hash(RECOVERY_SOURCE_HASH_TAG, &bytes),
+                        magic_prefix,
                     ));
                 } else {
                     finals.insert(name.to_owned());
                 }
                 Ok(())
             })?;
-            for (staging, final_name, retained, exact_digest) in staged {
+            for (staging, final_name, retained, exact_digest, magic_prefix) in staged {
                 if finals.contains(final_name.as_str()) {
                     return Err(SessionStoreError::Quarantined);
+                }
+                if let Some((session_id, descriptor, false)) =
+                    parse_m8_f7_durable_profile_name(final_name.as_str())
+                {
+                    if magic_prefix != Some(*descriptor.magic) {
+                        return Err(SessionStoreError::Quarantined);
+                    }
+                    if m8_f7_artifact_selects_profile(descriptor.artifact) {
+                        let profile_mask = match descriptor.profile {
+                            M8F7DurableProfileVersion::LegacyV1 => 0b01,
+                            M8F7DurableProfileVersion::V2 => 0b10,
+                        };
+                        let observed = staged_session_profiles.entry(session_id).or_insert(0);
+                        *observed |= profile_mask;
+                        if *observed == 0b11 {
+                            return Err(SessionStoreError::Quarantined);
+                        }
+                    }
                 }
                 entries.push(PreRecoveryStagingEntryV1 {
                     directory: *directory_kind,
@@ -37127,7 +37166,10 @@ fn template_hash_for_purpose(payload: &[u8; 160], purpose: PurposeV1) -> [u8; 32
     let source = match purpose {
         PurposeV1::Funding => &payload[..32],
         PurposeV1::ClaimAdaptor => &payload[32..64],
-        PurposeV1::Refund => &payload[64..96],
+        // The refund adaptor signs the same refund transaction as the plain
+        // refund; what differs is that it is adaptor-bound and therefore
+        // reveals. The template is the same one, not a second slot.
+        PurposeV1::Refund | PurposeV1::RefundAdaptor => &payload[64..96],
         PurposeV1::Sponsor => return [0; 32],
     };
     let mut result = [0; 32];
@@ -37137,7 +37179,7 @@ fn template_hash_for_purpose(payload: &[u8; 160], purpose: PurposeV1) -> [u8; 32
 
 fn signing_phase_for_purpose(purpose: PurposeV1) -> SessionPhaseV1 {
     match purpose {
-        PurposeV1::Refund => SessionPhaseV1::RefundSigning,
+        PurposeV1::Refund | PurposeV1::RefundAdaptor => SessionPhaseV1::RefundSigning,
         PurposeV1::ClaimAdaptor => SessionPhaseV1::ClaimSigning,
         PurposeV1::Funding => SessionPhaseV1::FundingAuthorized,
         PurposeV1::Sponsor => SessionPhaseV1::FailedClosed,
@@ -37146,7 +37188,7 @@ fn signing_phase_for_purpose(purpose: PurposeV1) -> SessionPhaseV1 {
 
 fn normal_signing_round_predecessor_phase(purpose: PurposeV1) -> SessionPhaseV1 {
     match purpose {
-        PurposeV1::Refund => SessionPhaseV1::TemplatesCommitted,
+        PurposeV1::Refund | PurposeV1::RefundAdaptor => SessionPhaseV1::TemplatesCommitted,
         PurposeV1::ClaimAdaptor => SessionPhaseV1::RefundSigned,
         PurposeV1::Funding => SessionPhaseV1::FundingAuthorized,
         PurposeV1::Sponsor => SessionPhaseV1::FailedClosed,
@@ -37631,7 +37673,7 @@ fn validate_operational_signing_round_semantics<B: SigningSemanticBindingAccessV
         )
         .map(Some)
         .map_err(|_| SessionStoreError::InvalidDomTransaction),
-        PurposeV1::ClaimAdaptor => {
+        PurposeV1::ClaimAdaptor | PurposeV1::RefundAdaptor => {
             let adaptor_point = binding
                 .adaptor_point()
                 .ok_or(SessionStoreError::InvalidDomTransaction)?;
@@ -39849,7 +39891,9 @@ pub(crate) mod evidence_only_staging {
                     fixture.trusted_chain_id.as_bytes(),
                     kernel_message.as_bytes(),
                 )?),
-                PurposeV1::ClaimAdaptor => None,
+                // Both adaptor purposes complete by adaptation, so neither
+                // produces a plain signature at this point.
+                PurposeV1::ClaimAdaptor | PurposeV1::RefundAdaptor => None,
                 PurposeV1::Sponsor => return Err(Box::new(SessionStoreError::Canonical)),
             };
             let mut messages = Vec::with_capacity(6);
@@ -42471,19 +42515,32 @@ mod tests {
         let records = temporary.path().join("contracts").join(RECORDS_NAME);
         let final_name = session_record_name([0x81; 32], 0);
         let staging = records.join(format!(".{final_name}.staging"));
-        let displaced = records.join("displaced-staging");
-        let planted_path = records.join("planted-staging");
-        // A prepared opening only retains a staging source that could have
-        // been emitted by the Store. Use a canonical crash-cut session record;
-        // arbitrary bytes are correctly quarantined during preparation and
-        // cannot establish the TOCTOU precondition this test needs.
+        // The decoy and the displacement target live OUTSIDE the records
+        // directory: `require_canonical_pre_recovery_inventory` (correctly)
+        // quarantines any non-canonical name it can see, so parking them
+        // inside the scanned directory would fail the open before the swap
+        // this test is about ever happens.
+        let displaced = temporary.path().join("displaced-staging");
+        let planted_path = temporary.path().join("planted-staging");
+        // Both files must parse as the session record the staging name
+        // claims, or prepare itself quarantines before the identity swap
+        // this test is about; what distinguishes them is the payload and,
+        // decisively, the file identity captured at prepare time.
         let original =
-            record_with_session_and_terms_hash([0x81; 32], SessionPhaseV1::Created, [0x82; 32])?
+            record_with_session_and_terms_hash([0x81; 32], SessionPhaseV1::Created, [0x44; 32])?
                 .as_bytes()
                 .to_vec();
-        let planted = b"same-uid-planted-staging";
+        let planted =
+            record_with_session_and_terms_hash([0x81; 32], SessionPhaseV1::Created, [0x55; 32])?
+                .as_bytes()
+                .to_vec();
         std::fs::write(&staging, &original)?;
-        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(FILE_MODE))?;
+        std::fs::write(&planted_path, &planted)?;
+        // The capability layer demands exactly FILE_MODE (0o600) on every
+        // regular file it scans; any other mode quarantines before the
+        // identity swap this test is about.
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(&planted_path, std::fs::Permissions::from_mode(0o600))?;
 
         let prepared = ContractsSessionStoreV1::prepare_open_production(
             temporary.capability()?,

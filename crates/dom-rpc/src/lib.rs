@@ -1499,7 +1499,7 @@ mod tests {
         let unauthenticated = app()
             .oneshot(
                 Request::builder()
-                    .uri(&format!("/tx/{}", "11".repeat(32)))
+                    .uri(format!("/tx/{}", "11".repeat(32)))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1514,7 +1514,7 @@ mod tests {
         let authenticated = app()
             .oneshot(
                 Request::builder()
-                    .uri(&format!("/tx/{}", "11".repeat(32)))
+                    .uri(format!("/tx/{}", "11".repeat(32)))
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),

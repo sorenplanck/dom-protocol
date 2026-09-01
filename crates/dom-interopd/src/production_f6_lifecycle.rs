@@ -128,18 +128,7 @@ impl ProductionAwaitingF6PinsV2 {
 /// Relay RFQ.  It has no codec and cannot outlive the activation call.
 pub(crate) struct AuthenticatedPendingRfqV2 {
     wire: RouteWireContextV1,
-    #[expect(
-        dead_code,
-        reason = "retained surface not yet wired by the stage-7 composition root"
-    )]
     sequence: u64,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "retained surface not yet wired by the stage-7 composition root"
-        )
-    )]
     envelope_digest: Digest32,
     rfq: RfqV2,
 }

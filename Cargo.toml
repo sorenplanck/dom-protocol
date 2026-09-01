@@ -55,6 +55,8 @@ members = [
     "crates/dom-actuator",
     "crates/dom-interopd",
     "crates/evm-actuator",
+    "crates/solana-actuator",
+    "crates/xmr-actuator",
     "crates/dom-adaptor",
     "crates/dom-final-claim-binding",
     "crates/dom-leg",
@@ -103,6 +105,62 @@ members = [
     "crates/f5-e2e",
     "crates/f6-model",
     "crates/f7-e2e",
+    "crates/adapters/xmr-crypto",
+    "crates/adapters/xmr-dleq-sigma",
+    "crates/adapters/xmr-route-secret",
+    "crates/adapters/xmr-setup-profile",
+    "crates/adapters/xmr-dleq-nullifier-store",
+    "crates/adapters/xmr-refund-policy",
+    "crates/adapters/xmr-refund-adaptor",
+    "crates/adapters/xmr-secret-store",
+    "crates/adapters/xmr-evidence",
+    "crates/adapters/xmr-observer",
+    "crates/adapters/xmr-observation-store",
+    "crates/adapters/xmr-observer-pump",
+    "crates/adapters/xmr-kaystra-records",
+    "crates/adapters/xmr-kaystra-source",
+    "crates/adapters/xmr-delivery",
+    "crates/adapters/xmr-delivery-sqlite",
+    "crates/adapters/xmr-live-sidecar-api",
+    "crates/adapters/xmr-sidecar-auth",
+    "crates/adapters/xmr-spend-port",
+    "crates/adapters/xmr-raw-tx-verify",
+    "crates/adapters/xmr-live-sidecar-blocking-client",
+    "crates/adapters/xmr-live-sidecar-uds-client",
+    "crates/adapters/xmr-rpc-broadcast-blocking",
+    "crates/adapters/xmr-kaystra-bridge",
+    "crates/adapters/xmr-runtime-wiring",
+    "crates/adapters/xmr-session-init",
+    "crates/f8-xmr-kaystra-e2e",
+
+    # -- Solana condition-lock leg V8 --
+    "crates/adapters/solana-escrow-wire",
+    "crates/adapters/solana-types",
+    "crates/adapters/solana-pda",
+    "crates/adapters/solana-route-secret",
+    "crates/adapters/solana-profile",
+    "crates/adapters/solana-setup-store",
+    "crates/adapters/solana-program-client",
+    "crates/adapters/solana-transaction-builder",
+    "crates/adapters/solana-runtime-wiring",
+    "crates/adapters/solana-rpc",
+    "crates/adapters/solana-rpc-pool",
+    "crates/adapters/solana-program-attestation",
+    "crates/adapters/solana-evidence",
+    "crates/adapters/solana-observer",
+    "crates/adapters/solana-observation-store",
+    "crates/adapters/solana-observer-pump",
+    "crates/adapters/solana-kaystra-bridge",
+    "crates/adapters/solana-kaystra-records",
+    "crates/adapters/solana-kaystra-source",
+    "crates/adapters/solana-counterparty",
+    "crates/adapters/solana-delivery",
+    "crates/adapters/solana-delivery-sqlite",
+    "crates/adapters/solana-live",
+    "crates/adapters/solana-session-init",
+    "crates/adapters/solana-secret-store",
+    "crates/f8-solana-model",
+    "crates/f8-solana-e2e",
 ]
 
 # Tauri desktop wallet — excluded from the workspace because it needs a
@@ -110,6 +168,7 @@ members = [
 # own from wallet-desktop/ (npm run tauri build / CI).
 exclude = [
     "wallet-desktop",
+    "programs/dom-solana-escrow",
 ]
 
 [workspace.package]
@@ -227,6 +286,13 @@ store = { path = "crates/store" }
 reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 cap-std = { version = "=4.0.2", default-features = false }
 rusqlite = { version = "=0.40.1", default-features = false, features = ["backup", "bundled", "limits"] }
+
+
+# Solana V8 host-side dependencies
+curve25519-dalek = { version = "=4.1.3", default-features = false, features = ["alloc"] }
+base64      = "=0.22.1"
+bs58        = "=0.5.1"
+ed25519-dalek = { version = "=2.1.1", features = ["rand_core"] }
 
 [profile.release]
 opt-level       = 3
