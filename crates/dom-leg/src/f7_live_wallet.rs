@@ -850,7 +850,8 @@ fn synchronize_wallet(wallet: &mut WalletService) -> Result<(), F7OfficialWallet
             }
             Ok(_) | Err(CoreError::NodeNotReady) => {}
             Err(CoreError::Backend(error)) if error.is_transient_sync_unavailability() => {}
-            // NOT RATIFIED (lab): a scan validation failure is retried inside
+            // RATIFIED (explicit operator decision, 2026-09-02 —
+            // ratifications/e13-executadas v2 §2.11): a scan validation failure is retried inside
             // the same deadline instead of aborting the attach. Every page the
             // wallet commits is durable, so a retried synchronize resumes from
             // the durable cursor and RE-RUNS the failed validation, which must

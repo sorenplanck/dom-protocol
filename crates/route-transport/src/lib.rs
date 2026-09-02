@@ -1,4 +1,7 @@
-//! The route's messages OVER THE RELAY — NOT RATIFIED.
+//! The route's messages OVER THE RELAY — RATIFIED (explicit operator
+//! decision, 2026-09-02; the signed register is
+//! `docs/interop/ratifications/e13-executadas/RATIFICACAO-DECISOES-EXECUTADAS-v2.md`
+//! §2.2, kept local by policy).
 //!
 //! The F7 record's one open row the original design got right
 //! (`laboratory/F7-Laboratory-Record.md` §7.1) says: the route's DSC1

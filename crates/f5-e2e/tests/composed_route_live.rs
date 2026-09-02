@@ -1,6 +1,7 @@
 //! Composed cross-chain route — LEVEL 3, LIVE on two real chains.
 //!
-//! NOT RATIFIED. Laboratory evidence requested by the operator: the mixed
+//! RATIFIED (explicit operator decision, 2026-09-02 — ratifications/
+//! e13-executadas v2 §2.10). Laboratory evidence requested by the operator: the mixed
 //! composed route's chain hand-off executed live. One route scalar `t`:
 //!
 //!   1. revealed on a REAL EVM chain (anvil) by `ConditionLockV2.claim`,

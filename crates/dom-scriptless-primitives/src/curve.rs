@@ -12,8 +12,10 @@
 //! comment: it re-derives each encoding through `dom_crypto`'s own public
 //! surface and refuses to pass if the two ever disagree.
 //!
-//! NOT RATIFIED — the duplication exists because the node is immutable, and
-//! is recorded for the operator as a standing audit item.
+//! RATIFIED (explicit operator decision, 2026-09-02 — ratifications/
+//! e13-executadas v2 §2.6, kept local by policy): the duplication exists
+//! because the node is immutable, and remains a standing audit item with
+//! the `conformance` test as the guarantee.
 
 use dom_core::DomError;
 use k256::elliptic_curve::sec1::FromEncodedPoint;

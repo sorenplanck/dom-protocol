@@ -1,4 +1,7 @@
-//! Composed cross-chain route binding — NOT RATIFIED.
+//! Composed cross-chain route binding — RATIFIED (explicit operator
+//! decision, 2026-09-02; the signed register is
+//! `docs/interop/ratifications/e13-executadas/RATIFICACAO-DECISOES-EXECUTADAS-v2.md`
+//! §2.1, kept local by policy).
 //!
 //! One route `X -> DOM -> Y` (Foundation Document §1.2: the DOM is the hub)
 //! is TWO settlements sharing ONE adaptor point `T = t*G`:

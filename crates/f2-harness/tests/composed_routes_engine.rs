@@ -1,6 +1,7 @@
 //! Composed cross-chain route proof — LEVEL 2 (durable settlement engine).
 //!
-//! NOT RATIFIED. Laboratory evidence requested by the operator to decide,
+//! RATIFIED (explicit operator decision, 2026-09-02 — ratifications/
+//! e13-executadas v2 §2.9). Laboratory evidence requested by the operator to decide,
 //! before any normative work, whether the four composed routes
 //!   BTC -> DOM -> BTC   EVM -> DOM -> EVM   BTC -> DOM -> EVM   EVM -> DOM -> BTC
 //! hold not just at the cryptographic layer (level 1, `dom-leg` composed

@@ -1,6 +1,6 @@
 [package]
 name = "route-composer"
-description = "DOM Interop — composed cross-chain route binding: two settlements, one adaptor point, fail-closed window/ordering/scalar guards (Foundation §1.2 DOM-hub; NOT RATIFIED)"
+description = "DOM Interop — composed cross-chain route binding: two settlements, one adaptor point, fail-closed window/ordering/scalar guards (Foundation §1.2 DOM-hub; RATIFIED 2026-09-02, explicit operator decision)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

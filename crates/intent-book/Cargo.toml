@@ -1,6 +1,6 @@
 [package]
 name = "intent-book"
-description = "DOM Interop — the intent board: a two-phase cascade (private solver window, then public board) over the ratified RFQ flow, with merit privilege whose weights are operator configuration and have no default (NOT RATIFIED)"
+description = "DOM Interop — the intent board: a two-phase cascade (private solver window, then public board) over the ratified RFQ flow, with merit privilege whose weights are operator configuration and have no default (RATIFIED 2026-09-02, explicit operator decision)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

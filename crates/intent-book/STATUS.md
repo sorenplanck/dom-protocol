@@ -1,4 +1,4 @@
-# intent-book — status: COMPILED, TESTS GREEN. NOT RATIFIED.
+# intent-book — status: COMPILED, TESTS GREEN. RATIFIED (explicit operator decision, 2026-09-02; ratifications/e13-executadas v2 §2.5, kept local by policy).
 
 This crate implements `laboratory/design/INTENT_BOOK_DESIGN.md` under the
 operator decisions of 2026-08-24T18:25Z (OQ-S2: it lives here, beside
@@ -56,8 +56,11 @@ behavioural claim, in order:
 
 ## What is still NOT claimed
 
-That the design is ratified (it is a WORKING DRAFT under Norma 0.2), and
-that the crate behaves correctly outside the tested fixtures. The merit
+(Amended 2026-09-02: the first item below was discharged — the design was
+ratified by explicit operator decision, ratifications/e13-executadas v2
+§2.5. The rest stands unchanged.)
+
+That the crate behaves correctly outside the tested fixtures. The merit
 NUMBERS used by the tests (10 s threshold, 1_000_000 floor, 30-day window)
 are fixture values, not defaults: the crate still refuses to start without
 explicit operator values.

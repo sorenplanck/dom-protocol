@@ -22,8 +22,10 @@
 //! If `dom-crypto`'s backend ever moves, those three fail rather than drift
 //! silently.
 //!
-//! NOT RATIFIED — the duplication exists only because the node cannot be
-//! edited, and is recorded for the operator as a standing audit item.
+//! RATIFIED (explicit operator decision, 2026-09-02 — ratifications/
+//! e13-executadas v2 §2.7, kept local by policy): the duplication exists
+//! only because the node cannot be edited, and remains a standing audit
+//! item with the cross-acceptance tests as the guarantee.
 
 mod node_private;
 mod sec1_zkp_bridge;

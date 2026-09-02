@@ -1,6 +1,7 @@
 //! Composed cross-chain route proof — LEVEL 1 (cryptography).
 //!
-//! NOT RATIFIED. This is laboratory evidence requested by the operator to
+//! RATIFIED (explicit operator decision, 2026-09-02 — ratifications/
+//! e13-executadas v2 §2.8). This is laboratory evidence requested by the operator to
 //! decide, BEFORE any normative work, whether the four composed routes are
 //! cryptographically possible with the protocol material already in the repo:
 //!

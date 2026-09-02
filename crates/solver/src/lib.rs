@@ -1,4 +1,7 @@
-//! The reference solver — NOT RATIFIED.
+//! The reference solver — RATIFIED (explicit operator decision,
+//! 2026-09-02; the signed register is
+//! `docs/interop/ratifications/e13-executadas/RATIFICACAO-DECISOES-EXECUTADAS-v2.md`
+//! §2.3, kept local by policy).
 //!
 //! The ratified F6 machinery (`rfq`) has both sides of the market fully
 //! specified — objects, admissibility (§4.1 + AD-1), the selection
