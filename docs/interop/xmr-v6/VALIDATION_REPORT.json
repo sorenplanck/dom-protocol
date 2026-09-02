@@ -1,6 +1,6 @@
 {
-  "root": "/home/user/dom-protocol",
-  "metadata_root": "/home/user/dom-protocol/docs/interop/xmr-v6",
+  "root": "~/dom-protocol",
+  "metadata_root": "~/dom-protocol/docs/interop/xmr-v6",
   "active_components": 19,
   "manifests_parsed": 20,
   "packages": {

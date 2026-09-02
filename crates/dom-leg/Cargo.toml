@@ -23,7 +23,14 @@ real-dom-adaptor = [
   "dep:dom-serialization",
   "dep:rand_core",
 ]
-f7-wallet-compositor = [
+# Carries `evidence-only` in its name because it forwards the Store's
+# evidence-only surface: the restored compositor opens its session store through
+# `create_evidence_only`/`open_evidence_only` and refuses any other budget
+# profile (the F7 evidence cut). The layer guard forbids forwarding that surface
+# under a neutral name, and a release build refuses it outright (`compile_error!`
+# in dom-scriptless-store). The operational ladder migration replaces this
+# feature; it does not rename it back.
+f7-wallet-compositor-evidence-only = [
   "real-dom-adaptor",
   "dep:cap-std",
   "dep:dom-scriptless-crypto",
@@ -46,7 +53,7 @@ f7-wallet-compositor = [
 # Never enabled by the production F7 runner. This exists only so retained
 # evidence fixtures may inject a completed refund signature while still
 # running the frozen DOM verifier.
-evidence-only = ["f7-wallet-compositor"]
+evidence-only = ["f7-wallet-compositor-evidence-only"]
 
 [dependencies]
 dom-scriptless-primitives = { path = "../dom-scriptless-primitives" }
@@ -86,7 +93,7 @@ rand_core = { version = "0.6.4", default-features = false, features = ["getrando
 [dev-dependencies]
 tempfile = "=3.24.0"  # aligned up to the Contracts pin at absorption (dev-only; exact pin preserved)
 
-# LAB (NOT RATIFIED): the composed-route level-1 proof drives the BTC and EVM
+# LAB (RATIFIED 2026-09-02, explicit operator decision): the composed-route level-1 proof drives the BTC and EVM
 # legs alongside the DOM leg to show one adaptor scalar binds all three. These
 # leg crates do NOT import the dom-adaptor pin, so the §4.2 boundary is intact.
 btc-crypto = { path = "../adapters/btc-crypto" }
@@ -102,7 +109,7 @@ dom-consensus = { workspace = true }
 name = "scad0_differential"
 required-features = ["real-dom-adaptor"]
 
-# LAB (NOT RATIFIED): composed cross-chain route proof, level 1 (cryptography).
+# LAB (RATIFIED 2026-09-02, explicit operator decision): composed cross-chain route proof, level 1 (cryptography).
 # One adaptor scalar t / point T binds the DOM, BTC and EVM legs at once.
 [[test]]
 name = "composed_routes"

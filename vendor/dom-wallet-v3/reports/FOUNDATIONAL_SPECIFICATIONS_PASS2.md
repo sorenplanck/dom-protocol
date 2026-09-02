@@ -22,7 +22,7 @@ The lifecycle draft correctly established durable preparation, exact-byte retry,
 
 Repository inputs read: README.md; CONTRIBUTING.md; docs/ARCHITECTURE.md; docs/ENGINEERING_SOURCES.md; docs/REFERENCE_BASELINE.md; docs/EPIC_DOM_ADOPTION_MATRIX.md; docs/CONFIRMED_DESIGN_INPUTS.md; docs/SPECIFICATION_GATE.md; specs/0000_DESIGN_PRINCIPLES.md; specs/0001_THREAT_MODEL.md; specs/0002_WALLET_STATE_MODEL.md; specs/0004_STORAGE_ATOMICITY.md; specs/0005_CHAIN_SOURCE_AND_SYNC.md; specs/0006_REORG_AND_ROLLBACK.md; specs/README.md; reports/FOUNDATIONAL_SPECIFICATIONS_PASS1.md; and the initial complete diffs for 0003, 0007, and 0008.
 
-Read-only reference evidence included DOM wallet-crypto, wallet-keys, wallet2 state, pending, persistence, backup, transport, consensus, transaction, slate, node, and relevant tests and fuzz targets. Comparative-study reports read were 00, 01, 03 through 05, 07 through 19, plus confirmed-findings, evidence-limitations, and equivalence-matrix artifacts under /home/leonardov/wallet-reference-study.
+Read-only reference evidence included DOM wallet-crypto, wallet-keys, wallet2 state, pending, persistence, backup, transport, consensus, transaction, slate, node, and relevant tests and fuzz targets. Comparative-study reports read were 00, 01, 03 through 05, 07 through 19, plus confirmed-findings, evidence-limitations, and equivalence-matrix artifacts under ~/wallet-reference-study.
 
 ## Files written
 

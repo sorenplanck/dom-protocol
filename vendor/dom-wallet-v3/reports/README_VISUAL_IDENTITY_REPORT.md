@@ -16,7 +16,7 @@ Only `README.md`, `assets/dom-wallet-v3-banner.svg`, and this report were writte
 * `reports/FOUNDATIONAL_SPECIFICATIONS_PASS1.md`.
 * `reports/FOUNDATIONAL_SPECIFICATIONS_PASS2.md`.
 * `docs/ARCHITECTURE.md`, `docs/ENGINEERING_SOURCES.md`, `docs/REFERENCE_BASELINE.md`, `docs/EPIC_DOM_ADOPTION_MATRIX.md`, `docs/CONFIRMED_DESIGN_INPUTS.md`, and `docs/SPECIFICATION_GATE.md`.
-* `/home/leonardov/dom-protocol/wallet-desktop/ui/index.html`, `wallet-desktop/ui/assets/dom-coin.png`, and `wallet-desktop/ui/styles.css` as visual-reference evidence only.
+* `~/dom-protocol/wallet-desktop/ui/index.html`, `wallet-desktop/ui/assets/dom-coin.png`, and `wallet-desktop/ui/styles.css` as visual-reference evidence only.
 
 ## README baseline and copied-content diagnosis
 
@@ -38,7 +38,7 @@ It states the governing rule exactly: **DOM semantics > Epic strategy.** DOM Wal
 
 ### Symbol evidence
 
-The current DOM desktop web header and onboarding surface reference `wallet-desktop/ui/assets/dom-coin.png` from `/home/leonardov/dom-protocol/wallet-desktop/ui/index.html` at the two DOM image references in the brand surface. That raster medallion is the local official DOM symbol evidence available in the DOM Protocol repository. No authoritative reusable vector or separate website source was present in that checkout.
+The current DOM desktop web header and onboarding surface reference `wallet-desktop/ui/assets/dom-coin.png` from `~/dom-protocol/wallet-desktop/ui/index.html` at the two DOM image references in the brand surface. That raster medallion is the local official DOM symbol evidence available in the DOM Protocol repository. No authoritative reusable vector or separate website source was present in that checkout.
 
 The banner uses a proportional vector rendering of the medallion form: concentric circular relief, radial marks, central DOM legend, and engraved bronze treatment. The medallion is rendered with equal `cx` and `cy` radii inside one translated group; no nonuniform transform, stretch, alternate token symbol, or recoloring outside the official dark-bronze-paper material treatment is used. No raster was extracted or embedded because the official local source is a 499074-byte PNG and no reusable vector source exists.
 

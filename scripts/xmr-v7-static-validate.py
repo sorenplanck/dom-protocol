@@ -177,7 +177,8 @@ def main() -> int:
     if scripts_dir.exists():
         for shell in sorted(scripts_dir.glob('*.sh')):
             result = subprocess.run(
-                ['bash', '-n', str(shell)],
+                ['bash', '-n'],
+                input=shell.read_bytes(),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,

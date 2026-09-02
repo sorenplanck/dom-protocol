@@ -35,7 +35,8 @@ def verify_commit(root: Path) -> None:
     if not (root / ".git").exists():
         return
     result = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        ["git", "rev-parse", "HEAD"],
+        cwd=root,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

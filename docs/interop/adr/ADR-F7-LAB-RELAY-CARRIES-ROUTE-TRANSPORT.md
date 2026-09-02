@@ -191,7 +191,7 @@ method on `F7DomDsc1FaultControllerV1` — the trait the laboratory already
 injects — so no new parameter is threaded through five layers. Its default is
 the identity, and `persist_stage_messages` compares the returned bytes against
 the sender's own and fails closed on any difference. `cargo check -p dom-leg
---features f7-wallet-compositor` passes. Production behaviour is unchanged: with
+--features f7-wallet-compositor-evidence-only` passes. Production behaviour is unchanged: with
 the default, the bytes handed to `accept_transport_message` are the same bytes
 as before.
 

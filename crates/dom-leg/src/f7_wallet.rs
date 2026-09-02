@@ -14,13 +14,13 @@ use dom_adaptor::{
     finalize_plain_signature_v1, AcceptedOperationalSigningSessionV1, AcceptedSigningSessionV1,
     AdaptorPreSignatureV1, AdaptorSecret, BindingContextV1, BpStatementV1, CommitmentExportedV1,
     ContractKindV1, ContractTxRoleV1, DirectionV1, NonceCommitmentV1, NonceRevealV1, NonceVaultV1,
-    OperationalFundingAuthorizationError, OperationalM8FundingAuthorizationV1, PartialSignatureV1,
-    ParticipantIdentityV1, ParticipantPublicNoncesV1, ParticipantRosterV1, PurposeV1,
-    ResentArtifactV1, RestartedPartialAuthorizedV1, RestartedReservationV1, RevealExportedV1,
+    OperationalClaimTransactionSinkV1, OperationalFundingAuthorizationError,
+    OperationalM8FundingAuthorizationV1, PartialSignatureV1, ParticipantIdentityV1,
+    ParticipantPublicNoncesV1, ParticipantRosterV1, PurposeV1, ResentArtifactV1,
+    RestartedPartialAuthorizedV1, RestartedReservationV1, RevealExportedV1,
     ScriptlessTransactionTemplateV1, SessionBlindingShareCapabilityV1, SigningPhaseV1,
     SigningShareV1, TrustedChainIdV1, ValidatedSigningRoundStateV1, VaultBackedSignerError,
-    OperationalClaimTransactionSinkV1, VaultBackedSignerV1, VerifiedClaimTransactionV1,
-    VerifiedScriptlessTransactionV1,
+    VaultBackedSignerV1, VerifiedClaimTransactionV1, VerifiedScriptlessTransactionV1,
     VerifiedSharedOutputV1,
 };
 use dom_consensus::{validate_transaction, Transaction, TransactionKernel, ValidationContext};
@@ -639,8 +639,11 @@ impl F7ProductionContractsCompositionV1 {
         let store_policy = policy
             .evidence_profile_variant()
             .map_err(|_| F7WalletCompositorError::Binding)?;
-        let session_store =
-            ContractsSessionStoreV1::create_evidence_only(parent, session_store_root, store_policy)?;
+        let session_store = ContractsSessionStoreV1::create_evidence_only(
+            parent,
+            session_store_root,
+            store_policy,
+        )?;
         Self::from_parts(
             session_store,
             participants,

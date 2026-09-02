@@ -266,9 +266,6 @@ fn open_composition(path: &Path) -> TestResult<F7ProductionContractsCompositionV
     )?)
 }
 
-
-
-
 fn identity_store_for_reference<'a>(
     composition: &'a F7ProductionContractsCompositionV1,
     reference: &SessionTransportIdentityReferenceV1,
@@ -281,7 +278,6 @@ fn identity_store_for_reference<'a>(
     }
     Err(std::io::Error::other("retained identity reference has no owner").into())
 }
-
 
 // ─── Stage-12 recontract ────────────────────────────────────────────────────
 // The durable-execution hardening closed the caller-successor ingress for
@@ -356,7 +352,12 @@ fn hardened_store_refuses_legacy_template_commit_ingress() -> TestResult {
     drop(context);
     drop(composition);
     let reopened = open_composition(temporary.path())?;
-    if reopened.session_store().load_session(SESSION_ID)?.as_bytes() != current.as_bytes() {
+    if reopened
+        .session_store()
+        .load_session(SESSION_ID)?
+        .as_bytes()
+        != current.as_bytes()
+    {
         return Err(std::io::Error::other("session record changed across restart").into());
     }
     Ok(())

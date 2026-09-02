@@ -1,0 +1,90 @@
+# F5 end-to-end CI (Annex M M.14, M.17 steps 14-16).
+#
+# The regtest cross-check runs on every push: it installs a real Bitcoin
+# Core, funds the P2TR address our Rust builder derives, and confirms the
+# node derives the identical scriptPubKey. The full custom-Signet E01-E16
+# matrix is documented in docs/runbooks/F5-E2E-runbook.md and is executed
+# with the operator-held ephemeral challenge key. Public Signet is optional
+# under D-027 and is not part of G-F5.
+name: f5-e2e
+# `push` alone covers every branch of this single-owner private repo; a
+# `pull_request` trigger would re-run the identical commit a second time
+# (metered minutes, no additional signal).
+on: [push, workflow_dispatch]
+
+concurrency:
+  group: f5-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  f5-parser-fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: nightly-2026-06-30
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz -> target
+      - name: System dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang pkg-config
+      - name: Install pinned cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Evidence decoder fuzz smoke
+        run: cargo +nightly-2026-06-30 fuzz run fuzz_bitcoin_evidence_decode -- -runs=10000
+      - name: Witness parser fuzz smoke
+        run: cargo +nightly-2026-06-30 fuzz run fuzz_witness_parser -- -runs=10000
+
+  f5-conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.1
+      # Compilation cache only; every suite still executes in full.
+      - uses: Swatinem/rust-cache@v2
+      - name: System dependencies (secp256k1-zkp + rust-bitcoin compile C)
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang pkg-config
+      # C1a official BIP327 vectors + C1b instrumented hash>=n semantics.
+      - name: C1a/C1b conformance (pinned upstream vectors)
+        run: cargo test -p btc-secp-c1a --locked
+      # C2 24-cell adaptor matrix, C3 byte-equal differential, C4 adversarial.
+      - name: C2/C3/C4 conformance (real backend)
+        run: cargo test -p btc-crypto --locked
+      # The vault crash harness, the observer/reorg store, the evidence
+      # verifier and the two-party round machine.
+      - name: Vault, observer, evidence and rounds
+        run: |
+          cargo test -p btc-vault --locked
+          cargo test -p btc-observer --locked
+          cargo test -p btc-evidence --locked
+          cargo test -p adapter-btc --locked
+
+  f5-regtest-e2e:
+    # Metered-minutes discipline: installing Bitcoin Core is the costliest
+    # step in this workflow, and the cross-check it feeds does not depend
+    # on branch-local iteration. Every merge to main still runs it in
+    # full; workflow_dispatch keeps an on-demand path for branches. The
+    # check itself is untouched.
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.1
+      - uses: Swatinem/rust-cache@v2
+      - name: System dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang pkg-config python3
+      - name: Install Bitcoin Core
+        run: |
+          set -euo pipefail
+          VERSION=31.0
+          SHA256=d3e4c58a35b1d0a97a457462c94f55501ad167c660c245cb1ffa565641c65074
+          URL="https://bitcoincore.org/bin/bitcoin-core-${VERSION}/bitcoin-${VERSION}-x86_64-linux-gnu.tar.gz"
+          curl -fsSL "$URL" -o /tmp/bitcoin.tar.gz
+          echo "$SHA256  /tmp/bitcoin.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/bitcoin.tar.gz -C /tmp
+          sudo install -m0755 "/tmp/bitcoin-${VERSION}/bin/bitcoind" /usr/local/bin/bitcoind
+          sudo install -m0755 "/tmp/bitcoin-${VERSION}/bin/bitcoin-cli" /usr/local/bin/bitcoin-cli
+          bitcoind --version | head -1
+      - name: Regtest P2TR cross-check against Bitcoin Core
+        run: ./scripts/f5-regtest-e2e.sh

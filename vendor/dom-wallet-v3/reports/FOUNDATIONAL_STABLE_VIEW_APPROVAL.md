@@ -29,7 +29,7 @@ Canonical activation atomically commits cursor `(height, block_hash)` with every
 
 ## Files and specification effects
 
-Files read were `README.md`, `specs/README.md`, Specifications 0005, 0006, and 0012, `docs/FOUNDATIONAL_DECISION_REGISTER.md`, `docs/FOUNDATIONAL_PROTOCOL_DECISION_REQUEST.md`, and `docs/SPECIFICATION_CONSISTENCY_MATRIX.md`. Files read and written remained under `/home/leonardov/dom-wallet-v3`; no external repository was accessed and no background process was created.
+Files read were `README.md`, `specs/README.md`, Specifications 0005, 0006, and 0012, `docs/FOUNDATIONAL_DECISION_REGISTER.md`, `docs/FOUNDATIONAL_PROTOCOL_DECISION_REQUEST.md`, and `docs/SPECIFICATION_CONSISTENCY_MATRIX.md`. Files read and written remained under `~/dom-wallet-v3`; no external repository was accessed and no background process was created.
 
 Phase A files written were `specs/0005_CHAIN_SOURCE_AND_SYNC.md`, `specs/0006_REORG_AND_ROLLBACK.md`, `docs/FOUNDATIONAL_PROTOCOL_DECISION_REQUEST.md`, `docs/FOUNDATIONAL_DECISION_REGISTER.md`, and `specs/README.md`. Phase B files written were `specs/0012_TESTING_AND_ASSURANCE.md`, `docs/SPECIFICATION_CONSISTENCY_MATRIX.md`, this report, and `README.md`.
 

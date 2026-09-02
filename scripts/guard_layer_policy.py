@@ -120,10 +120,6 @@ I14_ALLOWLIST: collections.Counter[tuple[str, str]] = collections.Counter(
             'writeln!(target, "{key}={}", encode_hex(&value)).expect("string write cannot fail");',
         ): 1,
         (
-            "crates/dom-interopd/src/production_config.rs",
-            'writeln!(target, "{key}={value}").expect("string write cannot fail");',
-        ): 1,
-        (
             "crates/dom-scriptless-bulletproof/src/sec1_zkp_bridge.rs",
             '.expect("Y from a valid curve point is a valid field element");',
         ): 1,
@@ -179,13 +175,23 @@ I6_ALLOWLIST: collections.Counter[tuple[str, str]] = collections.Counter(
         # line.  The remaining entry enumerates `MISSING_PRODUCTION_PARTS_V1`, which is
         # the refusal behaviour itself: a composition root that will not start
         # has to say which parts are absent, or the operator is left to guess.
-        ("crates/dom-interopd/src/main.rs", 'eprintln!("{error}");'): 3,
+        # Reviewed 2026-09-02 (Stage 13 guard pass).  The stage-7 and stage-10
+        # composition roots changed two things in `main.rs`, and the inventory
+        # says which.  The fourth `eprintln!("{error}")` is `run` refusing a
+        # non-operational artifact (`require_operational_artifact_v1`) on a
+        # terminal branch that returns `ExitCode::FAILURE`.  The
+        # `MISSING_PRODUCTION_PARTS_V1` enumeration became the
+        # `PRODUCTION_KNOWN_LIMITS_V1` enumeration once the daemon could drive
+        # a route: same shape, the operator is told which paths refuse by
+        # policy before the route starts.  Both are the entry point writing to
+        # stderr, not output escaping from library code.
+        ("crates/dom-interopd/src/main.rs", 'eprintln!("{error}");'): 4,
         ("crates/dom-interopd/src/main.rs", "eprintln!("): 1,
         (
             "crates/dom-interopd/src/main.rs",
             'eprintln!("{PRODUCTION_USAGE_V1}");',
         ): 1,
-        ("crates/dom-interopd/src/main.rs", 'eprintln!("  missing: {part}");'): 1,
+        ("crates/dom-interopd/src/main.rs", 'eprintln!("  known limit: {limit}");'): 1,
         (
             "crates/dom-interopd/src/main.rs",
             'eprintln!("usage: dom-interopd self-check [--json]");',
@@ -213,7 +219,7 @@ F1_SPONSOR_ALLOWLIST: collections.Counter[tuple[str, str]] = collections.Counter
         ): 1,
         (
             "crates/dom-adaptor/src/nonce.rs",
-            "PurposeV1::ClaimAdaptor | PurposeV1::Sponsor => {",
+            "PurposeV1::ClaimAdaptor | PurposeV1::RefundAdaptor | PurposeV1::Sponsor => {",
         ): 1,
         (
             "crates/dom-adaptor/src/transcript.rs",
@@ -223,10 +229,31 @@ F1_SPONSOR_ALLOWLIST: collections.Counter[tuple[str, str]] = collections.Counter
             "crates/dom-adaptor/src/transcript.rs",
             "PurposeV1::Sponsor.to_byte(),",
         ): 1,
+        # Reviewed 2026-09-02.  `RefundAdaptor = 0x05` (NAR-DC-P1-009) joined
+        # the purpose registry and rustfmt split both exhaustive arms across
+        # lines, so the one two-count entry became two one-count entries.
+        # Sponsor still only round-trips its byte here; nothing signs.
         (
             "crates/dom-scriptless-crypto/src/storage.rs",
-            "PurposeV1::Refund | PurposeV1::ClaimAdaptor | PurposeV1::Funding | PurposeV1::Sponsor => {",
+            "| PurposeV1::Sponsor => Ok(purpose),",
+        ): 1,
+        (
+            "crates/dom-scriptless-crypto/src/storage.rs",
+            "| PurposeV1::Sponsor => purpose.to_byte(),",
+        ): 1,
+        # Reviewed 2026-09-02.  The restored Wallet V3 compositor (evidence
+        # cut, `f7-wallet-compositor-evidence-only`) names Sponsor three times
+        # and every arm fails closed: two `Binding` errors where a purpose
+        # selects a DSC1 checkpoint kind or a nonce vault, and `FailedClosed`
+        # in `economic_phase_for_purpose`.  It composes no sponsor round.
+        (
+            "crates/dom-leg/src/f7_wallet.rs",
+            "PurposeV1::Sponsor | PurposeV1::RefundAdaptor => {",
         ): 2,
+        (
+            "crates/dom-leg/src/f7_wallet.rs",
+            "PurposeV1::Sponsor | PurposeV1::RefundAdaptor => SessionPhaseV1::FailedClosed,",
+        ): 1,
         (
             "crates/dom-scriptless-store/src/runtime/linux/session_store.rs",
             "PurposeV1::Sponsor => return [0; 32],",
@@ -305,27 +332,48 @@ I2_CONTRACT_SHA256: dict[str, str] = {
 # calls require_strict_phase1/is_strict_v1_authorized or terminates in an
 # explicit FailedClosed/error arm.  Updating these digests records that review;
 # it does not expand the allowed Sponsor surface.
+#
+# Re-frozen on 2026-09-02 in the Stage 13 guard pass, after the guard had sat
+# red since the stage-7 composition root.  What the diff against the
+# 2026-08-31 digests contains, file by file, and what it does not.  The six
+# adaptor, actuator and crypto files changed for exactly one reason:
+# `PurposeV1::RefundAdaptor = 0x05` (NAR-DC-P1-009), a new authorized purpose
+# that widens every `ClaimAdaptor` grammar arm to `ClaimAdaptor |
+# RefundAdaptor` and maps to `PresignRefund` in the actuator.  Sponsor is
+# untouched in all six: still `CapabilityMismatch`, still `PurposeNotAuthorized`
+# from `require_strict_phase1`, still refused by `validate_adaptor_grammar` and
+# `finalize_plain_signature_v1`, still only a byte in the crypto envelope.  The
+# Store file grew by the EVM action transport records, the post-anchor
+# claim-signing owner reservation and the resumed production open; its five
+# Sponsor arms and ten strict-gate call sites are byte-identical to the frozen
+# text, and the RefundAdaptor arms it gained sit beside `Refund`, never beside
+# `Sponsor`.  `f7_wallet.rs` enters the inventory because the restored
+# compositor names Sponsor (three fail-closed arms, inventoried above); the
+# operational ladder migration will change that file and must re-freeze it.
 F1_SPONSOR_FILE_SHA256: dict[str, str | None] = {
     "crates/dom-actuator/src/contracts.rs": (
-        "2341ae81b8b5aeb7ca730b473a8369233c255ad42dc91c071fe3367af4c99482"
+        "c1232d2d6dc8fe4e390d1358bfa797bdf4fee17bc7eed3ef601a4df35ef2c083"
     ),
     "crates/dom-adaptor/src/context.rs": (
-        "40136447e465b7705cf528ecd57a4ab9be524495a575afa8b8e5e3f7414ef5b2"
+        "5b9c9486caa18c0599a8995d8e805a7c641233bc978eaa72e9a40fb56324b22d"
     ),
     "crates/dom-adaptor/src/messages.rs": (
-        "581e66d3f45dfd477e53af48de8396f758fe5558428d073ea0ce6fabf6d8f92b"
+        "2149fd13cf3ba2d8c1a8b31f92d9ee0f59ee44a0d4da54696db5dbb009d374c4"
     ),
     "crates/dom-adaptor/src/nonce.rs": (
-        "bb5784ae3dbe1915eb7a7717283b110db7267fd3d5c8544ec44d08f092b061a3"
+        "d9060a256c99b66b504d5436f44b75b513ce12dbb4b773cd8ec4c515c2f53f72"
     ),
     "crates/dom-adaptor/src/transcript.rs": (
-        "b3bbf38c53db46bb6c4228439865f90f264d5880b5f1fa4f95c160ac6871cf44"
+        "a9ba40ebcccb06216f489fe0d6502d293c5cebddf1f3f70a471cfcfb1fbf30dd"
     ),
     "crates/dom-scriptless-crypto/src/storage.rs": (
-        "22a244677ae90238590813fc3452c5c640ae14851d6e5ddb06d5be762c6ab6eb"
+        "5d7bc7c2a625e63ccbb6764f21ce86c6f1ed12eb0e9857d4b00d5ae1376c5266"
     ),
     "crates/dom-scriptless-store/src/runtime/linux/session_store.rs": (
-        "f25a097d12985bafe6a62bd83cd88cb0fdcd3ef4a49fb7059690b19903f76bd4"
+        "1bbe92593bbcfbc610796c61e1fa74c3caff8996fcab2ef5ca412f0ceaad50ba"
+    ),
+    "crates/dom-leg/src/f7_wallet.rs": (
+        "95085209446f2fb56993519e9c9e2926a20e4e186394357ea7aa7a8afb25cab4"
     ),
 }
 
@@ -2341,14 +2389,11 @@ def check_f1_secp_contexts(root: pathlib.Path) -> CheckResult:
 
     findings: list[Finding] = []
     source_root = root / "crates" / "adapters" / "btc-live" / "src"
-    literal_expected = collections.Counter(
-        {
-            (
-                "crates/adapters/btc-live/src/fresh.rs",
-                "let context = SecpContext::new(&[0x5a; 32]);",
-            ): 1
-        }
-    )
+    # Emptied 2026-09-02: the one inventoried literal context,
+    # `SecpContext::new(&[0x5a; 32])` in `fresh.rs`, now sits inside a
+    # `#[cfg(test)]` impl and is masked, so production btc-live builds every
+    # context from `fresh_entropy()`.  Any new literal is a finding.
+    literal_expected: collections.Counter[tuple[str, str]] = collections.Counter()
     literal_actual: collections.Counter[tuple[str, str]] = collections.Counter()
     for path in sorted(source_root.rglob("*.rs")):
         source = path.read_text(encoding="utf-8")

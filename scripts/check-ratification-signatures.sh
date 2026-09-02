@@ -29,7 +29,14 @@ fi
 
 # The exact count is pinned. A signature that disappears is as much a change as
 # one that fails, and a silent zero would otherwise pass this loop.
-expected_signatures=14
+#
+# 14 -> 15 on 2026-09-02 (Stage 13 guard pass): the F7 wallet restoration
+# (b77fab2) brought the vendored sidecar fixture
+# vendor/dom-wallet-v3/tests/fixtures/sidecar/ab45a294…/sidecar-manifest.json
+# with its detached signature, which verifies against the operator key like
+# every other entry (trusted comment timestamp 1784848828). The loop below
+# still verifies all fifteen, every run.
+expected_signatures=15
 
 signatures="$(git ls-files '*.minisig' | sort)"
 count="$(printf '%s\n' "$signatures" | grep -c . || true)"

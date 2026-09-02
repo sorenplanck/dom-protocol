@@ -23,7 +23,7 @@ Repository evidence read:
 * `docs/CONFIRMED_DESIGN_INPUTS.md`
 * `docs/SPECIFICATION_GATE.md`
 * `specs/0000_DESIGN_PRINCIPLES.md`
-* relevant DOM Wallet V1/V2 storage, state, transport, restore, and backup terminology in `/home/leonardov/dom-protocol`
+* relevant DOM Wallet V1/V2 storage, state, transport, restore, and backup terminology in `~/dom-protocol`
 
 Study reports read:
 

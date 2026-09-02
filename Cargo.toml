@@ -170,7 +170,11 @@ exclude = [
     "wallet-desktop",
     "programs/dom-solana-escrow",
     # Stage 12 — locally vendored dom-wallet-v3 (own workspace); reached only
-    # through the [patch] section below, never as members of this workspace.
+    # through direct path dependencies in [workspace.dependencies], never as
+    # members of this workspace. (The wallet pin predates the workspace
+    # Zeroizing hardening of dom-slate/dom-tx; the vendored copy carries the
+    # minimal adaptation, applied locally and mirrored upstream by the
+    # operator.)
     "vendor/dom-wallet-v3",
     # Stage 12 — provisioning tool with dom-interopd `production` features; a
     # workspace member would unify production with the default development
@@ -288,12 +292,19 @@ dom-scriptless-primitives = { path = "crates/dom-scriptless-primitives" }
 dom-scriptless-store = { path = "crates/dom-scriptless-store" }
 dom-scriptless-transport = { path = "crates/dom-scriptless-transport" }
 store = { path = "crates/store" }
-dom-wallet-core = { git = "https://github.com/sorenplanck/dom-wallet-v3", rev = "512def52945100785b9e7d6e93dbb17d78adeb3e", package = "dom-wallet-core" }
-dom-wallet-core-recovery = { git = "https://github.com/sorenplanck/dom-wallet-v3", rev = "512def52945100785b9e7d6e93dbb17d78adeb3e", package = "dom-wallet-core-recovery" }
-dom-wallet-core-protocol = { git = "https://github.com/sorenplanck/dom-wallet-v3", rev = "512def52945100785b9e7d6e93dbb17d78adeb3e", package = "dom-wallet-core-protocol" }
-dom-wallet-core-sync = { git = "https://github.com/sorenplanck/dom-wallet-v3", rev = "512def52945100785b9e7d6e93dbb17d78adeb3e", package = "dom-wallet-core-sync" }
-dom-wallet-domain = { git = "https://github.com/sorenplanck/dom-wallet-v3", rev = "512def52945100785b9e7d6e93dbb17d78adeb3e", package = "dom-wallet-domain" }
-dom-wallet-remote-source = { git = "https://github.com/sorenplanck/dom-wallet-v3", rev = "512def52945100785b9e7d6e93dbb17d78adeb3e", package = "dom-wallet-remote-source" }
+# Stage 13 — the six wallet pins point straight at the tracked vendor copy.
+# They were git dependencies on sorenplanck/dom-wallet-v3 rev
+# 512def52945100785b9e7d6e93dbb17d78adeb3e redirected here by a [patch]
+# section; check-boundaries.sh forbids any dom-* git dependency because a git
+# dependency can carry a divergent revision, and a path into the tracked tree
+# cannot. Same source, stated directly. The rev is kept in this comment as
+# provenance of the vendored copy, not as a resolution target.
+dom-wallet-core = { path = "vendor/dom-wallet-v3/crates/dom-wallet-core" }
+dom-wallet-core-recovery = { path = "vendor/dom-wallet-v3/crates/dom-wallet-core-recovery" }
+dom-wallet-core-protocol = { path = "vendor/dom-wallet-v3/crates/dom-wallet-core-protocol" }
+dom-wallet-core-sync = { path = "vendor/dom-wallet-v3/crates/dom-wallet-core-sync" }
+dom-wallet-domain = { path = "vendor/dom-wallet-v3/crates/dom-wallet-domain" }
+dom-wallet-remote-source = { path = "vendor/dom-wallet-v3/crates/dom-wallet-remote-source" }
 
 # Registry and wallet-edge pins the absorbed crates already used, carried
 # over verbatim from the Interop manifest.
@@ -318,40 +329,10 @@ overflow-checks = true   # consensus-critical: never disable
 [profile.dev]
 overflow-checks = true   # enforce even in dev
 
-# Stage 12 — the F7 wallet compositor pin (dom-wallet-v3) still names the
-# dom-protocol crates by git rev 6f8a947; the workspace has since vendored
-# those crates. One type universe only: every git reference is patched to the
-# vendored path so wallet-composed values and daemon stores share identities.
-[patch."https://github.com/sorenplanck/dom-protocol"]
-dom-adaptor = { path = "crates/dom-adaptor" }
-dom-chain = { path = "crates/dom-chain" }
-dom-config = { path = "crates/dom-config" }
-dom-consensus = { path = "crates/dom-consensus" }
-dom-core = { path = "crates/dom-core" }
-dom-crypto = { path = "crates/dom-crypto" }
-dom-mempool = { path = "crates/dom-mempool" }
-dom-node = { path = "crates/dom-node" }
-dom-pmmr = { path = "crates/dom-pmmr" }
-dom-pow = { path = "crates/dom-pow" }
-dom-rpc = { path = "crates/dom-rpc" }
-dom-serialization = { path = "crates/dom-serialization" }
-dom-slate = { path = "crates/dom-slate" }
-dom-store = { path = "crates/dom-store" }
-dom-tx = { path = "crates/dom-tx" }
-dom-wire = { path = "crates/dom-wire" }
-dom-wallet = { path = "crates/dom-wallet" }
-dom-wallet-core-api = { path = "crates/dom-wallet-core-api" }
-dom-wallet-crypto = { path = "crates/dom-wallet-crypto" }
-dom-wallet-keys = { path = "crates/dom-wallet-keys" }
-dom-wallet-recovery = { path = "crates/dom-wallet-recovery" }
-
-# Stage 12 - the wallet pin predates the workspace Zeroizing hardening of
-# dom-slate/dom-tx; the vendored copy carries the minimal adaptation, applied
-# locally and mirrored upstream by the operator.
-[patch."https://github.com/sorenplanck/dom-wallet-v3"]
-dom-wallet-core = { path = "vendor/dom-wallet-v3/crates/dom-wallet-core" }
-dom-wallet-core-recovery = { path = "vendor/dom-wallet-v3/crates/dom-wallet-core-recovery" }
-dom-wallet-core-protocol = { path = "vendor/dom-wallet-v3/crates/dom-wallet-core-protocol" }
-dom-wallet-core-sync = { path = "vendor/dom-wallet-v3/crates/dom-wallet-core-sync" }
-dom-wallet-domain = { path = "vendor/dom-wallet-v3/crates/dom-wallet-domain" }
-dom-wallet-remote-source = { path = "vendor/dom-wallet-v3/crates/dom-wallet-remote-source" }
+# Stage 13 — the [patch."…/dom-protocol"] section that redirected the wallet
+# pin's git references (rev 6f8a947) onto these workspace crates is gone: the
+# vendored wallet manifest now states the identical paths directly, so the
+# type universe is one without any [patch] indirection. The shared-output BP
+# guard forbids [patch] overrides because one could silently redirect the
+# cryptographic backend; stating the paths at the dependency site keeps the
+# same identities and makes redirection unrepresentable.

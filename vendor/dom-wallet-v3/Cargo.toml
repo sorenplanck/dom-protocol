@@ -58,23 +58,30 @@ tauri-plugin-updater = "=2.10.1"
 
 # The transaction engine uses the immutable DOM protocol implementation as the
 # sole authority for slate construction, transaction serialization, proof and
-# signature validation.  These are deliberately revision pinned rather than
-# copied into this wallet workspace.
-dom-core = { git = "https://github.com/sorenplanck/dom-protocol", rev = "6f8a947dee0e54c3421caa295755b1746c178137" }
-dom-crypto = { git = "https://github.com/sorenplanck/dom-protocol", rev = "6f8a947dee0e54c3421caa295755b1746c178137" }
-dom-consensus = { git = "https://github.com/sorenplanck/dom-protocol", rev = "6f8a947dee0e54c3421caa295755b1746c178137" }
-dom-serialization = { git = "https://github.com/sorenplanck/dom-protocol", rev = "6f8a947dee0e54c3421caa295755b1746c178137" }
-dom-tx = { git = "https://github.com/sorenplanck/dom-protocol", rev = "6f8a947dee0e54c3421caa295755b1746c178137" }
-dom-slate = { git = "https://github.com/sorenplanck/dom-protocol", rev = "6f8a947dee0e54c3421caa295755b1746c178137" }
-dom-config = { git = "https://github.com/sorenplanck/dom-protocol", rev = "6f8a947dee0e54c3421caa295755b1746c178137" }
-dom-chain = { git = "https://github.com/sorenplanck/dom-protocol", rev = "6f8a947dee0e54c3421caa295755b1746c178137" }
-dom-node = { git = "https://github.com/sorenplanck/dom-protocol", rev = "6f8a947dee0e54c3421caa295755b1746c178137" }
-dom-pow = { git = "https://github.com/sorenplanck/dom-protocol", rev = "6f8a947dee0e54c3421caa295755b1746c178137" }
-dom-wallet = { git = "https://github.com/sorenplanck/dom-protocol", rev = "6f8a947dee0e54c3421caa295755b1746c178137" }
-dom-wallet-core-api = { git = "https://github.com/sorenplanck/dom-protocol", rev = "6f8a947dee0e54c3421caa295755b1746c178137" }
-dom-wallet-keys = { git = "https://github.com/sorenplanck/dom-protocol", rev = "6f8a947dee0e54c3421caa295755b1746c178137" }
-dom-wallet-recovery = { git = "https://github.com/sorenplanck/dom-protocol", rev = "6f8a947dee0e54c3421caa295755b1746c178137" }
-dom-adaptor = { git = "https://github.com/sorenplanck/dom-protocol", rev = "6f8a947dee0e54c3421caa295755b1746c178137" }
+# signature validation.
+#
+# Stage 13: these were git dependencies pinned at rev
+# 6f8a947dee0e54c3421caa295755b1746c178137, redirected to the audit
+# workspace's crates by a root [patch] section. The shared-output BP guard
+# forbids any [patch] override (it could redirect the backend), so the same
+# identity is now stated directly: relative paths into the workspace that
+# vendored this wallet. One type universe, no indirection. The rev stays in
+# this comment as provenance.
+dom-core = { path = "../../crates/dom-core" }
+dom-crypto = { path = "../../crates/dom-crypto" }
+dom-consensus = { path = "../../crates/dom-consensus" }
+dom-serialization = { path = "../../crates/dom-serialization" }
+dom-tx = { path = "../../crates/dom-tx" }
+dom-slate = { path = "../../crates/dom-slate" }
+dom-config = { path = "../../crates/dom-config" }
+dom-chain = { path = "../../crates/dom-chain" }
+dom-node = { path = "../../crates/dom-node" }
+dom-pow = { path = "../../crates/dom-pow" }
+dom-wallet = { path = "../../crates/dom-wallet" }
+dom-wallet-core-api = { path = "../../crates/dom-wallet-core-api" }
+dom-wallet-keys = { path = "../../crates/dom-wallet-keys" }
+dom-wallet-recovery = { path = "../../crates/dom-wallet-recovery" }
+dom-adaptor = { path = "../../crates/dom-adaptor" }
 
 # Sidecar release authentication and atomic pointer handling are deliberately
 # consumed from their reviewed protocol commit. This does not move the wallet's

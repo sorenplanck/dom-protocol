@@ -988,9 +988,13 @@ class RepositoryContractTests(unittest.TestCase):
                 ),
             )
 
+        # Each production gate is a bare `run_gate` invocation: the function
+        # counts the failure and the script's exit status carries it.  The
+        # former trailing `|| true` neutralised exactly that, and this test
+        # once matched on it; it now refuses it.
         blocks = re.findall(
             r'run_gate "production daemon (?P<label>check|clippy|tests)" \\\n'
-            r'(?P<command>(?:\s+.*\\\n)*\s+.*) \|\| true',
+            r'(?P<command>(?:[ \t]+.*\\\n)*[ \t]+.*)\n',
             ci,
         )
         self.assertEqual([label for label, _ in blocks], ["check", "clippy", "tests"])
@@ -1001,6 +1005,10 @@ class RepositoryContractTests(unittest.TestCase):
             self.assertIn("--no-default-features --features production", command)
             self.assertIn("--lib --bins", command)
             self.assertNotIn("--all-targets", command)
+            self.assertNotIn("|| true", command)
+        production_region = ci[ci.index('run_gate "production daemon check"') :]
+        production_region = production_region[: production_region.index("Store release-surface")]
+        self.assertNotIn("|| true", production_region)
 
     def test_current_workspace_satisfies_every_absorbed_guard(self) -> None:
         results = guard.validate(ROOT)

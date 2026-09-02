@@ -67,3 +67,7 @@ sidecar-gpl/
 
 # Internal working log — local only, never published.
 docs/interop/DOM-INTEROP-IMPLEMENTATION-LOG.md
+
+# Signed ratification packets — local only, never published.
+docs/interop/ratifications/e13-guards/
+docs/interop/ratifications/e13-executadas/

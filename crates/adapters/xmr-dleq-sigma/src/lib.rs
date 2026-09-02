@@ -236,8 +236,10 @@ impl<'de> Deserialize<'de> for CrossCurvePublicClaim {
                         .next_element()?
                         .ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
                 }
-                Ok(CrossCurvePublicClaim::from_canonical_bytes(&buf)
-                    .expect("buffer is exactly the fixed width"))
+                // The buffer is already the fixed width; failing closed here
+                // costs nothing and leaves no panic path inside a decoder.
+                CrossCurvePublicClaim::from_canonical_bytes(&buf)
+                    .ok_or_else(|| serde::de::Error::invalid_length(buf.len(), &self))
             }
         }
         deserializer.deserialize_bytes(ClaimVisitor)

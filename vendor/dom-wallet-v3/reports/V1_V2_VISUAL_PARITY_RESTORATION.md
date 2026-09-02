@@ -2,8 +2,8 @@
 
 ## Read-only visual references
 
-- V1 visual reference: `/home/leonardov/dom-protocol`, tag `wallet-v0.3.1`, commit `e03128d215c110cb3c6a44a53f679d36baaebc08`.
-- V2 visual reference: `/home/leonardov/dom-protocol`, tag `wallet-v2.0.1`, commit `1c143ad9231d6ee0b014bf89188eea5a9e1cd4a6`.
+- V1 visual reference: `~/dom-protocol`, tag `wallet-v0.3.1`, commit `e03128d215c110cb3c6a44a53f679d36baaebc08`.
+- V2 visual reference: `~/dom-protocol`, tag `wallet-v2.0.1`, commit `1c143ad9231d6ee0b014bf89188eea5a9e1cd4a6`.
 - Both were verified as DOM Wallet desktop sources by their `origin` remote (`github.com:sorenplanck/dom-protocol`), Tauri product name `DOM Wallet`, desktop UI source, DOM asset set, and the visible `Unlock`, `Create wallet`, and `Locate existing wallet` flows.
 
 They are temporary read-only design references. DOM Wallet V3 does not import, build, link, package, or require either source tree at runtime or release time; both may be removed after visual acceptance.

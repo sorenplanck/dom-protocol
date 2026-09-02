@@ -8,14 +8,14 @@ This document fixes the engineering evidence used to begin the DOM Wallet V3 des
 
 ## Epic Wallet reference
 
-- Repository: `/home/leonardov/wallet-reference-study/epic-wallet`
+- Repository: `~/wallet-reference-study/epic-wallet`
 - Branch: `master`
 - Commit: `cd3c9677cf67a68122a496cf601c47978cf99285`
 - Role: mature engineering reference for architecture, lifecycle, persistence, synchronization, recovery, API separation, failure handling, and testing.
 
 ## DOM reference observed by the comparative study
 
-- Repository: `/home/leonardov/dom-protocol`
+- Repository: `~/dom-protocol`
 - Branch at study baseline: `audit/final-prelaunch-security-gate`
 - Commit at study baseline: `aa7f389a157af1b1a486dcb7e27cb80e7b543de3`
 - Role: authoritative source of DOM consensus integration, cryptography, chain identity, transaction formats, economic rules, backup behavior, and protocol philosophy.

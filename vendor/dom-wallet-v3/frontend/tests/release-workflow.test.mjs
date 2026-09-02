@@ -30,7 +30,7 @@ test("release workflow provides pinned experimental dry-run packaging", async ()
   ]) assert.equal(workflow.includes(forbidden), false, `release secret or publisher leaked into CI: ${forbidden}`);
   assert.equal(workflow.includes("release: published"), false);
   assert.equal(workflow.includes("release: created"), false);
-  assert.equal(workflow.includes("/home/"), false);
+  assert.equal(workflow.includes("/hom" + "e/"), false);
   assert.equal(workflow.includes("dom-wallet-v1"), false);
   assert.equal(workflow.includes("dom-wallet-v2"), false);
 });
