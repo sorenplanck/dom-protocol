@@ -2557,6 +2557,13 @@ fn quarantine_reason_from_auth_refusal(refusal: AuthRefusal) -> Option<DurableQu
         AuthRefusal::WrongRecipient => Some(DurableQuarantineReasonV1::WrongRecipient),
         AuthRefusal::WrongSession => Some(DurableQuarantineReasonV1::WrongSession),
         AuthRefusal::WrongRoute => Some(DurableQuarantineReasonV1::WrongRoute),
+        // O-03 closure (2026-09-02): the pipeline now adjudicates the policy
+        // version itself; the durable registry already names this exact
+        // condition, so the refusal lands on the existing code instead of
+        // minting a new one.
+        AuthRefusal::PolicyVersionNotAccepted => {
+            Some(DurableQuarantineReasonV1::WrongPolicyVersion)
+        }
         AuthRefusal::Expired => Some(DurableQuarantineReasonV1::Expired),
         AuthRefusal::WrongTimelockDomain => Some(DurableQuarantineReasonV1::WrongTimelockDomain),
         AuthRefusal::UnknownRosterSnapshot => {

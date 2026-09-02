@@ -322,8 +322,9 @@ mod tests {
         let staged = CoverLockPolicyV1::new(6, 100).expect("policy");
         let mut covered = 0u32;
         for _ in 0..5000 {
-            if let CoverLockOutcomeV1::Cover(_) =
-                staged.cover_lock_for_send(&snapshot, &mut rng).expect("draw")
+            if let CoverLockOutcomeV1::Cover(_) = staged
+                .cover_lock_for_send(&snapshot, &mut rng)
+                .expect("draw")
             {
                 covered += 1;
             }

@@ -369,8 +369,12 @@ F1_SPONSOR_FILE_SHA256: dict[str, str | None] = {
     "crates/dom-scriptless-crypto/src/storage.rs": (
         "5d7bc7c2a625e63ccbb6764f21ce86c6f1ed12eb0e9857d4b00d5ae1376c5266"
     ),
+    # Re-frozen a second time on 2026-09-02: `cargo fmt --all` wrapped ONE
+    # call (`accept_transport_message_with_successor`, four lines instead of
+    # one) that b77fab2 had committed unformatted. Five whitespace-only
+    # insertions; the diff against the digest above contains no token change.
     "crates/dom-scriptless-store/src/runtime/linux/session_store.rs": (
-        "1bbe92593bbcfbc610796c61e1fa74c3caff8996fcab2ef5ca412f0ceaad50ba"
+        "96b5671fe3b93f57750ef36e86c45dccfaad0238b31647e7f1d941a7f830902a"
     ),
     "crates/dom-leg/src/f7_wallet.rs": (
         "95085209446f2fb56993519e9c9e2926a20e4e186394357ea7aa7a8afb25cab4"

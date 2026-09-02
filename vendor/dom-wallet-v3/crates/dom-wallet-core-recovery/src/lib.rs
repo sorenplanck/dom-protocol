@@ -689,13 +689,9 @@ impl RecoverableOutputBuilder {
         let private = SlatePrivateMaterial::Sender {
             excess_blinding: sender.excess_blinding,
             nonce: sender.nonce,
-            change: sender.change.map(|change| {
-                (
-                    change.commitment,
-                    change.value,
-                    change.blinding,
-                )
-            }),
+            change: sender
+                .change
+                .map(|change| (change.commitment, change.value, change.blinding)),
         };
         RecoverableSlateMaterial::from_slate(sender.slate, private)
     }

@@ -20,9 +20,9 @@ use adapter_btc::types::BitcoinNetworkV1 as TemplateNetworkV1;
 use bitcoin::absolute::LockTime;
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::hashes::Hash;
-use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey, XOnlyPublicKey};
 #[cfg(any(test, feature = "harness"))]
 use bitcoin::secp256k1::Keypair;
+use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey, XOnlyPublicKey};
 use bitcoin::transaction::Version;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
 use blake2::digest::{Update, VariableOutput};
@@ -35,13 +35,13 @@ use crate::authority::{
     BitcoinRefundDelayV1, BitcoinRefundSignatureV1, BitcoinRefundSigningRequestV1,
     RetainedBitcoinRefundSignerV1,
 };
-use crate::funding::{
-    ArmedBitcoinFundingV1, BitcoinPrebroadcastPlanV1,
-    BitcoinPrebroadcastStoreV1, BitcoinRefundContractV1, BitcoinRefundOutputV1,
-    PreparedBitcoinFundingV1, ReopenedBitcoinFundingV1,
-};
 #[cfg(any(test, feature = "harness"))]
 use crate::funding::prepared_template_digests;
+use crate::funding::{
+    ArmedBitcoinFundingV1, BitcoinPrebroadcastPlanV1, BitcoinPrebroadcastStoreV1,
+    BitcoinRefundContractV1, BitcoinRefundOutputV1, PreparedBitcoinFundingV1,
+    ReopenedBitcoinFundingV1,
+};
 use crate::rpc::{BitcoinCoreNetworkV1, BitcoinCoreRpcClientV1, MAX_SIGNET_CHALLENGE_BYTES};
 use crate::store::StageKind;
 use crate::LiveBitcoinError;

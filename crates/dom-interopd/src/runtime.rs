@@ -418,12 +418,13 @@ where
     /// Returns the existing fail-closed shutdown decision without consuming a
     /// driver step. Composite loops must use this instead of treating an OS
     /// shutdown request as unconditional permission to abandon the route.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "retained surface not yet wired by the stage-7 composition root"
-        )
+    // The expectation is unconditional (2026-09-02): nothing uses this in
+    // ANY target today, so the `not(test)` guard made the test profile fail
+    // `-D warnings` while the lib profile stayed quiet. The tripwire is
+    // unchanged — the build fails the moment this surface is first wired.
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
     )]
     pub(crate) fn composite_shutdown_is_safe(&self) -> Result<bool, RouteRuntimeErrorV1> {
         let snapshot = self.supervisor.snapshot()?;

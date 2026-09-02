@@ -10946,7 +10946,11 @@ impl ContractsSessionStoreV1 {
                 return Err(SessionStoreError::ClaimSigningAuthorityUnavailable);
             }
         }
-        self.accept_transport_message_with_successor(signed_bytes, successor, failed_closed_successor)
+        self.accept_transport_message_with_successor(
+            signed_bytes,
+            successor,
+            failed_closed_successor,
+        )
     }
 
     fn operation_lock(&self) -> Result<MutexGuard<'_, ()>, SessionStoreError> {
