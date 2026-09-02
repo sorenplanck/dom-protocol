@@ -2,6 +2,20 @@
 //!
 //! Cryptographic primitives for the DOM protocol.
 //! RFC-0001, RFC-0009: secp256k1, Blake2b-256, Schnorr, H generator, Pedersen.
+//!
+//! Scriptless-specific secret nonce workflow types are intentionally not part
+//! of this crate's public API:
+//!
+//! ```compile_fail
+//! use dom_crypto::{
+//!     ScriptlessNonceDerivationV1,
+//!     ScriptlessSecretNoncePairV1,
+//!     ScriptlessSecretScalar,
+//!     scriptless_nonce_pair_record_bytes,
+//!     scriptless_nonce_seed_v1,
+//!     scriptless_sign_bound_partial,
+//! };
+//! ```
 
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
@@ -11,6 +25,7 @@ pub mod hash;
 pub mod keys;
 pub mod pedersen;
 pub mod schnorr;
+pub mod scriptless;
 
 // Single source of truth for the SEC1<->zkp commitment encoding bridge used by
 // the final bounded aggregate range-proof backend. Crate-private.
@@ -25,6 +40,15 @@ pub use schnorr::{
     schnorr_add_public_keys, schnorr_aggregate_sigs, schnorr_challenge, schnorr_partial_sign,
     schnorr_sign, schnorr_verify, PartialSig, SchnorrSignature,
 };
+pub use scriptless::{
+    scalar_bytes_are_canonical, scalar_from_wide_be, scriptless_adapt_signature,
+    scriptless_add_public_points, scriptless_aggregate_partial_scalars,
+    scriptless_bind_public_nonces, scriptless_extract_adaptor_secret,
+    scriptless_extract_adaptor_secret_be_bytes, scriptless_subtract_public_points,
+    scriptless_verify_bound_partial, scriptless_verify_final_signature,
+    scriptless_verify_pre_signature, secret_scalar_mul_add_assign, secret_scalar_public_key,
+    verify_scalar_response, SecretScalar,
+};
 mod bulletproof_bp;
 #[cfg(kani)]
 mod kani_invariants;
@@ -33,6 +57,13 @@ pub mod recovery;
 #[cfg(feature = "test-helpers")]
 #[doc(hidden)]
 pub use bulletproof_bp::bp2_test_only_prove_legacy_single_with_nonce;
+pub use bulletproof_bp::{
+    bulletproof_mpc_aggregate_tau_x, bulletproof_mpc_finalize,
+    bulletproof_mpc_finalize_continuation_from_bytes_v1,
+    bulletproof_mpc_finalize_continuation_to_bytes_v1, bulletproof_mpc_round1,
+    bulletproof_mpc_round2, BulletproofMpcFinalizeState, BulletproofMpcRound1Output,
+    BulletproofMpcRound1State,
+};
 pub use range_proof::{
     prove as range_proof_prove, prove_bytes as range_proof_prove_bytes,
     prove_bytes_with_extra_commit as range_proof_prove_bytes_with_extra_commit,

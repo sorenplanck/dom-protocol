@@ -1,0 +1,32 @@
+[package]
+name = "dom-wallet-core-restore"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+dom-crypto.workspace = true
+dom-tx.workspace = true
+dom-wallet-core-api.workspace = true
+dom-wallet-recovery.workspace = true
+dom-wallet-core-recovery = { path = "../dom-wallet-core-recovery" }
+dom-wallet-core-sync = { path = "../dom-wallet-core-sync" }
+dom-wallet-crypto = { path = "../dom-wallet-crypto" }
+dom-wallet-domain = { path = "../dom-wallet-domain" }
+dom-wallet-storage = { path = "../dom-wallet-storage" }
+thiserror.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+dom-chain.workspace = true
+dom-consensus.workspace = true
+dom-core.workspace = true
+dom-serialization.workspace = true
+dom-wallet.workspace = true
+dom-wallet-embedded-core = { path = "../dom-wallet-embedded-core" }
+tempfile.workspace = true
+tokio.workspace = true

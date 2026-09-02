@@ -1,0 +1,25 @@
+[package]
+name = "dom-wallet-embedded-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+dom-config.workspace = true
+dom-chain.workspace = true
+dom-consensus.workspace = true
+dom-core.workspace = true
+dom-node.workspace = true
+dom-pow.workspace = true
+dom-serialization.workspace = true
+dom-wallet-core-api.workspace = true
+randomx-rs.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

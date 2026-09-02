@@ -204,6 +204,26 @@ struct ContractsTransportIdentityV1 {
 }
 
 impl ContractsTransportIdentityV1 {
+    /// Evidence-only compatibility boundary for the F7 wallet compositor.
+    ///
+    /// Production outbound DSC1 signing goes through
+    /// [`ContractsTransportIdentityStoreV1::sign_and_commit_store_prepared_dsc1`],
+    /// which only signs store-prepared requests. This exact-message path
+    /// compiles solely for tests and the evidence/compositor builds; the
+    /// paired session-store ingress still adjudicates every accepted byte.
+    #[cfg(any(test, feature = "evidence-only"))]
+    fn sign_exact_dsc1_for_session(
+        &self,
+        message: UnsignedMessageV1,
+        local_reference: &SessionTransportIdentityReferenceV1,
+    ) -> Result<SignedMessageV1, IdentityStoreError> {
+        self.require_local_reference(local_reference)?;
+        if message.sender_id() != local_reference.participant_id() {
+            return Err(IdentityStoreError::AuthenticationFailed);
+        }
+        SignedMessageV1::sign(message, &self.schnorr).map_err(|_| IdentityStoreError::SigningFailed)
+    }
+
     fn establish_noise_for_session<S: Read + Write>(
         &self,
         stream: S,
@@ -424,6 +444,21 @@ impl ContractsTransportIdentityStoreV1 {
         store
             .commit_prepared_outbound_dsc1(request, signed.as_bytes())
             .map_err(|_| IdentityStoreError::StoreRejected)
+    }
+
+    /// Signs one exact canonical DSC1 message after revalidating the retained
+    /// inode and exact encrypted envelope, then authenticating the public-only
+    /// local session reference and its sender ID. Evidence-only compatibility
+    /// boundary for the F7 wallet compositor; see the inner method.
+    #[cfg(any(test, feature = "evidence-only"))]
+    pub fn sign_exact_dsc1_for_session(
+        &self,
+        message: UnsignedMessageV1,
+        local_reference: &SessionTransportIdentityReferenceV1,
+    ) -> Result<SignedMessageV1, IdentityStoreError> {
+        self.revalidate()?;
+        self.identity
+            .sign_exact_dsc1_for_session(message, local_reference)
     }
 
     /// Establishes authenticated Noise XX only after revalidating the retained

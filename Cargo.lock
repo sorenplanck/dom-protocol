@@ -1229,27 +1229,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "deploy-genconfig"
-version = "0.1.0"
-dependencies = [
- "adapter-btc",
- "adapter-evm",
- "blake2",
- "btc-crypto",
- "chain-profile",
- "deployment-registry",
- "dom-consensus",
- "dom-core",
- "dom-interopd",
- "hex",
- "kaystra-core",
- "rand 0.8.6",
- "serde_json",
- "tempfile",
- "zeroize",
-]
-
-[[package]]
 name = "deployment-registry"
 version = "0.2.0"
 dependencies = [
@@ -1696,15 +1675,30 @@ dependencies = [
  "adapter-evm",
  "btc-crypto",
  "btc-secp-sys",
+ "cap-std",
  "counterparty-api",
  "dom-adaptor",
  "dom-consensus",
  "dom-core",
  "dom-crypto",
  "dom-scriptless-consensus",
+ "dom-scriptless-crypto",
+ "dom-scriptless-identity-store",
  "dom-scriptless-primitives",
+ "dom-scriptless-store",
+ "dom-scriptless-transport",
  "dom-serialization",
+ "dom-wallet-core",
+ "dom-wallet-core-protocol",
+ "dom-wallet-core-recovery",
+ "dom-wallet-core-sync",
+ "dom-wallet-domain",
+ "dom-wallet-remote-source",
+ "hex",
  "rand_core 0.6.4",
+ "reqwest",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 1.0.69",
  "zeroize",
@@ -2074,7 +2068,7 @@ dependencies = [
  "dom-serialization",
  "dom-slate",
  "dom-tx",
- "dom-wallet-crypto",
+ "dom-wallet-crypto 0.2.0",
  "dom-wallet-keys",
  "fs2",
  "hex",
@@ -2118,6 +2112,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "dom-wallet-core"
+version = "0.3.2"
+dependencies = [
+ "dom-adaptor",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-node",
+ "dom-serialization",
+ "dom-slate",
+ "dom-wallet-core-api",
+ "dom-wallet-core-protocol",
+ "dom-wallet-core-recovery",
+ "dom-wallet-core-restore",
+ "dom-wallet-core-submit",
+ "dom-wallet-core-sync",
+ "dom-wallet-crypto 0.3.2",
+ "dom-wallet-domain",
+ "dom-wallet-embedded-core",
+ "dom-wallet-production-backend",
+ "dom-wallet-storage",
+ "hex",
+ "rand 0.8.6",
+ "serde",
+ "sha2",
+ "thiserror 2.0.18",
+ "tracing",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "dom-wallet-core-api"
 version = "0.2.0"
 dependencies = [
@@ -2125,6 +2151,86 @@ dependencies = [
  "dom-core",
  "hex",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "dom-wallet-core-protocol"
+version = "0.3.2"
+dependencies = [
+ "base64",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-serialization",
+ "dom-tx",
+ "dom-wallet-core-api",
+ "dom-wallet-core-sync",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "dom-wallet-core-recovery"
+version = "0.3.2"
+dependencies = [
+ "bip39",
+ "dom-adaptor",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-node",
+ "dom-serialization",
+ "dom-slate",
+ "dom-tx",
+ "dom-wallet-core-api",
+ "dom-wallet-core-protocol",
+ "dom-wallet-core-sync",
+ "dom-wallet-domain",
+ "dom-wallet-keys",
+ "dom-wallet-recovery",
+ "rand 0.8.6",
+ "thiserror 2.0.18",
+ "zeroize",
+]
+
+[[package]]
+name = "dom-wallet-core-restore"
+version = "0.3.2"
+dependencies = [
+ "dom-crypto",
+ "dom-tx",
+ "dom-wallet-core-api",
+ "dom-wallet-core-recovery",
+ "dom-wallet-core-sync",
+ "dom-wallet-crypto 0.3.2",
+ "dom-wallet-domain",
+ "dom-wallet-recovery",
+ "dom-wallet-storage",
+ "thiserror 2.0.18",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "dom-wallet-core-submit"
+version = "0.3.2"
+dependencies = [
+ "dom-consensus",
+ "dom-wallet-core-api",
+ "dom-wallet-core-sync",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "dom-wallet-core-sync"
+version = "0.3.2"
+dependencies = [
+ "dom-chain",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-serialization",
+ "dom-wallet-core-api",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2146,6 +2252,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "dom-wallet-crypto"
+version = "0.3.2"
+dependencies = [
+ "argon2",
+ "chacha20poly1305",
+ "hkdf",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "zeroize",
+]
+
+[[package]]
+name = "dom-wallet-domain"
+version = "0.3.2"
+dependencies = [
+ "serde",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "dom-wallet-embedded-core"
+version = "0.3.2"
+dependencies = [
+ "dom-chain",
+ "dom-config",
+ "dom-consensus",
+ "dom-core",
+ "dom-node",
+ "dom-pow",
+ "dom-serialization",
+ "dom-wallet-core-api",
+ "randomx-rs",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "dom-wallet-keys"
 version = "0.2.0"
 dependencies = [
@@ -2161,6 +2309,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "dom-wallet-production-backend"
+version = "0.3.2"
+dependencies = [
+ "dom-node",
+ "dom-wallet-core-api",
+ "dom-wallet-core-protocol",
+ "dom-wallet-core-recovery",
+ "dom-wallet-core-restore",
+ "dom-wallet-core-submit",
+ "dom-wallet-core-sync",
+ "dom-wallet-crypto 0.3.2",
+ "dom-wallet-embedded-core",
+ "dom-wallet-storage",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "dom-wallet-recovery"
 version = "0.2.0"
 dependencies = [
@@ -2173,6 +2338,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "dom-wallet-remote-source"
+version = "0.3.2"
+dependencies = [
+ "dom-chain",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-serialization",
+ "dom-wallet-core-api",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "url",
+]
+
+[[package]]
+name = "dom-wallet-storage"
+version = "0.3.2"
+dependencies = [
+ "dom-wallet-crypto 0.3.2",
+ "dom-wallet-domain",
+ "fs2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "dom-wallet2"
 version = "0.2.0"
 dependencies = [
@@ -2182,7 +2378,7 @@ dependencies = [
  "dom-serialization",
  "dom-slate",
  "dom-tx",
- "dom-wallet-crypto",
+ "dom-wallet-crypto 0.2.0",
  "dom-wallet-keys",
  "fs2",
  "hex",
@@ -3020,9 +3216,20 @@ dependencies = [
  "cfg-if",
  "js-sys",
  "libc",
- "r-efi",
+ "r-efi 5.3.0",
  "wasip2",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "getrandom"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "r-efi 6.0.0",
 ]
 
 [[package]]
@@ -4970,6 +5177,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 
 [[package]]
+name = "r-efi"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
 name = "radium"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5222,12 +5435,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower 0.5.3",
  "tower-http 0.6.11",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
  "webpki-roots 1.0.7",
 ]
@@ -6904,6 +7119,7 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+ "serde_derive",
 ]
 
 [[package]]
@@ -6934,6 +7150,12 @@ name = "uuid"
 version = "1.23.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf80a72845275afea99e7f2b434723d3bc7e38470fcd1c7ed39a599c73319a53"
+dependencies = [
+ "getrandom 0.4.3",
+ "js-sys",
+ "serde_core",
+ "wasm-bindgen",
+]
 
 [[package]]
 name = "valuable"
@@ -7083,6 +7305,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4e0100b01e9f0d03189a92b96772a1fb998639d981193d7dbab487302513441"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "wasm-streams"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

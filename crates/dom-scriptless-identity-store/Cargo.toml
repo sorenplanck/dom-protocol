@@ -8,6 +8,9 @@ rust-version.workspace = true
 authors.workspace = true
 repository.workspace = true
 publish = false  # D-ORQ-9: explicit, never inherited
+[features]
+evidence-only = []
+
 [dependencies]
 argon2 = { version = "=0.5.3", default-features = false, features = ["alloc", "zeroize"] }
 cap-std = { version = "=4.0.2", default-features = false }

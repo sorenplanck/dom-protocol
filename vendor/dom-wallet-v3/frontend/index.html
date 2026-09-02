@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>DOM Wallet</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <section id="gate" class="center-screen" aria-label="Wallet access" data-screen-contract="access">
+      <img class="coin-hero" src="assets/dom-coin.png" alt="DOM">
+      <div class="gate-body">
+        <header class="gate-title" data-screen-contract="welcome"><h1>DOM Wallet</h1><p class="sub">Secure desktop wallet</p></header>
+        <p id="status" class="status" role="status" aria-live="polite">Initializing native desktop bridge…</p>
+        <p id="gate-remote-tip-alert" class="warning" role="alert" hidden></p>
+        <section id="onboarding" class="screen card">
+          <section id="onboarding-node" class="onboarding-node" aria-labelledby="onboarding-node-title">
+            <div class="section-row"><h2 id="onboarding-node-title">Mainnet node</h2><span id="onboarding-node-badge" class="pill">STARTING</span></div>
+            <p id="onboarding-node-message" class="muted" role="status" aria-live="polite">Starting the embedded node…</p>
+            <progress id="onboarding-node-progress" max="100" value="0" aria-label="Mainnet synchronization progress"></progress>
+            <div class="onboarding-node-metrics">
+              <span>Local <strong id="onboarding-node-local">—</strong></span>
+              <span>Peer <strong id="onboarding-node-peer">—</strong></span>
+              <span>Peers <strong id="onboarding-node-peers">0</strong></span>
+            </div>
+            <button id="onboarding-node-retry" class="btn ghost" type="button">Retry node</button>
+          </section>
+          <div class="access-grid">
+            <form id="unlock-form" class="access-primary" data-screen-contract="unlock">
+              <h2>Unlock wallet</h2><p class="muted">Enter your password to access this wallet.</p>
+              <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+              <button class="btn w-full" type="submit">Unlock wallet</button>
+            </form>
+            <div class="access-actions">
+              <button class="btn ghost w-full" type="button" data-gate-panel="create-form">Create wallet</button>
+              <button class="btn ghost w-full" type="button" data-gate-panel="restore-form">Restore wallet</button>
+              <button class="btn ghost w-full" type="button" data-gate-panel="open-form">Open wallet</button>
+              <button class="btn ghost w-full" type="button" data-gate-panel="chain-source-form">Chain source</button>
+              <button id="gate-close-wallet" class="btn ghost w-full" type="button">Close / switch wallet</button>
+            </div>
+          </div>
+          <form id="create-form" class="gate-panel" hidden data-screen-contract="create">
+            <h2>Create Mainnet wallet</h2><p class="sub">Create an encrypted DOM Mainnet wallet. Networking is configured automatically.</p>
+            <label>Wallet name <input name="name" autocomplete="off" required></label>
+            <label>Password <input name="password" type="password" autocomplete="new-password" required></label>
+            <p class="readonly-note"><strong>Mainnet only</strong> · Embedded P2P node · Automatic bootnodes</p>
+            <div class="btn-row"><button class="btn" type="submit">Create wallet</button><button class="btn ghost" type="button" data-gate-panel="">Back</button></div>
+          </form>
+          <form id="open-form" class="gate-panel" hidden data-screen-contract="locate">
+            <h2>Open wallet</h2><p class="sub">Open a wallet stored by this application.</p>
+            <label>Wallet <select id="open-wallet-select" name="name" required></select></label>
+            <p id="open-wallet-empty" class="readonly-note" hidden>No wallets found. Create or restore a wallet first, or locate an existing folder.</p>
+            <p class="readonly-note">Only a wallet bound to the canonical DOM Mainnet identity can be opened.</p>
+            <div class="btn-row"><button class="btn" type="submit">Open wallet</button><button id="wallet-recover-from-disk" class="btn ghost" type="button">Recover service from disk</button><button class="btn ghost" type="button" data-gate-panel="">Back</button></div>
+          </form>
+          <form id="restore-form" class="gate-panel" hidden data-screen-contract="restore">
+            <h2>Restore wallet</h2><p class="sub">Restore a wallet created with a DOM Wallet recovery phrase.</p>
+            <label>Recovery phrase <textarea name="mnemonic" rows="4" autocomplete="off" autocapitalize="none" spellcheck="false" required></textarea></label>
+            <label>New wallet name <input name="name" autocomplete="off" required></label>
+            <label>New password <input name="password" type="password" autocomplete="new-password" required></label>
+            <p id="restore-readiness-note" class="readonly-note">Restore is always available. The wallet scans the chain in the background while the node synchronizes.</p>
+            <p id="restore-staging-note" class="readonly-note">Checking for interrupted restores…</p>
+            <div class="btn-row"><button id="restore-submit" class="btn" type="submit">Restore / resume wallet</button><button id="restore-abort" class="btn ghost" type="button">Abort interrupted restore</button><button class="btn ghost" type="button" data-gate-panel="">Back</button></div>
+          </form>
+          <section id="restore-progress" class="gate-panel" hidden aria-labelledby="restore-progress-title">
+            <h2 id="restore-progress-title">Wallet restored</h2><p class="sub">The canonical chain scan continues in the background.</p>
+            <p id="restore-progress-message" class="muted" role="status" aria-live="polite">Restored — preparing the chain scan…</p>
+            <progress id="restore-progress-bar" max="100" value="0" aria-label="Restore scan progress"></progress>
+            <p id="restore-progress-balance" class="readonly-note">Partial balance: unavailable</p>
+            <div class="btn-row"><button class="btn ghost" type="button" data-gate-panel="">Back</button></div>
+          </section>
+          <form id="chain-source-form" class="gate-panel" hidden data-screen-contract="chain-source">
+            <h2>Chain source</h2><p class="sub">Choose how this wallet reads the DOM Mainnet chain.</p>
+            <label class="check"><input type="radio" name="source" value="EMBEDDED" checked> Local full node (default) — validates the entire chain on this device.</label>
+            <label class="check"><input type="radio" name="source" value="REMOTE"> Remote node (fast) — reads blocks from a DOM node you trust.</label>
+            <div id="chain-source-remote-fields" hidden>
+              <label>Remote node URL <input id="chain-source-url" name="base_url" autocomplete="off" spellcheck="false" placeholder="https://…"></label>
+              <label>Access token (optional) <input id="chain-source-token" name="bearer_token" type="password" autocomplete="off"></label>
+              <p id="chain-source-token-note" class="readonly-note" hidden>An access token is already stored. Leave the field empty to keep it.</p>
+            </div>
+            <p id="chain-source-tls-warning" class="warning" hidden>This URL is not HTTPS and not localhost. Traffic to the remote node can be observed or tampered with.</p>
+            <p id="chain-source-current" class="readonly-note">Checking the current chain source…</p>
+            <div class="btn-row"><button class="btn" type="submit">Save chain source</button><button class="btn ghost" type="button" data-gate-panel="">Back</button></div>
+          </form>
+          <section id="recovery-ceremony" class="gate-panel" hidden aria-labelledby="recovery-ceremony-title">
+            <h2 id="recovery-ceremony-title">Write down your recovery phrase</h2><p class="sub">Keep these words offline. DOM Wallet will not show this phrase again.</p>
+            <p id="recovery-phrase" class="redacted-output" aria-live="off"></p>
+            <label class="check"><input id="recovery-confirmed" type="checkbox"> I have written down the recovery phrase.</label>
+            <label>Wallet password <input id="recovery-confirm-password" type="password" autocomplete="current-password" required></label>
+            <div class="btn-row"><button id="recovery-complete" class="btn" type="button" disabled>Continue</button><button id="recovery-abandon" class="btn ghost" type="button">Close</button></div>
+          </section>
+        </section>
+      </div>
+    </section>
+
+    <div id="app" class="hidden">
+      <aside class="sidebar">
+        <div class="brand"><img class="brand-coin" src="assets/dom-coin.png" alt="DOM"><div><div class="name">DOM</div><div class="tick">WALLET · DOM</div></div></div>
+        <nav class="nav" aria-label="Wallet navigation">
+          <button data-screen="dashboard" class="active">Dashboard</button>
+          <button data-screen="transactions">Pay</button>
+          <button data-screen="receive">Receive</button>
+          <button data-screen="history">History</button>
+          <button data-screen="mining">Mining</button>
+          <button data-screen="node">Node status</button>
+          <button data-screen="backup">Backup</button>
+          <button data-screen="diagnostics">Settings</button>
+        </nav>
+        <div class="foot"><div class="motto">“Not a store of value.<br>A means of exchange.”</div><button id="lock" class="theme-toggle">Lock wallet</button><button id="close" class="theme-toggle mt6">Close wallet</button></div>
+      </aside>
+      <main class="main">
+        <p id="remote-tip-alert" class="warning" role="alert" hidden></p>
+        <section id="dashboard" class="screen" data-screen-contract="dashboard">
+          <header class="screen-head"><div><h1>Dashboard</h1><p class="sub">Your DOM wallet at a glance.</p></div><span id="network-identity" class="pill">Wallet locked</span></header>
+          <div class="card balance-card"><div class="balance-main" id="balance-total">0 <span class="unit">DOM</span></div><div id="balance-cards" class="balance-sub"></div></div>
+          <div class="status-grid"><div class="card"><span class="muted">Mainnet connection</span><strong id="connection-status">Connecting to Mainnet</strong></div><div class="card"><span class="muted">Canonical height</span><strong id="canonical-height">—</strong></div><div class="card"><span class="muted">Wallet cursor</span><strong id="cursor-height">Not initialized</strong></div></div>
+          <div class="card"><div class="section-row"><h2>Synchronization</h2><span id="sync-status" class="pill">Not started</span></div><div class="btn-row"><button id="sync" class="btn">Synchronize</button><button id="pause" class="btn ghost">Pause</button><button id="resume" class="btn ghost">Resume</button><button id="retry" class="btn ghost">Retry</button><button id="rescan" class="btn ghost">Rescan wallet</button></div></div>
+        </section>
+
+        <section id="transactions" class="screen" hidden data-screen-contract="send">
+          <header><h1>Pay</h1><p class="sub">Create and exchange a DOM payment request.</p></header>
+          <div class="card"><form id="transaction-create" class="form-grid"><label>Amount in noms <input name="amount" inputmode="numeric" pattern="[0-9]+" required></label><label>Fee in noms <input name="requested_fee" inputmode="numeric" pattern="[0-9]+" placeholder="Automatic"></label><label>Optional expiry height <input name="expires_at_height" inputmode="numeric" pattern="[0-9]+" placeholder="Current height + 1440"></label><div class="btn-row"><button class="btn" type="submit">Create Slate v4 request</button><button id="transaction-estimate" class="btn ghost" type="button">Estimate fee</button></div></form></div>
+          <div class="card"><h2>Sender workflow</h2><p class="muted">Export the request, wait for the receiver response, then validate, finalize and broadcast.</p><label>Payment ID <input id="transaction-slate-id" autocomplete="off"></label><label>Slate v4 request or response <textarea id="transaction-text" rows="7" autocomplete="off" spellcheck="false"></textarea></label><div class="btn-row"><button id="request-export" class="btn ghost" type="button">Export request</button><button id="response-import" class="btn ghost" type="button">Import receiver response</button><button id="transaction-finalize" class="btn" type="button">Validate and finalize</button><button id="transaction-submit" class="btn" type="button">Broadcast</button><button id="transaction-retry" class="btn ghost" type="button">Retry broadcast</button><button id="transaction-reconcile" class="btn ghost" type="button">Track state</button><button id="transaction-cancel" class="btn ghost" type="button">Cancel</button></div></div>
+          <section class="card qr-panel" aria-label="Manual slate QR exchange"><h2>QR exchange</h2><p id="slate-qr-meta" class="muted">No QR export shown.</p><div class="qr-wrap"><canvas id="slate-qr-canvas" width="360" height="360" aria-label="Canonical manual slate QR"></canvas><video id="slate-qr-video" muted playsinline aria-label="QR scanner camera preview"></video></div><div class="btn-row"><button id="request-qr" class="btn ghost" type="button">Request QR</button><button id="qr-scan" class="btn ghost" type="button">Scan QR</button><button id="qr-cancel" class="btn ghost" type="button">Stop scanner</button><button id="qr-previous" class="btn ghost" type="button">Previous</button><button id="qr-next" class="btn ghost" type="button">Next</button><button id="qr-animate" class="btn ghost" type="button">Animate</button><button id="qr-pause" class="btn ghost" type="button">Pause</button><button id="qr-clear" class="btn ghost" type="button">Clear</button></div></section>
+          <div class="card"><div class="section-row"><h2>Payment activity</h2><button id="transaction-list" class="btn ghost" type="button">Refresh history</button></div><pre id="transaction-output" class="redacted-output">Payment details appear here.</pre></div>
+        </section>
+
+        <section id="receive" class="screen" hidden data-screen-contract="receive"><header><h1>Receive</h1><p class="sub">Import and validate a Slate v4 request, then return the receiver response.</p></header><div class="card"><ol class="workflow-steps"><li>Import the sender request.</li><li>Validate Mainnet, chain ID, amount, fee, expiry and Slate version.</li><li>Create the receiver participant response.</li><li>Export the response to the sender.</li></ol><label>Slate v4 request or response <textarea id="receive-transaction-text" rows="8" autocomplete="off" spellcheck="false"></textarea></label><label>Payment ID <input id="receive-transaction-slate-id" autocomplete="off" readonly></label><div class="btn-row"><button id="request-import" class="btn" type="button">Import and validate request</button><button id="response-create" class="btn ghost" type="button">Create receiver response</button><button id="response-export" class="btn ghost" type="button">Export response</button><button id="receive-response-qr" class="btn ghost" type="button">Response QR</button><button id="receive-qr-next" class="btn ghost" type="button">Next QR frame</button></div><p id="receive-qr-meta" class="muted">No receiver response QR shown.</p><canvas id="receive-qr-canvas" width="360" height="360" aria-label="Receiver response QR"></canvas><pre id="receive-output" class="redacted-output">Receiver details appear here.</pre></div></section>
+        <section id="history" class="screen" hidden data-screen-contract="history"><header><h1>History</h1><p class="sub">Typed canonical transaction states.</p></header><div class="card"><div class="section-row"><h2>Transactions</h2><button id="history-refresh" class="btn ghost" type="button">Refresh</button></div><div id="history-output" class="history-list">No transactions loaded.</div></div></section>
+
+        <section id="mining" class="screen" hidden data-screen-contract="mining"><header><h1>Mining</h1><p class="sub">Local CPU mining through the embedded canonical node.</p></header><div class="card"><div class="section-row"><h2>Status</h2><span id="mining-status" class="pill">Disabled</span></div><label class="check"><input id="mining-enabled" type="checkbox"> Enable mining controls</label><label>CPU threads <input id="mining-threads" type="number" min="1" step="1" disabled></label><label>Mining address <input id="mining-address" readonly></label><p id="mining-warning" class="warning" hidden>Starting mining may produce the first post-genesis Mainnet block.</p><div class="btn-row"><button id="mining-start" class="btn" type="button" disabled>Start mining</button><button id="mining-stop" class="btn ghost" type="button" disabled>Stop mining</button></div></div><div class="metric-grid"><div class="card"><span>Hashrate</span><strong id="mining-hashrate">0 H/s</strong></div><div class="card"><span>Current height</span><strong id="mining-height">0</strong></div><div class="card"><span>Connected peers</span><strong id="mining-peers">0</strong></div><div class="card"><span>Accepted blocks</span><strong id="mining-accepted">0</strong></div><div class="card"><span>Rejected or stale work</span><strong id="mining-rejected">0</strong></div><div class="card"><span>Template refreshes</span><strong id="mining-template-refreshes">0</strong></div><div class="card"><span>Last block candidate</span><strong id="mining-candidate">Never</strong></div><div class="card"><span>Last accepted height</span><strong id="mining-last-height">—</strong></div><div class="card"><span>Mining uptime</span><strong id="mining-uptime">0s</strong></div></div></section>
+
+        <section id="node" class="screen" hidden data-screen-contract="node"><header><h1>Node status</h1><p class="sub">Embedded canonical node and synchronization state.</p></header><div class="card"><pre id="node-status" class="redacted-output">Embedded node has not started.</pre><div class="btn-row"><button id="node-start" class="btn" type="button">Start node</button><button id="node-stop" class="btn ghost" type="button">Stop node</button><button id="node-refresh" class="btn ghost" type="button">Refresh status</button><button id="node-sync" class="btn" type="button">Synchronize</button></div></div><div class="card"><p class="muted">DOM Wallet uses only its embedded node. Legacy endpoint values are ignored and cannot select another backend.</p></div></section>
+
+        <section id="diagnostics" class="screen" hidden data-screen-contract="settings">
+          <header><h1>Settings</h1><p class="sub">Mainnet configuration is fixed and read-only.</p></header>
+          <div class="card readonly-settings">
+            <div><span>Network</span><strong>Mainnet</strong></div>
+            <div><span>Chain ID</span><code id="settings-chain-id">—</code></div>
+            <div><span>Genesis hash</span><code id="settings-genesis">—</code></div>
+            <div><span>Node data</span><strong id="settings-node-data">…/DOM Wallet V3/mainnet/node</strong></div>
+            <div><span>Connected peers</span><strong id="settings-peer-count">0</strong></div>
+            <div><span>Bootstrap state</span><strong id="settings-bootstrap">Starting</strong></div>
+            <div><span>Cursor / canonical height</span><strong id="settings-heights">— / —</strong></div>
+            <div><span>Chain source</span><strong id="settings-chain-source">Local full node (default): the embedded node validates the entire chain.</strong></div>
+          </div>
+          <p id="settings-chain-source-warning" class="warning" hidden>The configured remote chain source URL is not HTTPS and not localhost. Change it on the lock screen under “Chain source”.</p>
+          <div class="card">
+            <div class="section-row"><h2>Wallet updates</h2><span id="update-mode" class="pill">Checking</span></div>
+            <div class="readonly-settings">
+              <div><span>Channel</span><strong id="update-channel">Stable</strong></div>
+              <div><span>Signing key</span><strong id="update-signing-state">Checking</strong></div>
+              <div><span>Wallet version</span><strong id="update-wallet-version">—</strong></div>
+              <div><span>Wallet revision</span><code id="update-wallet-revision">—</code></div>
+              <div><span>Wallet available</span><strong id="update-wallet-available">—</strong></div>
+              <div><span>Wallet state</span><strong id="update-wallet-state">IDLE</strong></div>
+              <div><span>Last check</span><strong id="update-wallet-last-check">Never</strong></div>
+            </div>
+            <label class="check"><input id="automatic-updates" type="checkbox"> Automatically check for signed Wallet updates</label>
+            <p class="muted">Checking never downloads, installs, closes the wallet, or restarts the application. Download and apply are separate explicit actions.</p>
+            <p id="update-error" class="muted">No updater error.</p>
+            <div class="btn-row">
+              <button id="updates-check" class="btn ghost" type="button">Check</button>
+              <button id="updates-download" class="btn ghost" type="button">Download and verify</button>
+              <button id="updates-apply" class="btn" type="button">Apply verified update</button>
+            </div>
+          </div>
+          <div class="card">
+            <p class="muted">Recovery Capsule v1, BIP-39 recovery, Address v1, Slate v4, and Core fee validation are always enabled.</p>
+            <div class="section-row"><h2>Diagnostics</h2><button id="diagnostics-refresh" class="btn ghost" type="button">Refresh</button></div>
+            <pre id="diagnostics-output" class="redacted-output">Redacted diagnostics only.</pre>
+          </div>
+        </section>
+        <section id="backup" class="screen" hidden data-screen-contract="backup"><header><h1>Backup</h1><p class="sub">Optional encrypted backup for off-chain Wallet data.</p></header><div class="card"><p class="muted">Confirmed Recovery Capsule v1 funds are restored with your BIP-39 phrase plus the canonical chain. Backup additionally preserves labels, pending contexts, preferences, contacts, and reservations.</p></div><div class="card"><h2>Export backup</h2><form id="backup-export-form" class="form-grid"><label>Backup destination <input name="destination" autocomplete="off" required></label><label>Backup password <input name="backup_password" type="password" autocomplete="new-password" required></label><div class="btn-row"><button class="btn" type="submit">Export encrypted backup</button></div></form></div><div class="card"><h2>Import backup</h2><p class="muted">An import never replaces an existing wallet folder and is bound to the running embedded network.</p><form id="backup-import-form" class="form-grid"><label>Backup file <input name="backup_path" autocomplete="off" required></label><label>New wallet name <input name="name" autocomplete="off" required></label><label>Backup password <input name="backup_password" type="password" autocomplete="off" required></label><label>New wallet password <input name="password" type="password" autocomplete="new-password" required></label><div class="btn-row"><button class="btn" type="submit">Import encrypted backup</button></div></form></div></section>
+      </main>
+    </div>
+    <div id="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="main.js"></script>
+  </body>
+</html>

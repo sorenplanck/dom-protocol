@@ -66,10 +66,24 @@ done
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. Verbatim checks. Each still means exactly what it meant.
+#
+# RESTRUCTURED (stage 12): the original rule forbade any dom-wallet-v3
+# dependency because a git dependency can carry a divergent revision. The F7
+# wallet reintegration reinstates the pins, but every one of them is patched
+# to vendor/dom-wallet-v3 — a tracked in-repo copy — so no wallet code is
+# taken from a remote revision. The premise (no divergent revisions) is now
+# enforced structurally by the [patch] check below; what stays forbidden
+# verbatim is the retired scriptless-vault surface and any dom-wallet-v3
+# reference inside a member crate manifest (only the root names the pin).
 if git grep -n -I -E \
-    '(dom-wallet-v3|dom_wallet_v3|dom-wallet-scriptless-vault)' -- \
+    '(dom-wallet-scriptless-vault)' -- \
     Cargo.toml Cargo.lock 'crates/**/Cargo.toml' >&2; then
-    echo "FAIL ordinary DOM Wallet dependency found" >&2
+    echo "FAIL retired scriptless-vault dependency found" >&2
+    status=1
+fi
+
+if git grep -n -I -E '(dom-wallet-v3|dom_wallet_v3)' -- 'crates/**/Cargo.toml' >&2; then
+    echo "FAIL member crate names the wallet pin directly (root-only)" >&2
     status=1
 fi
 
@@ -79,8 +93,25 @@ if git grep -n -I -E 'path[[:space:]]*=[[:space:]]*"/' -- \
     status=1
 fi
 
-if git grep -n -I -E '^\[patch\.' -- Cargo.toml 'crates/**/Cargo.toml' >&2; then
-    echo "FAIL tracked Cargo patch override found" >&2
+# RESTRUCTURED (stage 12): [patch] sections are permitted in the root
+# manifest only, and every entry must resolve to a tracked path inside this
+# repository — a patch onto another git revision would reintroduce exactly
+# the divergent-revision risk the original verbatim ban existed for.
+if git grep -n -I -E '^\[patch\.' -- 'crates/**/Cargo.toml' >&2; then
+    echo "FAIL member crate carries a Cargo patch override (root-only)" >&2
+    status=1
+fi
+
+patch_violations="$(awk '
+  /^\[patch\./ { in_patch = 1; next }
+  /^\[/ { in_patch = 0 }
+  in_patch && NF && !/^#/ {
+    if ($0 !~ /path[[:space:]]*=[[:space:]]*"(crates|vendor)\//) { print }
+  }
+' Cargo.toml)"
+if [ -n "$patch_violations" ]; then
+    echo "FAIL patch entry does not resolve to a tracked in-repo path:" >&2
+    echo "$patch_violations" >&2
     status=1
 fi
 

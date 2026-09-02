@@ -1,0 +1,8 @@
+{
+  "fixture_version": 1,
+  "releases": ["0.1.0", "0.1.1", "0.1.2", "0.1.3", "0.1.4", "0.1.5"],
+  "metadata_version": 1,
+  "schema_version": 1,
+  "secret_profile_version": 1,
+  "migration_required": false
+}

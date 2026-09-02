@@ -1,0 +1,174 @@
+name: Stabilize DOM Wallet v0.2.0
+
+on:
+  push:
+    branches:
+      - stabilize/wallet-v0.2.0
+  pull_request:
+    branches:
+      - stabilize/wallet-v0.2.0
+  workflow_dispatch:
+    inputs:
+      windows_only:
+        description: Run only the Windows package and lifecycle gate
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dom-wallet-stabilize-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: "1"
+  CARGO_INCREMENTAL: "0"
+  RAYON_NUM_THREADS: "1"
+  RUST_TEST_THREADS: "1"
+
+jobs:
+  validate:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.windows_only != true }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: stable
+          components: clippy,rustfmt
+      - name: Install Linux build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang cmake libappindicator3-dev librsvg2-dev libssl-dev libwebkit2gtk-4.1-dev patchelf pkg-config
+      - name: Verify branch and version contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' Cargo.toml)"
+          test "$VERSION" = "0.2.8"
+          test "$VERSION" = "$(node -p 'require("./frontend/package.json").version')"
+          test "$VERSION" = "$(node -p 'require("./src-tauri/tauri.conf.json").version')"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          grep -Fq -- '- "wallet-v*"' .github/workflows/release-wallet.yml
+          ! grep -Eq 'TAURI_SIGNING_PRIVATE_KEY|gh[[:space:]]+release[[:space:]]+create|contents:[[:space:]]+write' .github/workflows/release-wallet.yml
+      - name: Install locked frontend dependencies
+        run: npm ci --prefix frontend
+      - name: Validate frontend
+        run: npm test --prefix frontend && npm run typecheck --prefix frontend && npm run build --prefix frontend
+      - name: Validate Rust workspace
+        run: |
+          cargo metadata --locked --format-version 1 > /tmp/cargo-metadata.json
+          cargo fmt --all --check
+          cargo check --workspace --all-targets --locked
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo test --workspace --all-targets --locked -- --test-threads=1
+      - name: Audit dependency policy
+        run: |
+          cargo install --locked cargo-audit --version 0.22.2
+          cargo install --locked cargo-deny --version 0.19.9
+          cargo audit
+          cargo deny check
+
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.windows_only && '[{"os":"windows-2022","target":"x86_64-pc-windows-msvc","bundles":"nsis,msi"}]' || '[{"os":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","bundles":"appimage,deb"},{"os":"windows-2022","target":"x86_64-pc-windows-msvc","bundles":"nsis,msi"},{"os":"macos-14","target":"aarch64-apple-darwin","bundles":"dmg,app"}]') }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Check out pinned DOM sidecar source
+        if: runner.os == 'Windows'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: sorenplanck/dom-protocol
+          ref: ab45a2944f22fe00f9b12984354f0d5d7cdd229a
+          path: dom-protocol-sidecar
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+      - name: Install Linux package dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang cmake libappindicator3-dev librsvg2-dev libssl-dev libwebkit2gtk-4.1-dev patchelf pkg-config webkit2gtk-driver xvfb
+      - name: Install pinned Linux application driver
+        if: runner.os == 'Linux'
+        run: cargo install --locked tauri-driver --version 2.0.6
+      - name: Install locked frontend dependencies
+        run: npm ci --prefix frontend
+      - name: Exercise managed sidecar promotion and rollback on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          npm run build --prefix frontend
+          cargo test --locked -p dom-wallet-node-manager persisted_node_sequence_rejects_equal_and_lower_feeds_at_runtime_boundary -- --test-threads=1
+          cargo test --locked -p dom-wallet-tauri-shell app_runtime_rejects_equal_and_lower_node_sequences_and_missing_manifest -- --test-threads=1
+          cargo test --locked -p dom-wallet-node-manager missing_manifest_is_rejected_before_promotion -- --test-threads=1
+          cargo test --locked -p dom-wallet-node-manager release_build_has_no_runtime_key_or_environment_activation_seam -- --test-threads=1
+          cargo test --locked -p dom-wallet-node-manager runtime_security_rejects_writable_or_redirected_subdirectories -- --test-threads=1
+          cargo test --locked -p dom-wallet-node-manager pointer_promotion_rollback_and_data_backup_are_atomic -- --test-threads=1
+          $previousRustflags = $env:RUSTFLAGS
+          try {
+            # Windows PE executables default to a 1 MiB stack. The canonical
+            # dom-node async entry point requires the same 8 MiB stack budget
+            # it receives by default on Linux.
+            $env:RUSTFLAGS = "-C link-arg=/STACK:8388608"
+            cargo build --manifest-path dom-protocol-sidecar/Cargo.toml --locked -p dom-node --bin dom-node
+          } finally {
+            $env:RUSTFLAGS = $previousRustflags
+          }
+          $env:DOM_TEST_SIDECAR_BINARY = (Resolve-Path "dom-protocol-sidecar/target/debug/dom-node.exe").Path
+          cargo test --locked -p dom-wallet-node-manager pinned_sidecar_process_reports_identity_and_rolls_back -- --ignored --test-threads=1
+      - name: Build unsigned installers without publishing
+        uses: tauri-apps/tauri-action@fce9c6108b31ea247710505d3aaaa893ee6768d4
+        with:
+          projectPath: src-tauri
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --no-sign -- --locked
+      - name: Verify required installer families
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="target/${{ matrix.target }}/release/bundle"
+          case "$RUNNER_OS" in
+            Linux) for ext in AppImage deb; do find "$ROOT" -type f -name "*.${ext}" -print -quit | grep -q .; done ;;
+            Windows) for ext in exe msi; do find "$ROOT" -type f -name "*.${ext}" -print -quit | grep -q .; done ;;
+            macOS) find "$ROOT" -type f -name '*.dmg' -print -quit | grep -q .; find "$ROOT" -type d -name '*.app' -print -quit | grep -q . ;;
+          esac
+      - name: Install, launch and uninstall MSI and NSIS
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/test-windows-installers.ps1 -BundleRoot "target/${{ matrix.target }}/release/bundle"
+      - name: Smoke test installed Linux application
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEB="$(find target/${{ matrix.target }}/release/bundle/deb -type f -name '*.deb' -print -quit)"
+          test -n "$DEB"
+          PACKAGE_ROOT="$(mktemp -d)"
+          trap 'rm -rf "$PACKAGE_ROOT"' EXIT
+          dpkg-deb --extract "$DEB" "$PACKAGE_ROOT"
+          BINARY="$(find "$PACKAGE_ROOT/usr/bin" -maxdepth 1 -type f -name 'dom-wallet*' -print -quit)"
+          test -x "$BINARY"
+          xvfb-run -a node scripts/test-packaged-native-bridge-linux.mjs "$BINARY"
+      - name: Preserve validated installers
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dom-wallet-v0.2.8-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/bundle
+          if-no-files-found: error
+          retention-days: 7

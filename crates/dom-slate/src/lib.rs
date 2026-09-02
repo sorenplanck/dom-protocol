@@ -52,6 +52,9 @@ use rand::RngCore;
 use thiserror::Error;
 use zeroize::Zeroizing;
 
+pub mod cover_policy;
+pub use cover_policy::{CoverLockOutcomeV1, CoverLockPolicyV1, ValidatedChainSnapshotV1};
+
 /// Errors arising from slate construction, response, or finalization.
 ///
 /// `Display` strings are stable enough for callers to match on substrings

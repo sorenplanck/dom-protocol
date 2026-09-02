@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "version": "0.1.0",
+  "revision": "ab45a2944f22fe00f9b12984354f0d5d7cdd229a",
+  "network": "mainnet",
+  "chain_id": "f9831fadabc8a4234beab35fbb6327e84581645f33e9f75ed2ea78e8bcf1165b",
+  "genesis_hash": "182e10af28e7ec072f462e6044f580dc9dd8c866cb78dfc293bbfaee4e9325ce",
+  "rpc_protocol_version": 1,
+  "p2p_protocol_version": 2,
+  "storage_schema_version_supported": 1,
+  "min_wallet_version": "0.2.0",
+  "published_at": "2026-07-23T00:00:00Z",
+  "artifacts": [
+    {
+      "platform": "linux-x86_64",
+      "sha256": "d5051ce349ac4eac669eaf3ba66af005570f81467389d55d88474eadb80e20a2",
+      "url": "https://fixture.invalid/dom-node-linux-x86_64"
+    }
+  ]
+}

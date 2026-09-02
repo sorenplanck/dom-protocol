@@ -23,6 +23,30 @@ real-dom-adaptor = [
   "dep:dom-serialization",
   "dep:rand_core",
 ]
+f7-wallet-compositor = [
+  "real-dom-adaptor",
+  "dep:cap-std",
+  "dep:dom-scriptless-crypto",
+  "dep:dom-scriptless-identity-store",
+  "dep:dom-scriptless-store",
+  "dom-scriptless-store/evidence-only",
+  "dom-scriptless-identity-store/evidence-only",
+  "dep:dom-scriptless-transport",
+  "dep:dom-wallet-core",
+  "dep:dom-wallet-core-recovery",
+  "dep:dom-wallet-core-protocol",
+  "dep:dom-wallet-core-sync",
+  "dep:dom-wallet-domain",
+  "dep:dom-wallet-remote-source",
+  "dep:hex",
+  "dep:reqwest",
+  "dep:serde",
+  "dep:serde_json",
+]
+# Never enabled by the production F7 runner. This exists only so retained
+# evidence fixtures may inject a completed refund signature while still
+# running the frozen DOM verifier.
+evidence-only = ["f7-wallet-compositor"]
 
 [dependencies]
 dom-scriptless-primitives = { path = "../dom-scriptless-primitives" }
@@ -37,6 +61,21 @@ dom-consensus = { workspace = true, optional = true }
 dom-core      = { workspace = true, optional = true }
 # Used only by the SCAD0 differential test; pinned at the same rev.
 dom-serialization = { workspace = true, optional = true }
+cap-std = { workspace = true, optional = true }
+dom-scriptless-crypto = { workspace = true, optional = true }
+dom-scriptless-identity-store = { workspace = true, optional = true }
+dom-scriptless-store = { workspace = true, optional = true }
+dom-scriptless-transport = { workspace = true, optional = true }
+dom-wallet-core = { workspace = true, optional = true }
+dom-wallet-core-recovery = { workspace = true, optional = true }
+dom-wallet-core-protocol = { workspace = true, optional = true }
+dom-wallet-core-sync = { workspace = true, optional = true }
+dom-wallet-domain = { workspace = true, optional = true }
+dom-wallet-remote-source = { workspace = true, optional = true }
+hex = { version = "=0.4.3", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 
 # Operating-system CSPRNG for the two nonces per round. The pin seals its own
 # derivation (`SecretNoncePairV1`/`derive_secret_nonce_pair_v1` are

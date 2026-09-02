@@ -1,0 +1,22 @@
+[package]
+name = "dom-wallet-remote-source"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+dom-consensus.workspace = true
+dom-chain.workspace = true
+dom-core.workspace = true
+dom-crypto.workspace = true
+dom-serialization.workspace = true
+dom-wallet-core-api.workspace = true
+hex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url.workspace = true

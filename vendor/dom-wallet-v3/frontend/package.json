@@ -1,0 +1,20 @@
+{
+  "name": "dom-wallet-v3-frontend",
+  "private": true,
+  "type": "module",
+  "version": "0.3.2",
+  "scripts": {
+    "typecheck": "node --check main.js",
+    "test": "node --test tests/*.test.mjs",
+    "build": "node --check main.js && node --check tests/status.test.mjs && node build.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.11.1",
+    "esbuild": "0.25.0",
+    "qr-scanner": "1.4.2",
+    "qrcode": "1.5.4"
+  },
+  "devDependencies": {
+    "playwright": "1.57.0"
+  }
+}

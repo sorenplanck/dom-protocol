@@ -36,6 +36,12 @@ use counterparty_api::AdaptorPointBytes;
 pub mod disabled;
 #[cfg(feature = "real-dom-adaptor")]
 pub mod round;
+#[cfg(feature = "f7-wallet-compositor")]
+mod f7_live_wallet;
+#[cfg(feature = "f7-wallet-compositor")]
+mod f7_route;
+#[cfg(feature = "f7-wallet-compositor")]
+pub mod f7_wallet;
 
 #[cfg(not(feature = "real-dom-adaptor"))]
 pub use disabled::{scalar_is_canonical, DomLegSession, SessionBindings, SECP256K1_ORDER};
@@ -45,6 +51,30 @@ pub use round::{
     scalar_is_canonical, AggregateSigningKey, BoundRound, CallerSuppliedIdentitySessionRequestV1,
     DomLegSession, ExtractedAdaptorSecret, LegParticipant, LocalSigningShare, RoundNonces,
     SessionBindings, SessionOpenRequest,
+};
+#[cfg(feature = "f7-wallet-compositor")]
+pub use f7_live_wallet::{
+    F7OfficialWalletError, F7OfficialWalletFundingReceiptV1, F7OfficialWalletPairV1,
+    F7OfficialWalletParticipantConfigV1,
+};
+#[cfg(feature = "f7-wallet-compositor")]
+pub use f7_route::{
+    F7DomFundingShapeV1, F7DomPayoutShapeV1, F7DomRoutePreparationErrorV1,
+    F7DomRoutePreparationRequestV1, F7FreshDomRoutePreparationRequestV1,
+    F7PreparedProductionDomFundingV1, F7PreparedProductionDomRouteV1,
+    F7ProductionDomFundingReceiptV1, F7ProductionDomPostFundingOwnerV1,
+    F7ProductionDomRouteAuthorityFactoryV1,
+};
+#[cfg(feature = "f7-wallet-compositor")]
+pub use f7_wallet::{
+    bind_wallet_pair_claim_template_v1, compose_wallet_pair_claim_template_v1,
+    compose_wallet_pair_funding_template_v1, compose_wallet_pair_refund_template_v1,
+    F7ContractsOperationalSignerV1, F7DomDsc1CheckpointV1, F7DomDsc1FaultControllerV1,
+    F7DomDsc1FaultDirectiveV1, F7DomDsc1PurposeV1, F7OperationalSigningContextV1,
+    F7ProductionContractsCompositionV1, F7ProductionParticipantAuthoritiesV1,
+    F7VerifiedDomClaimArtifactV1, F7VerifiedDomRefundArtifactV1, F7WalletBoundDomClaimV1,
+    F7WalletBoundDomFundingV1, F7WalletBoundDomRefundV1, F7WalletCompositorError,
+    F7WalletDomClaimExtractionV1, F7WalletPreSignedDomClaimV1,
 };
 
 /// Purpose registry.

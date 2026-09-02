@@ -18,10 +18,10 @@ use dom_wallet_core_api::{
     BlockRef, BlockSelector, BlockSummary, ChainIdentity, CoinbaseScanMetadata, CoreNetwork,
     CursorValidation, FeeBreakdown, FeeEstimate, FeeEstimateRequest, FeeEstimateTarget,
     FeePolicySnapshot, FeeRate, FeeValidation, KernelQueryResult, MempoolPolicySnapshot, ScanBlock,
-    ScanInput, ScanKernel, ScanOutput, ScanRequest, ScanResult, ScanStart, SubmissionDiagnostic,
-    SubmissionResult, SubmissionResultKind, SubmitTransactionRequest, SyncStatus,
-    TransactionIdentifier, TransactionShape, TransactionStatus, TransactionWeight, UtxoQueryResult,
-    WalletCoreApi, WalletCoreError, WalletScanCursor,
+    ScanInput, ScanKernel, ScanOutput, ScanRequest, ScanResult, ScanStart, ScanTransaction,
+    SubmissionDiagnostic, SubmissionResult, SubmissionResultKind, SubmitTransactionRequest,
+    SyncStatus, TransactionIdentifier, TransactionLocation, TransactionShape, TransactionStatus,
+    TransactionWeight, UtxoQueryResult, WalletCoreApi, WalletCoreError, WalletScanCursor,
 };
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
@@ -289,7 +289,7 @@ impl EmbeddedWalletCoreApi {
         }
     }
 
-    fn current_identity_locked(
+    pub(crate) fn current_identity_locked(
         &self,
         chain: &dom_chain::ChainState,
     ) -> Result<ChainIdentity, WalletCoreError> {
@@ -371,7 +371,7 @@ impl EmbeddedWalletCoreApi {
             .map_err(|error| WalletCoreError::InternalFailure(error.to_string()))
     }
 
-    fn load_canonical_block_locked(
+    pub(crate) fn load_canonical_block_locked(
         chain: &dom_chain::ChainState,
         height: u64,
     ) -> Result<Option<(Hash256, Block)>, WalletCoreError> {
@@ -389,10 +389,50 @@ impl EmbeddedWalletCoreApi {
         };
         let block = Block::from_bytes(&body)
             .map_err(|error| WalletCoreError::InternalFailure(error.to_string()))?;
+        if block.header.height.0 != height {
+            return Err(WalletCoreError::CanonicalGap(format!(
+                "canonical block body reports height {} at index height {height}",
+                block.header.height.0
+            )));
+        }
+        let canonical_body = block
+            .to_bytes()
+            .map_err(|error| WalletCoreError::InternalFailure(error.to_string()))?;
+        if canonical_body != body {
+            return Err(WalletCoreError::CanonicalGap(format!(
+                "block body at canonical height {height} is not canonical DOM encoding"
+            )));
+        }
+        let canonical_header = block
+            .header
+            .to_bytes()
+            .map_err(|error| WalletCoreError::InternalFailure(error.to_string()))?;
+        let stored_header = chain
+            .store
+            .get_block_header(&hash)
+            .map_err(|error| WalletCoreError::InternalFailure(error.to_string()))?
+            .ok_or_else(|| {
+                WalletCoreError::CanonicalGap(format!(
+                    "missing canonical block header at height {height}"
+                ))
+            })?;
+        if stored_header != canonical_header {
+            return Err(WalletCoreError::CanonicalGap(format!(
+                "canonical block header/body mismatch at height {height}"
+            )));
+        }
+        let computed_hash =
+            dom_chain::canonical_header_identifier(chain.network_magic, &canonical_header)
+                .map_err(|error| WalletCoreError::InternalFailure(error.to_string()))?;
+        if computed_hash.as_bytes() != &hash {
+            return Err(WalletCoreError::CanonicalGap(format!(
+                "canonical block identifier mismatch at height {height}"
+            )));
+        }
         Ok(Some((Hash256::from_bytes(hash), block)))
     }
 
-    fn project_block(
+    pub(crate) fn project_block(
         identity: &ChainIdentity,
         hash: Hash256,
         block: Block,
@@ -480,6 +520,7 @@ impl EmbeddedWalletCoreApi {
             features: block.coinbase.kernel.features,
             fee: 0,
             lock_height: 0,
+            excess_signature: block.coinbase.kernel.excess_signature,
         });
         for tx in &block.transactions {
             for kernel in &tx.kernels {
@@ -488,9 +529,114 @@ impl EmbeddedWalletCoreApi {
                     features: kernel.features,
                     fee: kernel.fee.noms(),
                     lock_height: kernel.lock_height,
+                    excess_signature: kernel.excess_signature,
                 });
             }
         }
+
+        // A filtered Wallet V3 recovery request deliberately receives only
+        // its filtered flat projection. The authenticated F7 scanner never
+        // supplies filters and therefore receives the complete canonical
+        // transaction grouping below, including exact bytes and signatures.
+        let transactions = if filters.is_some() {
+            Vec::new()
+        } else {
+            let mut projected = Vec::with_capacity(block.transactions.len());
+            let mut first_output_position = 1u32;
+            for (transaction_index, tx) in block.transactions.iter().enumerate() {
+                let canonical_bytes = tx
+                    .to_bytes()
+                    .map_err(|error| WalletCoreError::InternalFailure(error.to_string()))?;
+                let decoded = Transaction::from_bytes(&canonical_bytes)
+                    .map_err(|error| WalletCoreError::InternalFailure(error.to_string()))?;
+                if decoded != *tx {
+                    return Err(WalletCoreError::InternalFailure(
+                        "canonical transaction roundtrip changed the transaction".to_string(),
+                    ));
+                }
+                let transaction_index = u32::try_from(transaction_index).map_err(|_| {
+                    WalletCoreError::InternalFailure(
+                        "transaction index exceeds scanner u32 range".to_string(),
+                    )
+                })?;
+                let mut transaction_outputs = Vec::with_capacity(tx.outputs.len());
+                for (position, output) in tx.outputs.iter().enumerate() {
+                    let position = u32::try_from(position).map_err(|_| {
+                        WalletCoreError::InternalFailure(
+                            "output index exceeds scanner u32 range".to_string(),
+                        )
+                    })?;
+                    let capsule = output
+                        .recovery_capsule()
+                        .map_err(|error| WalletCoreError::InternalFailure(error.to_string()))?;
+                    transaction_outputs.push(ScanOutput {
+                        commitment: *output.commitment.as_bytes(),
+                        range_proof: output
+                            .range_proof_bytes()
+                            .map_err(|error| WalletCoreError::InternalFailure(error.to_string()))?
+                            .to_vec(),
+                        recovery_version: capsule.as_ref().map_or(0, |value| value.version()),
+                        recovery_capsule: capsule
+                            .map(|value| value.as_bytes().to_vec())
+                            .unwrap_or_default(),
+                        is_coinbase: false,
+                        block_height: block.header.height.0,
+                        block_hash,
+                        output_position: first_output_position.checked_add(position).ok_or_else(
+                            || {
+                                WalletCoreError::InternalFailure(
+                                    "block output position overflow".to_string(),
+                                )
+                            },
+                        )?,
+                    });
+                }
+                let transaction_inputs = tx
+                    .inputs
+                    .iter()
+                    .map(|input| ScanInput {
+                        spent_commitment: *input.commitment.as_bytes(),
+                    })
+                    .collect();
+                let transaction_kernels = tx
+                    .kernels
+                    .iter()
+                    .map(|kernel| ScanKernel {
+                        excess: *kernel.excess.as_bytes(),
+                        features: kernel.features,
+                        fee: kernel.fee.noms(),
+                        lock_height: kernel.lock_height,
+                        excess_signature: kernel.excess_signature,
+                    })
+                    .collect();
+                projected.push(ScanTransaction {
+                    location: TransactionLocation {
+                        block_height: block.header.height.0,
+                        block_hash,
+                        transaction_index,
+                    },
+                    tx_hash: *blake2b_256(&canonical_bytes).as_bytes(),
+                    canonical_bytes,
+                    inputs: transaction_inputs,
+                    outputs: transaction_outputs,
+                    kernels: transaction_kernels,
+                    offset: tx.offset,
+                });
+                let output_count = u32::try_from(tx.outputs.len()).map_err(|_| {
+                    WalletCoreError::InternalFailure(
+                        "transaction output count exceeds scanner u32 range".to_string(),
+                    )
+                })?;
+                first_output_position = first_output_position
+                    .checked_add(output_count)
+                    .ok_or_else(|| {
+                        WalletCoreError::InternalFailure(
+                            "block output position overflow".to_string(),
+                        )
+                    })?;
+            }
+            projected
+        };
 
         let total_fees_noms = block
             .total_fees()
@@ -500,15 +646,24 @@ impl EmbeddedWalletCoreApi {
             height: block.header.height.0,
             block_hash,
             previous_block_hash: *block.header.prev_hash.as_bytes(),
+            canonical_header_bytes: block
+                .header
+                .to_bytes()
+                .map_err(|error| WalletCoreError::InternalFailure(error.to_string()))?,
             timestamp: block.header.timestamp.0,
             canonical_marker: block_hash,
             outputs,
             inputs,
             kernels,
+            transactions,
             coinbase: CoinbaseScanMetadata {
                 output_commitment: coinbase_commitment,
                 explicit_value: block.coinbase.kernel.explicit_value,
                 kernel_excess: *block.coinbase.kernel.excess.as_bytes(),
+                kernel_features: block.coinbase.kernel.features,
+                kernel_excess_signature: block.coinbase.kernel.excess_signature,
+                offset: block.coinbase.offset,
+                output_proof_envelope: block.coinbase.output.proof.clone(),
             },
             total_fees_noms,
             protocol_version: block.header.version,
