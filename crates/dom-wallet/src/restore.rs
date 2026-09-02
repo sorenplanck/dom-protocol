@@ -255,6 +255,14 @@ pub fn restore_from_phrase<S: ChainScanSource>(
         std::fs::create_dir_all(target_dir)
             .map_err(|e| RestoreError::Io(format!("create target dir: {e}")))?;
     }
+    // The envelope audit admits only an owner-only (0700) wallet directory;
+    // both branches above would otherwise inherit the process umask.
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        target_dir,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .map_err(|e| RestoreError::Io(format!("restrict target dir: {e}")))?;
 
     // 3. Acquire the exclusive lockfile before any writes.
     let lockfile_path = target_dir.join(WALLET_LOCK_NAME);
