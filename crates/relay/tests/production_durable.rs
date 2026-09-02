@@ -224,6 +224,7 @@ fn scope() -> RecoveryScopeV1 {
             network_id: NETWORK,
             session_id: SESSION,
             route_id: ROUTE,
+            policy_version: 1,
         },
         TimelockSpec::TimestampSeconds { value: 1_000 },
     )
@@ -452,6 +453,7 @@ fn recovery_rejects_substitution_foreign_scope_gap_and_null_source_binding() {
             network_id: NETWORK,
             session_id: SESSION,
             route_id: [0xee; 32],
+            policy_version: 1,
         },
         TimelockSpec::TimestampSeconds { value: 1_000 },
     );

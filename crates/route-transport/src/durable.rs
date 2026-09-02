@@ -217,6 +217,7 @@ impl DurableInboxConfigV1 {
             network_id: self.wire.network_id,
             session_id: self.wire.session_id,
             route_id: self.wire.route_id,
+            policy_version: self.wire.policy_version,
         }
     }
 }

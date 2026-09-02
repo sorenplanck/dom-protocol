@@ -67,6 +67,7 @@ fn recipient_ctx() -> RecipientContextV1 {
         network_id: NETWORK,
         session_id: SESSION,
         route_id: ROUTE,
+        policy_version: 1,
     }
 }
 
@@ -328,6 +329,7 @@ fn the_reverse_direction_is_an_independent_flow() {
         network_id: NETWORK,
         session_id: SESSION,
         route_id: ROUTE,
+        policy_version: 1,
     };
     let mut state = TranscriptStateV1::new();
     let d = receive_route_payloads(&relay, &initiator_ctx, &rosters(), &mut state, now());
