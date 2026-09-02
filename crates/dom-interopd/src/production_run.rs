@@ -40,7 +40,7 @@ use solver_inventory::DurableInventoryStoreV1;
 
 use crate::production_bitcoin_prebroadcast::ProductionBitcoinPrebroadcastOwnerV7;
 use crate::production_chain_services::{
-    load_production_chain_services_v1, ProductionChainClientsV1,
+    load_production_chain_services_v2, ProductionChainClientsV1,
 };
 use crate::production_chain_signers::{
     provision_production_chain_signers_v1, ProductionChainSignerAuthoritiesV1,
@@ -228,6 +228,21 @@ pub enum ProductionRunErrorV1 {
     /// were refused before any route worker started.
     #[error("production counterparty chain services unavailable")]
     ChainServices,
+    /// The admitted route selects a Solana leg. The authenticated session,
+    /// deployment capability, actuator store path and chain-services quorum
+    /// face are already composed, but the F6 payout faces and the chain-signer
+    /// authorities are not yet generalized beyond DOM/EVM/Bitcoin, so the
+    /// shape refuses here instead of failing opaquely at stage 12.
+    #[error("production Solana route shape not yet composable")]
+    SolanaRouteShape,
+    /// The admitted route selects a Monero leg. The authenticated session,
+    /// deployment capability, actuator store path and chain-services
+    /// daemon/sidecar faces are already composed, but the F6 payout faces and
+    /// the chain-signer authorities are not yet generalized beyond
+    /// DOM/EVM/Bitcoin, so the shape refuses here instead of failing opaquely
+    /// at stage 12.
+    #[error("production Monero route shape not yet composable")]
+    MoneroRouteShape,
     /// The solver inventory/bond authority could not be created, resumed from
     /// its exact pristine prefix, or reopened under the authenticated binding.
     #[error("production solver inventory store unavailable")]
@@ -294,6 +309,9 @@ pub enum ProductionRunErrorV1 {
 pub const PRODUCTION_KNOWN_LIMITS_V1: &[&str] = &[
     "BitcoinClaim: the Bitcoin child is composed funding/refund-only; every claim materialization is refused by `ProductionBitcoinChildPortV1` until the authenticated DSC1 M.8 participant round (pubnonce/partial/aggregate) exists, and a durably recovered claim refuses startup (`ClaimRecoveryNotComposable`)",
     "EvmPublicSecretSource: no EVM reextraction source is installed; `ProductionPublicSecretSourceRouterV1` refuses EVM-scoped reextraction, and recovery of an already-public `t` uses the sealed retention vault only",
+    "SolanaRouteShape: a route selecting a Solana leg is refused at counterparty selection (`SolanaRouteShape`) because the F6 payout faces and chain-signer authorities are not generalized beyond DOM/EVM/Bitcoin; the authenticated Solana session, the deployment capability, the fixed actuator store path and the chain-services V2 quorum face already compose and wait on that generalization",
+    "MoneroRouteShape: a route selecting a Monero leg is refused at counterparty selection (`MoneroRouteShape`) for the same missing generalization; the authenticated Monero session, the deployment capability, the fixed actuator store path and the chain-services V2 daemon/sidecar faces already compose and wait on it",
+    "ExtendedChainServicesFaces: on the composable EVM+Bitcoin shape, a chain-services V2 document declaring a Solana or Monero face is refused (`ChainServices`) because nothing on that route can consume the declared endpoints",
 ];
 
 /// Runs the production composition root as far as it can go today.
@@ -439,10 +457,16 @@ pub fn run_production_v1(options: &ProductionRunOptionsV1) -> Result<(), Product
     let evm_fees = operational_policies
         .evm_fees(bootstrap.config(), &evm_deployment)
         .map_err(|_| ProductionRunErrorV1::Configuration)?;
-    let chain_services = load_production_chain_services_v1(bootstrap.layout().state_dir())
+    let chain_services = load_production_chain_services_v2(bootstrap.layout().state_dir())
         .map_err(|_| ProductionRunErrorV1::ChainServices)?;
+    // Only the EVM+Bitcoin shape reaches this point, so a V2 document that
+    // declares a Solana or Monero face names endpoints nothing on this route
+    // can consume; that contradiction refuses rather than being ignored.
+    if chain_services.solana_declared() || chain_services.xmr_endpoints().is_some() {
+        return Err(ProductionRunErrorV1::ChainServices);
+    }
     let chain_clients = chain_services
-        .into_clients(
+        .into_base_clients(
             evm_deployment,
             &bitcoin_deployment,
             runtime_bounds.external_call_timeout_ms,
@@ -1603,14 +1627,70 @@ fn authenticate_dom_f6_payouts(
     Ok((upstream, downstream, lease))
 }
 
+/// The one counterparty chain an authenticated leg selects, decided by which
+/// exact session survived input authentication for that leg.
+enum SelectedLegChainV1 {
+    Evm,
+    Bitcoin,
+    Solana,
+    Monero,
+}
+
+/// Classifies one leg by its surviving authenticated session.
+///
+/// Exactly one session kind may exist per leg: zero means the leg selected no
+/// counterparty chain this composition serves, and two or more means the
+/// inputs contradict themselves. Both refuse as `ChainServices`, exactly as
+/// the pre-shape selection did.
+fn selected_leg_chain(
+    inputs: &AuthenticatedProductionInputsV1,
+    leg: LegIdV1,
+) -> Result<SelectedLegChainV1, ProductionRunErrorV1> {
+    let mut selected = None;
+    for candidate in [
+        inputs.evm_session(leg).map(|_| SelectedLegChainV1::Evm),
+        inputs
+            .bitcoin_session(leg)
+            .map(|_| SelectedLegChainV1::Bitcoin),
+        inputs
+            .solana_session(leg)
+            .map(|_| SelectedLegChainV1::Solana),
+        inputs
+            .monero_session(leg)
+            .map(|_| SelectedLegChainV1::Monero),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if selected.is_some() {
+            return Err(ProductionRunErrorV1::ChainServices);
+        }
+        selected = Some(candidate);
+    }
+    selected.ok_or(ProductionRunErrorV1::ChainServices)
+}
+
+/// Resolves the two counterparty deployments for the one composable shape.
+///
+/// The composable shape today is exactly one EVM leg plus one Bitcoin leg, in
+/// either order. A shape selecting a Solana or Monero leg is authenticated and
+/// classifiable but refuses with its own named error at this exact point — the
+/// first subsystem past it (chain signers, then the F6 payout faces) is not
+/// generalized beyond DOM/EVM/Bitcoin. See `PRODUCTION_KNOWN_LIMITS_V1`.
 fn selected_counterparty_deployments(
     inputs: &AuthenticatedProductionInputsV1,
 ) -> Result<(ResolvedEvmDeploymentV1, ResolvedBitcoinDeploymentV1), ProductionRunErrorV1> {
     let mut evm = None;
     let mut bitcoin = None;
     for leg in [LegIdV1::Upstream, LegIdV1::Downstream] {
-        match (inputs.evm_session(leg), inputs.bitcoin_session(leg)) {
-            (Some(session), None) if evm.is_none() => {
+        match selected_leg_chain(inputs, leg)? {
+            SelectedLegChainV1::Evm => {
+                if evm.is_some() {
+                    return Err(ProductionRunErrorV1::ChainServices);
+                }
+                let session = inputs
+                    .evm_session(leg)
+                    .ok_or(ProductionRunErrorV1::ChainServices)?;
                 evm = Some(
                     inputs
                         .admission()
@@ -1618,7 +1698,10 @@ fn selected_counterparty_deployments(
                         .map_err(|_| ProductionRunErrorV1::ChainServices)?,
                 );
             }
-            (None, Some(_session)) if bitcoin.is_none() => {
+            SelectedLegChainV1::Bitcoin => {
+                if bitcoin.is_some() {
+                    return Err(ProductionRunErrorV1::ChainServices);
+                }
                 bitcoin = Some(
                     inputs
                         .admission()
@@ -1626,8 +1709,11 @@ fn selected_counterparty_deployments(
                         .map_err(|_| ProductionRunErrorV1::ChainServices)?,
                 );
             }
-            (Some(_), Some(_)) | (Some(_), None) | (None, Some(_)) | (None, None) => {
-                return Err(ProductionRunErrorV1::ChainServices);
+            SelectedLegChainV1::Solana => {
+                return Err(ProductionRunErrorV1::SolanaRouteShape);
+            }
+            SelectedLegChainV1::Monero => {
+                return Err(ProductionRunErrorV1::MoneroRouteShape);
             }
         }
     }

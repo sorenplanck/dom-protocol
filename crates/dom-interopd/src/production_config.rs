@@ -55,6 +55,13 @@ pub const PRODUCTION_NODE_CONFIG_FILE_V1: &str = "node.v1";
 pub const PRODUCTION_RELAY_NETWORK_CONFIG_FILE_V1: &str = "production-relay-network.v1";
 /// Fixed durable refund journal leaf owned by Stage 13.
 pub const REFUND_ARMING_DATABASE_FILE_V1: &str = "refund-arming.v1.sqlite3";
+/// Fixed durable Solana actuator store, created only by a route whose
+/// admitted shape carries a Solana leg. Its create/reopen audit is the
+/// actuator crate's own; the layout pins the name and the parent chain.
+pub const SOLANA_ACTUATOR_DATABASE_FILE_V1: &str = "solana-actuator.v1.sqlite3";
+/// Fixed durable Monero actuator store, created only by a route whose
+/// admitted shape carries a Monero leg. Same discipline as the Solana store.
+pub const XMR_ACTUATOR_DATABASE_FILE_V1: &str = "xmr-actuator.v1.sqlite3";
 /// Exact number of public path references in the V2 layout: the V1 set plus
 /// the externally provisioned Contracts transport identity authority.
 pub const PRODUCTION_PATH_ROLE_COUNT_V2: usize = 29;
@@ -3267,6 +3274,8 @@ pub struct ValidatedProductionLayoutV1 {
     bitcoin_prebroadcast_store_v7: Option<PathBuf>,
     f6_paths_v8: Option<[PathBuf; PRODUCTION_F6_PATH_ROLE_COUNT_V8]>,
     refund_arming_database: Option<PathBuf>,
+    solana_actuator_database: Option<PathBuf>,
+    xmr_actuator_database: Option<PathBuf>,
 }
 
 impl core::fmt::Debug for ValidatedProductionLayoutV1 {
@@ -3325,6 +3334,16 @@ impl ValidatedProductionLayoutV1 {
     /// Fixed Stage-13 refund journal, present in the live V8/V9/V10 layouts.
     pub fn refund_arming_database(&self) -> Option<&Path> {
         self.refund_arming_database.as_deref()
+    }
+
+    /// Fixed Solana actuator store name, pinned in the live layouts.
+    pub fn solana_actuator_database(&self) -> Option<&Path> {
+        self.solana_actuator_database.as_deref()
+    }
+
+    /// Fixed Monero actuator store name, pinned in the live layouts.
+    pub fn xmr_actuator_database(&self) -> Option<&Path> {
+        self.xmr_actuator_database.as_deref()
     }
 }
 
@@ -5494,6 +5513,8 @@ fn validate_relative_path(value: &str) -> Result<(), ProductionConfigErrorV1> {
                 | PRODUCTION_NODE_CONFIG_FILE_V1
                 | PRODUCTION_RELAY_NETWORK_CONFIG_FILE_V1
                 | REFUND_ARMING_DATABASE_FILE_V1
+                | SOLANA_ACTUATOR_DATABASE_FILE_V1
+                | XMR_ACTUATOR_DATABASE_FILE_V1
         )
     {
         return Err(ProductionConfigErrorV1::InvalidPathReference);
@@ -5690,6 +5711,18 @@ fn resolve_and_validate_layout(
     } else {
         None
     };
+    let solana_actuator_database = derive_optional_chain_actuator_database(
+        state_dir,
+        SOLANA_ACTUATOR_DATABASE_FILE_V1,
+        creating,
+        f6_paths_v8.is_some(),
+    )?;
+    let xmr_actuator_database = derive_optional_chain_actuator_database(
+        state_dir,
+        XMR_ACTUATOR_DATABASE_FILE_V1,
+        creating,
+        f6_paths_v8.is_some(),
+    )?;
     Ok(ValidatedProductionLayoutV1 {
         state_dir: state_dir.to_path_buf(),
         paths,
@@ -5700,7 +5733,33 @@ fn resolve_and_validate_layout(
         bitcoin_prebroadcast_store_v7,
         f6_paths_v8,
         refund_arming_database,
+        solana_actuator_database,
+        xmr_actuator_database,
     })
+}
+
+/// Pins one optional per-chain actuator store: fixed name, validated parent
+/// chain, and — unlike the journaled stores — presence that follows the
+/// route's admitted shape, not the layout version. Creation requires the
+/// leaf absent; a reopen accepts the honest absent state (the route never
+/// composed that leg) or one canonical owner-only file.
+fn derive_optional_chain_actuator_database(
+    state_dir: &Path,
+    file_name: &str,
+    creating: bool,
+    live_layout: bool,
+) -> Result<Option<PathBuf>, ProductionConfigErrorV1> {
+    if !live_layout {
+        return Ok(None);
+    }
+    let path = state_dir.join(file_name);
+    validate_parent_chain(state_dir, &path)?;
+    if creating {
+        require_managed_file_absent(&path)?;
+    } else if path.exists() {
+        validate_owner_file(&path, ProductionConfigErrorV1::RecoveryStateUnavailable)?;
+    }
+    Ok(Some(path))
 }
 
 #[cfg(feature = "production")]
@@ -5849,6 +5908,22 @@ fn resolve_and_validate_layout_for_provisioning(
     } else {
         None
     };
+    // The per-chain actuator stores are deliberately unjournaled: their
+    // presence follows the route's admitted shape, and their own create/
+    // reopen audits are the actuator crates' contract. Provisioning resume
+    // only pins the name and the parent chain and accepts absent-or-owner.
+    let solana_actuator_database = derive_optional_chain_actuator_database(
+        state_dir,
+        SOLANA_ACTUATOR_DATABASE_FILE_V1,
+        false,
+        f6_paths_v8.is_some(),
+    )?;
+    let xmr_actuator_database = derive_optional_chain_actuator_database(
+        state_dir,
+        XMR_ACTUATOR_DATABASE_FILE_V1,
+        false,
+        f6_paths_v8.is_some(),
+    )?;
     Ok(ValidatedProductionLayoutV1 {
         state_dir: state_dir.to_path_buf(),
         paths,
@@ -5859,6 +5934,8 @@ fn resolve_and_validate_layout_for_provisioning(
         bitcoin_prebroadcast_store_v7,
         f6_paths_v8,
         refund_arming_database,
+        solana_actuator_database,
+        xmr_actuator_database,
     })
 }
 

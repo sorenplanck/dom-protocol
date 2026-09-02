@@ -34,6 +34,17 @@ const HEADER_V1: &str = "DOM-INTEROPD-PRODUCTION-CHAIN-SERVICES-V1";
 const END_V1: &str = "END-DOM-INTEROPD-PRODUCTION-CHAIN-SERVICES-V1";
 const DIGEST_DOMAIN_V1: &[u8] = b"DOM-INTEROPD/PRODUCTION-CHAIN-SERVICES/V1\0";
 const LINE_COUNT_V1: usize = 8;
+const HEADER_V2: &str = "DOM-INTEROPD-PRODUCTION-CHAIN-SERVICES-V2";
+const END_V2: &str = "END-DOM-INTEROPD-PRODUCTION-CHAIN-SERVICES-V2";
+const DIGEST_DOMAIN_V2: &[u8] = b"DOM-INTEROPD/PRODUCTION-CHAIN-SERVICES/V2\0";
+const LINE_COUNT_V2: usize = 12;
+/// Explicit textual absence for an optional V2 face. An empty value is
+/// refused everywhere, so absence is always a decision, never an accident.
+const NONE_V2: &str = "none";
+const MAX_SOLANA_ENDPOINTS_V2: usize = 16;
+/// Hard byte ceiling for one signed Solana transaction accepted by the
+/// concrete HTTP RPC. Solana's own packet bound is 1232 bytes.
+const MAX_SOLANA_SIGNED_TRANSACTION_BYTES_V2: usize = 1_232;
 const MAX_ENDPOINT_BYTES_V1: usize = 2_048;
 const MAX_COOKIE_PATH_BYTES_V1: usize = 4_096;
 const MAX_WALLET_NAME_BYTES_V1: usize = 128;
@@ -68,6 +79,12 @@ pub enum ProductionChainServicesErrorV1 {
     /// A chain client or refund face could outlive the orchestration deadline.
     #[error("production chain RPC deadline exceeds runtime authority")]
     InvalidRuntimeTimeout,
+    /// A Solana quorum endpoint or the quorum bound was refused.
+    #[error("production Solana RPC quorum configuration is invalid")]
+    InvalidSolanaEndpoints,
+    /// The Monero daemon or sidecar reference was refused.
+    #[error("production Monero endpoint configuration is invalid")]
+    InvalidXmrEndpoints,
 }
 
 /// Validated public client configuration for the EVM and Bitcoin faces.
@@ -292,6 +309,334 @@ fn bounded_rpc_timeouts(
         BitcoinCoreRpcTimeoutsV1::new(bitcoin_live_default.connect().min(request), request)
             .map_err(|_| ProductionChainServicesErrorV1::InvalidRuntimeTimeout)?;
     Ok((evm, bitcoin, bitcoin_live))
+}
+
+/// The V1 EVM/Bitcoin faces plus the optional Solana and Monero faces.
+///
+/// The V2 spelling extends the V1 document with four lines. Each optional
+/// face is either fully present or the explicit literal `none`; an absent
+/// face composes nothing and refuses nothing else. A V1 document remains
+/// decodable through [`load_production_chain_services_v2`] and means both
+/// optional faces are absent.
+pub struct ProductionChainServicesV2 {
+    base: ProductionChainServicesConfigV1,
+    solana: Option<SolanaQuorumEndpointsV2>,
+    xmr: Option<XmrEndpointsV2>,
+}
+
+/// One exact Solana read/broadcast quorum: every endpoint is exercised by the
+/// concrete client constructor before the document is accepted.
+pub struct SolanaQuorumEndpointsV2 {
+    endpoints: Vec<String>,
+    quorum: usize,
+}
+
+/// The loopback Monero daemon reader plus the local sweep sidecar socket.
+pub struct XmrEndpointsV2 {
+    daemon_endpoint: String,
+    sidecar_socket: PathBuf,
+}
+
+impl core::fmt::Debug for ProductionChainServicesV2 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("ProductionChainServicesV2")
+            .field("solana", &self.solana.is_some())
+            .field("xmr", &self.xmr.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ProductionChainServicesV2 {
+    /// Builds and validates one V2 document from explicit public parts.
+    pub fn from_parts(
+        base: ProductionChainServicesConfigV1,
+        solana: Option<SolanaQuorumEndpointsV2>,
+        xmr: Option<XmrEndpointsV2>,
+    ) -> Result<Self, ProductionChainServicesErrorV1> {
+        if let Some(solana) = &solana {
+            validate_solana_quorum(solana)?;
+        }
+        if let Some(xmr) = &xmr {
+            validate_xmr_endpoints(xmr)?;
+        }
+        Ok(Self { base, solana, xmr })
+    }
+
+    /// The EVM/Bitcoin faces, exactly as a V1 document carries them.
+    pub const fn base(&self) -> &ProductionChainServicesConfigV1 {
+        &self.base
+    }
+
+    /// Consumes the base faces into the concrete EVM/Bitcoin clients.
+    pub(crate) fn into_base_clients(
+        self,
+        evm_deployment: ResolvedEvmDeploymentV1,
+        bitcoin_deployment: &ResolvedBitcoinDeploymentV1,
+        external_call_timeout_ms: u64,
+    ) -> Result<ProductionChainClientsV1, ProductionChainServicesErrorV1> {
+        self.base
+            .into_clients(evm_deployment, bitcoin_deployment, external_call_timeout_ms)
+    }
+
+    /// Whether the document declares a Solana quorum face at all.
+    pub(crate) const fn solana_declared(&self) -> bool {
+        self.solana.is_some()
+    }
+
+    /// Builds the Solana quorum pool, or reports the face's explicit absence.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Solana quorum consumption point awaiting the SOL leg composer at stage 14; fails the build when first wired"
+        )
+    )]
+    pub(crate) fn solana_pool(
+        &self,
+    ) -> Result<
+        Option<solana_rpc_pool::SolanaRpcPool<solana_rpc::HttpSolanaRpc>>,
+        ProductionChainServicesErrorV1,
+    > {
+        let Some(solana) = &self.solana else {
+            return Ok(None);
+        };
+        let mut nodes = Vec::with_capacity(solana.endpoints.len());
+        for endpoint in &solana.endpoints {
+            nodes.push(std::sync::Arc::new(
+                solana_rpc::HttpSolanaRpc::new(
+                    endpoint.clone(),
+                    MAX_SOLANA_SIGNED_TRANSACTION_BYTES_V2,
+                )
+                .map_err(|_| ProductionChainServicesErrorV1::InvalidSolanaEndpoints)?,
+            ));
+        }
+        solana_rpc_pool::SolanaRpcPool::new(nodes, solana.quorum)
+            .map(Some)
+            .map_err(|_| ProductionChainServicesErrorV1::InvalidSolanaEndpoints)
+    }
+
+    /// The Monero faces, or their explicit absence.
+    pub(crate) fn xmr_endpoints(&self) -> Option<(&str, &Path)> {
+        self.xmr
+            .as_ref()
+            .map(|xmr| (xmr.daemon_endpoint.as_str(), xmr.sidecar_socket.as_path()))
+    }
+
+    /// Exact canonical V2 bytes including the integrity digest.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, ProductionChainServicesErrorV1> {
+        let body = self.canonical_body()?;
+        let digest = chain_services_digest_v2(body.as_bytes())?;
+        let encoded = format!("{body}config_digest={}\n{END_V2}\n", encode_hex(&digest));
+        if encoded.len() as u64 > MAX_PRODUCTION_CHAIN_SERVICES_CONFIG_BYTES_V1 {
+            return Err(ProductionChainServicesErrorV1::InvalidEncoding);
+        }
+        Ok(encoded.into_bytes())
+    }
+
+    /// Decodes only the exact V2 spelling.
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, ProductionChainServicesErrorV1> {
+        if bytes.is_empty()
+            || bytes.len() as u64 > MAX_PRODUCTION_CHAIN_SERVICES_CONFIG_BYTES_V1
+            || !bytes.is_ascii()
+            || bytes.last() != Some(&b'\n')
+            || bytes.contains(&b'\r')
+        {
+            return Err(ProductionChainServicesErrorV1::InvalidEncoding);
+        }
+        let text = std::str::from_utf8(bytes)
+            .map_err(|_| ProductionChainServicesErrorV1::InvalidEncoding)?;
+        let lines: Vec<&str> = text[..text.len() - 1].split('\n').collect();
+        if lines.len() != LINE_COUNT_V2 || lines.first() != Some(&HEADER_V2) {
+            return Err(ProductionChainServicesErrorV1::InvalidEncoding);
+        }
+        let evm_rpc_endpoint = take_value(&lines, 1, "evm_rpc_endpoint")?.to_owned();
+        let bitcoin_rpc_endpoint = take_value(&lines, 2, "bitcoin_rpc_endpoint")?.to_owned();
+        let bitcoin_wallet_name = take_value(&lines, 3, "bitcoin_wallet_name")?.to_owned();
+        let bitcoin_cookie_path = PathBuf::from(take_value(&lines, 4, "bitcoin_cookie_path")?);
+        let evm_timeout_seconds = take_number(
+            &lines,
+            5,
+            "evm_timeout_seconds",
+            ProductionChainServicesErrorV1::InvalidEvmEndpoint,
+        )?;
+        let solana_endpoints_text = take_value(&lines, 6, "solana_rpc_endpoints")?;
+        let solana_quorum_text = take_value(&lines, 7, "solana_rpc_quorum")?;
+        let xmr_daemon_text = take_value(&lines, 8, "xmr_daemon_endpoint")?;
+        let xmr_sidecar_text = take_value(&lines, 9, "xmr_sidecar_socket")?;
+        let supplied_digest = decode_digest(take_value(&lines, 10, "config_digest")?)
+            .map_err(|_| ProductionChainServicesErrorV1::InvalidEncoding)?;
+        if lines.get(11) != Some(&END_V2) {
+            return Err(ProductionChainServicesErrorV1::InvalidEncoding);
+        }
+        let solana = match (solana_endpoints_text, solana_quorum_text) {
+            (NONE_V2, NONE_V2) => None,
+            (endpoints, quorum) => {
+                let endpoints: Vec<String> = endpoints.split(' ').map(str::to_owned).collect();
+                let quorum: usize = quorum
+                    .parse()
+                    .map_err(|_| ProductionChainServicesErrorV1::InvalidSolanaEndpoints)?;
+                Some(SolanaQuorumEndpointsV2 { endpoints, quorum })
+            }
+        };
+        let xmr = match (xmr_daemon_text, xmr_sidecar_text) {
+            (NONE_V2, NONE_V2) => None,
+            (daemon, sidecar) => Some(XmrEndpointsV2 {
+                daemon_endpoint: daemon.to_owned(),
+                sidecar_socket: PathBuf::from(sidecar),
+            }),
+        };
+        let base = ProductionChainServicesConfigV1::from_parts(
+            evm_rpc_endpoint,
+            bitcoin_rpc_endpoint,
+            bitcoin_wallet_name,
+            bitcoin_cookie_path,
+            evm_timeout_seconds,
+        )?;
+        let config = Self::from_parts(base, solana, xmr)?;
+        let body = config.canonical_body()?;
+        if chain_services_digest_v2(body.as_bytes())? != supplied_digest
+            || config.canonical_bytes()?.as_slice() != bytes
+        {
+            return Err(ProductionChainServicesErrorV1::InvalidEncoding);
+        }
+        Ok(config)
+    }
+
+    fn canonical_body(&self) -> Result<String, ProductionChainServicesErrorV1> {
+        let base = self.base.canonical_body()?;
+        let base_body = base
+            .strip_prefix(HEADER_V1)
+            .and_then(|rest| rest.strip_prefix('\n'))
+            .ok_or(ProductionChainServicesErrorV1::InvalidEncoding)?;
+        let (solana_endpoints, solana_quorum) = match &self.solana {
+            None => (NONE_V2.to_owned(), NONE_V2.to_owned()),
+            Some(solana) => (solana.endpoints.join(" "), solana.quorum.to_string()),
+        };
+        let (xmr_daemon, xmr_sidecar) = match &self.xmr {
+            None => (NONE_V2.to_owned(), NONE_V2.to_owned()),
+            Some(xmr) => {
+                let socket = xmr
+                    .sidecar_socket
+                    .to_str()
+                    .ok_or(ProductionChainServicesErrorV1::InvalidXmrEndpoints)?;
+                (xmr.daemon_endpoint.clone(), socket.to_owned())
+            }
+        };
+        Ok(format!(
+            "{HEADER_V2}\n{base_body}solana_rpc_endpoints={solana_endpoints}\nsolana_rpc_quorum={solana_quorum}\nxmr_daemon_endpoint={xmr_daemon}\nxmr_sidecar_socket={xmr_sidecar}\n",
+        ))
+    }
+}
+
+impl SolanaQuorumEndpointsV2 {
+    /// Builds one validated quorum specification.
+    pub fn new(
+        endpoints: Vec<String>,
+        quorum: usize,
+    ) -> Result<Self, ProductionChainServicesErrorV1> {
+        let value = Self { endpoints, quorum };
+        validate_solana_quorum(&value)?;
+        Ok(value)
+    }
+}
+
+impl XmrEndpointsV2 {
+    /// Builds one validated Monero endpoint pair.
+    pub fn new(
+        daemon_endpoint: String,
+        sidecar_socket: PathBuf,
+    ) -> Result<Self, ProductionChainServicesErrorV1> {
+        let value = Self {
+            daemon_endpoint,
+            sidecar_socket,
+        };
+        validate_xmr_endpoints(&value)?;
+        Ok(value)
+    }
+}
+
+fn validate_solana_quorum(
+    solana: &SolanaQuorumEndpointsV2,
+) -> Result<(), ProductionChainServicesErrorV1> {
+    if solana.endpoints.is_empty()
+        || solana.endpoints.len() > MAX_SOLANA_ENDPOINTS_V2
+        || solana.quorum == 0
+        || solana.quorum > solana.endpoints.len()
+    {
+        return Err(ProductionChainServicesErrorV1::InvalidSolanaEndpoints);
+    }
+    for endpoint in &solana.endpoints {
+        if endpoint.contains(' ') || endpoint == NONE_V2 {
+            return Err(ProductionChainServicesErrorV1::InvalidSolanaEndpoints);
+        }
+        validate_endpoint_text(
+            endpoint,
+            ProductionChainServicesErrorV1::InvalidSolanaEndpoints,
+        )?;
+        solana_rpc::HttpSolanaRpc::new(endpoint.clone(), MAX_SOLANA_SIGNED_TRANSACTION_BYTES_V2)
+            .map_err(|_| ProductionChainServicesErrorV1::InvalidSolanaEndpoints)?;
+    }
+    Ok(())
+}
+
+fn validate_xmr_endpoints(xmr: &XmrEndpointsV2) -> Result<(), ProductionChainServicesErrorV1> {
+    if xmr.daemon_endpoint == NONE_V2 || xmr.daemon_endpoint.contains(' ') {
+        return Err(ProductionChainServicesErrorV1::InvalidXmrEndpoints);
+    }
+    validate_endpoint_text(
+        &xmr.daemon_endpoint,
+        ProductionChainServicesErrorV1::InvalidXmrEndpoints,
+    )?;
+    // The loopback discipline is the reader's own constructor rule; exercising
+    // it here keeps a non-loopback daemon from ever reaching composition.
+    xmr_rpc_broadcast_blocking::BlockingMoneroDaemonReaderV1::new(xmr.daemon_endpoint.clone())
+        .map_err(|_| ProductionChainServicesErrorV1::InvalidXmrEndpoints)?;
+    let socket = &xmr.sidecar_socket;
+    let socket_text = socket
+        .to_str()
+        .ok_or(ProductionChainServicesErrorV1::InvalidXmrEndpoints)?;
+    if !socket.is_absolute()
+        || socket_text.is_empty()
+        || socket_text.contains(' ')
+        || socket_text == NONE_V2
+        || !socket_text.is_ascii()
+    {
+        return Err(ProductionChainServicesErrorV1::InvalidXmrEndpoints);
+    }
+    Ok(())
+}
+
+fn chain_services_digest_v2(bytes: &[u8]) -> Result<[u8; 32], ProductionChainServicesErrorV1> {
+    let mut domained = Vec::with_capacity(DIGEST_DOMAIN_V2.len() + bytes.len());
+    domained.extend_from_slice(DIGEST_DOMAIN_V2);
+    domained.extend_from_slice(bytes);
+    config_digest(&domained).map_err(|_| ProductionChainServicesErrorV1::InvalidEncoding)
+}
+
+/// Loads the chain-services document, accepting the V2 spelling first and the
+/// V1 spelling as the explicit both-faces-absent fallback.
+pub fn load_production_chain_services_v2(
+    state_dir: &Path,
+) -> Result<ProductionChainServicesV2, ProductionChainServicesErrorV1> {
+    let state_dir =
+        validate_state_dir(state_dir).map_err(|_| ProductionChainServicesErrorV1::Unavailable)?;
+    let bytes = read_owner_file_bounded(
+        &state_dir.join(PRODUCTION_CHAIN_SERVICES_CONFIG_FILE_V1),
+        MAX_PRODUCTION_CHAIN_SERVICES_CONFIG_BYTES_V1,
+        ProductionConfigErrorV1::InputArtifactUnavailable,
+    )
+    .map_err(|_| ProductionChainServicesErrorV1::Unavailable)?;
+    if bytes.starts_with(HEADER_V2.as_bytes()) {
+        return ProductionChainServicesV2::decode_canonical(&bytes);
+    }
+    ProductionChainServicesConfigV1::decode_canonical(&bytes).map(|base| {
+        ProductionChainServicesV2 {
+            base,
+            solana: None,
+            xmr: None,
+        }
+    })
 }
 
 /// Loads the fixed-name V1 document under the already owner-only state root.
@@ -688,6 +1033,182 @@ mod tests {
         assert_eq!(
             bounded_rpc_timeouts(30_000, 31).err(),
             Some(ProductionChainServicesErrorV1::InvalidRuntimeTimeout)
+        );
+        Ok(())
+    }
+
+    fn solana_face() -> Result<SolanaQuorumEndpointsV2, ProductionChainServicesErrorV1> {
+        SolanaQuorumEndpointsV2::new(
+            vec![
+                "http://127.0.0.1:8899".to_owned(),
+                "http://127.0.0.1:8898".to_owned(),
+            ],
+            2,
+        )
+    }
+
+    fn xmr_face() -> Result<XmrEndpointsV2, ProductionChainServicesErrorV1> {
+        XmrEndpointsV2::new(
+            "http://127.0.0.1:18081".to_owned(),
+            PathBuf::from("/run/dom/xmr-sidecar.sock"),
+        )
+    }
+
+    #[test]
+    fn v2_canonical_round_trip_revalidates_both_extended_faces() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let cookie = owner_cookie(directory.path())?;
+        let document = ProductionChainServicesV2::from_parts(
+            config(cookie)?,
+            Some(solana_face()?),
+            Some(xmr_face()?),
+        )?;
+        let encoded = document.canonical_bytes()?;
+        let decoded = ProductionChainServicesV2::decode_canonical(&encoded)?;
+        assert!(decoded.solana_declared());
+        assert!(decoded.solana_pool()?.is_some());
+        assert_eq!(
+            decoded.xmr_endpoints(),
+            Some((
+                "http://127.0.0.1:18081",
+                Path::new("/run/dom/xmr-sidecar.sock"),
+            ))
+        );
+        assert_eq!(
+            decoded.base().canonical_bytes()?,
+            document.base().canonical_bytes()?
+        );
+        assert_eq!(decoded.canonical_bytes()?, encoded);
+        let rendered = format!("{decoded:?}");
+        assert!(!rendered.contains("127.0.0.1"));
+        assert!(!rendered.contains("xmr-sidecar"));
+        Ok(())
+    }
+
+    #[test]
+    fn v2_absent_faces_encode_the_explicit_none_literal() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let cookie = owner_cookie(directory.path())?;
+        let document = ProductionChainServicesV2::from_parts(config(cookie)?, None, None)?;
+        let encoded = document.canonical_bytes()?;
+        let text = std::str::from_utf8(&encoded)?;
+        assert!(text.contains("solana_rpc_endpoints=none\n"));
+        assert!(text.contains("solana_rpc_quorum=none\n"));
+        assert!(text.contains("xmr_daemon_endpoint=none\n"));
+        assert!(text.contains("xmr_sidecar_socket=none\n"));
+        let decoded = ProductionChainServicesV2::decode_canonical(&encoded)?;
+        assert!(!decoded.solana_declared());
+        assert!(decoded.xmr_endpoints().is_none());
+        assert!(decoded.solana_pool()?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn v2_loader_accepts_a_v1_document_as_both_faces_absent() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let state_dir = fs::canonicalize(directory.path())?;
+        let cookie = owner_cookie(&state_dir)?;
+        let v1_bytes = config(cookie.clone())?.canonical_bytes()?;
+        let config_path = state_dir.join(PRODUCTION_CHAIN_SERVICES_CONFIG_FILE_V1);
+        let mut options = OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .mode(OWNER_FILE_MODE_V1);
+        {
+            use std::io::Write as _;
+            let mut file = options.open(&config_path)?;
+            file.write_all(&v1_bytes)?;
+        }
+        let loaded = load_production_chain_services_v2(&state_dir)?;
+        assert!(!loaded.solana_declared());
+        assert!(loaded.xmr_endpoints().is_none());
+
+        let v2_document = ProductionChainServicesV2::from_parts(
+            config(cookie)?,
+            Some(solana_face()?),
+            Some(xmr_face()?),
+        )?;
+        fs::remove_file(&config_path)?;
+        let mut options = OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .mode(OWNER_FILE_MODE_V1);
+        {
+            use std::io::Write as _;
+            let mut file = options.open(&config_path)?;
+            file.write_all(&v2_document.canonical_bytes()?)?;
+        }
+        let loaded = load_production_chain_services_v2(&state_dir)?;
+        assert!(loaded.solana_declared());
+        assert!(loaded.xmr_endpoints().is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn v2_extended_face_validation_is_strict() -> TestResult {
+        assert_eq!(
+            SolanaQuorumEndpointsV2::new(vec![], 1).err(),
+            Some(ProductionChainServicesErrorV1::InvalidSolanaEndpoints)
+        );
+        assert_eq!(
+            SolanaQuorumEndpointsV2::new(vec!["http://127.0.0.1:8899".to_owned()], 0).err(),
+            Some(ProductionChainServicesErrorV1::InvalidSolanaEndpoints)
+        );
+        assert_eq!(
+            SolanaQuorumEndpointsV2::new(vec!["http://127.0.0.1:8899".to_owned()], 2).err(),
+            Some(ProductionChainServicesErrorV1::InvalidSolanaEndpoints)
+        );
+        let too_many: Vec<String> = (0..=MAX_SOLANA_ENDPOINTS_V2)
+            .map(|index| format!("http://127.0.0.1:{}", 8_000 + index))
+            .collect();
+        let quorum = too_many.len();
+        assert_eq!(
+            SolanaQuorumEndpointsV2::new(too_many, quorum).err(),
+            Some(ProductionChainServicesErrorV1::InvalidSolanaEndpoints)
+        );
+        for endpoint in [
+            "http://127.0.0.1:8899 http://127.0.0.1:8898",
+            "none",
+            "http://192.0.2.1:8899",
+        ] {
+            assert_eq!(
+                SolanaQuorumEndpointsV2::new(vec![endpoint.to_owned()], 1).err(),
+                Some(ProductionChainServicesErrorV1::InvalidSolanaEndpoints),
+                "endpoint must be refused: {endpoint}"
+            );
+        }
+        for (daemon, socket) in [
+            ("http://192.0.2.1:18081", "/run/dom/xmr-sidecar.sock"),
+            ("none", "/run/dom/xmr-sidecar.sock"),
+            ("http://127.0.0.1:18081", "relative/socket.sock"),
+            ("http://127.0.0.1:18081", "/run/dom/with space.sock"),
+        ] {
+            assert_eq!(
+                XmrEndpointsV2::new(daemon.to_owned(), PathBuf::from(socket)).err(),
+                Some(ProductionChainServicesErrorV1::InvalidXmrEndpoints),
+                "pair must be refused: {daemon} {socket}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn v2_field_tampering_is_refused_by_the_digest() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let cookie = owner_cookie(directory.path())?;
+        let document = ProductionChainServicesV2::from_parts(
+            config(cookie)?,
+            Some(solana_face()?),
+            Some(xmr_face()?),
+        )?;
+        let encoded = String::from_utf8(document.canonical_bytes()?)?;
+        let tampered = encoded.replace("solana_rpc_quorum=2", "solana_rpc_quorum=1");
+        assert_ne!(tampered, encoded);
+        assert_eq!(
+            ProductionChainServicesV2::decode_canonical(tampered.as_bytes()).err(),
+            Some(ProductionChainServicesErrorV1::InvalidEncoding)
         );
         Ok(())
     }

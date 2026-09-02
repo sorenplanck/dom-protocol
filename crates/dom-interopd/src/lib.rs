@@ -140,8 +140,9 @@ pub use driver::{
 };
 #[cfg(feature = "production")]
 pub use production_chain_services::{
-    load_production_chain_services_v1, ProductionChainServicesConfigV1,
-    ProductionChainServicesErrorV1, MAX_PRODUCTION_CHAIN_SERVICES_CONFIG_BYTES_V1,
+    load_production_chain_services_v1, load_production_chain_services_v2,
+    ProductionChainServicesConfigV1, ProductionChainServicesErrorV1, ProductionChainServicesV2,
+    SolanaQuorumEndpointsV2, XmrEndpointsV2, MAX_PRODUCTION_CHAIN_SERVICES_CONFIG_BYTES_V1,
     PRODUCTION_CHAIN_SERVICES_CONFIG_FILE_V1,
 };
 #[cfg(feature = "production")]
@@ -182,6 +183,7 @@ pub use production_config::{
     PRODUCTION_REOPEN_CONFIG_FILE_V5, PRODUCTION_REOPEN_CONFIG_FILE_V6,
     PRODUCTION_REOPEN_CONFIG_FILE_V7, PRODUCTION_REOPEN_CONFIG_FILE_V8,
     PRODUCTION_REOPEN_CONFIG_FILE_V9, REFUND_ARMING_DATABASE_FILE_V1,
+    SOLANA_ACTUATOR_DATABASE_FILE_V1, XMR_ACTUATOR_DATABASE_FILE_V1,
 };
 #[cfg(feature = "production")]
 pub use production_inputs::{
