@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "eigenwallet_core": {
+    "repository": "https://github.com/eigenwallet/core",
+    "commit": "0e17c7f7cd8f0657af176c8852aa4c9949586051"
+  },
+  "monero_oxide": {
+    "commit": "c8be5d3d1287669946a83fbfcb296ce2a8852e47"
+  }
+}
