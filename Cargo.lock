@@ -1229,6 +1229,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "deploy-genconfig"
+version = "0.1.0"
+dependencies = [
+ "adapter-btc",
+ "adapter-evm",
+ "blake2",
+ "btc-crypto",
+ "chain-profile",
+ "deployment-registry",
+ "dom-consensus",
+ "dom-core",
+ "dom-interopd",
+ "hex",
+ "kaystra-core",
+ "rand 0.8.6",
+ "serde_json",
+ "tempfile",
+ "zeroize",
+]
+
+[[package]]
 name = "deployment-registry"
 version = "0.2.0"
 dependencies = [

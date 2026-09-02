@@ -51,6 +51,7 @@ members = [
     "crates/btc-actuator",
     "crates/chain-profile",
     "crates/counterparty-api",
+    "crates/deploy-genconfig",
     "crates/deployment-registry",
     "crates/dom-actuator",
     "crates/dom-interopd",
