@@ -64,3 +64,6 @@ target/
 **/target/
 testnet/local-deploy/
 sidecar-gpl/
+
+# Internal working log — local only, never published.
+docs/interop/DOM-INTEROP-IMPLEMENTATION-LOG.md
