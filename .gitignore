@@ -62,3 +62,5 @@ docs/FIX-014_*.md
 
 target/
 **/target/
+testnet/local-deploy/
+sidecar-gpl/
