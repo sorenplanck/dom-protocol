@@ -8,7 +8,9 @@ use adapter_btc::roster::{
     BitcoinSignerRoleV1, ParticipantKeyRosterV1, ParticipantKeyV1, ROSTER_VERSION,
 };
 use adapter_btc::sighash::key_path_sighash_default;
-use adapter_btc::taproot::{build_taproot_contract, TaprootContractV1};
+use adapter_btc::taproot::build_taproot_contract;
+#[cfg(any(test, feature = "harness"))]
+use adapter_btc::taproot::TaprootContractV1;
 use adapter_btc::templates::{
     frozen_template_digest_v1, BitcoinPrevoutV1, BitcoinTxInV1, BitcoinTxOutV1,
     FrozenBitcoinTemplateV1,
@@ -18,7 +20,9 @@ use adapter_btc::types::BitcoinNetworkV1 as TemplateNetworkV1;
 use bitcoin::absolute::LockTime;
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::hashes::Hash;
-use bitcoin::secp256k1::{Keypair, PublicKey, Secp256k1, SecretKey, XOnlyPublicKey};
+use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey, XOnlyPublicKey};
+#[cfg(any(test, feature = "harness"))]
+use bitcoin::secp256k1::Keypair;
 use bitcoin::transaction::Version;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
 use blake2::digest::{Update, VariableOutput};
@@ -32,10 +36,12 @@ use crate::authority::{
     RetainedBitcoinRefundSignerV1,
 };
 use crate::funding::{
-    prepared_template_digests, ArmedBitcoinFundingV1, BitcoinPrebroadcastPlanV1,
+    ArmedBitcoinFundingV1, BitcoinPrebroadcastPlanV1,
     BitcoinPrebroadcastStoreV1, BitcoinRefundContractV1, BitcoinRefundOutputV1,
     PreparedBitcoinFundingV1, ReopenedBitcoinFundingV1,
 };
+#[cfg(any(test, feature = "harness"))]
+use crate::funding::prepared_template_digests;
 use crate::rpc::{BitcoinCoreNetworkV1, BitcoinCoreRpcClientV1, MAX_SIGNET_CHALLENGE_BYTES};
 use crate::store::StageKind;
 use crate::LiveBitcoinError;
@@ -70,6 +76,7 @@ const EXACT_CLAIM_DIGEST_DOMAIN: &[u8] = b"DOM-INTEROP/BTC/F7/EXACT-CLAIM/V1\0";
 const MAX_SCRIPT_BYTES: usize = 10_000;
 const MAX_MONEY_SAT: u64 = 21_000_000 * 100_000_000;
 const MAX_FEE_RATE_SAT_VB: u64 = 1_000_000;
+#[cfg(any(test, feature = "harness"))]
 const MAX_KEY_ATTEMPTS: usize = 128;
 const MAX_CLAIM_TRANSACTION_BYTES: usize = 4_000_000;
 
@@ -1253,6 +1260,10 @@ impl BitcoinPrebroadcastStoreV1 {
     /// entropy and persisted in the same authenticated owner-only store.  The
     /// wallet then selects and locks real inputs.  Only after that selection
     /// are the exact funding, claim, and refund template hashes published.
+    /// Harness-only: prepares maker and taker material in one store. The
+    /// production composition never calls this (its dual-key shape is the
+    /// stage-6 finding this gate closes); e2e harnesses opt in explicitly.
+    #[cfg(any(test, feature = "harness"))]
     pub fn prepare_fresh_route(
         &self,
         rpc: &BitcoinCoreRpcClientV1,
@@ -1406,6 +1417,7 @@ impl BitcoinPrebroadcastStoreV1 {
         authenticated_payout_face(record)
     }
 
+    #[cfg(any(test, feature = "harness"))]
     fn load_or_create_fresh_authority(
         &self,
         rpc: &BitcoinCoreRpcClientV1,
@@ -1542,6 +1554,7 @@ fn validate_request(request: BitcoinFreshRouteRequestV1) -> Result<(), LiveBitco
     Ok(())
 }
 
+#[cfg(any(test, feature = "harness"))]
 fn require_authority_binding(
     rpc: &BitcoinCoreRpcClientV1,
     request: BitcoinFreshRouteRequestV1,
@@ -1564,6 +1577,7 @@ fn require_authority_binding(
     rpc.require_chain_identity()
 }
 
+#[cfg(any(test, feature = "harness"))]
 fn plan_for(
     record: &FreshAuthorityRecord,
 ) -> Result<(BitcoinPrebroadcastPlanV1, ParticipantKeyRosterV1, [u8; 32]), LiveBitcoinError> {
@@ -1608,6 +1622,7 @@ fn plan_for(
     Ok((plan, roster, refund_key_xonly))
 }
 
+#[cfg(any(test, feature = "harness"))]
 fn plan_from_contract(
     record: &FreshAuthorityRecord,
     contract: TaprootContractV1,
@@ -1711,6 +1726,7 @@ const fn template_network(network: BitcoinCoreNetworkV1) -> TemplateNetworkV1 {
     }
 }
 
+#[cfg(any(test, feature = "harness"))]
 fn fresh_secret() -> Result<Zeroizing<[u8; 32]>, LiveBitcoinError> {
     for _ in 0..MAX_KEY_ATTEMPTS {
         let secret = fresh_entropy()?;
@@ -1868,6 +1884,7 @@ fn receipt_digest(receipt: &BitcoinFreshRouteReceiptV1) -> Result<[u8; 32], Live
     )
 }
 
+#[cfg(any(test, feature = "harness"))]
 fn validate_receipt(
     receipt: &BitcoinFreshRouteReceiptV1,
     plan: &BitcoinPrebroadcastPlanV1,

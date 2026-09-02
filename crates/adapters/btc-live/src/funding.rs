@@ -5,10 +5,12 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::rc::Rc;
 
+#[cfg(any(test, feature = "harness"))]
 use adapter_btc::templates::{
     frozen_template_digest_v1, BitcoinPrevoutV1, BitcoinTxInV1, BitcoinTxOutV1,
     FrozenBitcoinTemplateV1,
 };
+#[cfg(any(test, feature = "harness"))]
 use adapter_btc::types::BitcoinNetworkV1 as TemplateNetworkV1;
 use bitcoin::absolute::LockTime;
 use bitcoin::consensus::{deserialize, serialize};
@@ -1366,6 +1368,7 @@ fn unsigned_refund_transaction(prepared: &PreparedRecord) -> Result<Transaction,
     })
 }
 
+#[cfg(any(test, feature = "harness"))]
 pub(crate) fn prepared_template_digests(
     rpc: &BitcoinCoreRpcClientV1,
     prepared: &PreparedBitcoinFundingV1,
@@ -1448,6 +1451,7 @@ pub(crate) fn prepared_template_digests(
     Ok(digests)
 }
 
+#[cfg(any(test, feature = "harness"))]
 fn selected_input_prevouts(
     rpc: &BitcoinCoreRpcClientV1,
     inputs: &[SelectedInput],
@@ -1488,6 +1492,7 @@ fn selected_input_prevouts(
         .collect()
 }
 
+#[cfg(any(test, feature = "harness"))]
 fn frozen_template_for_transaction(
     transaction: &Transaction,
     prevouts: Vec<BitcoinPrevoutV1>,
@@ -1540,6 +1545,7 @@ fn frozen_template_for_transaction(
     Ok(template)
 }
 
+#[cfg(any(test, feature = "harness"))]
 const fn template_network(network: BitcoinCoreNetworkV1) -> TemplateNetworkV1 {
     match network {
         BitcoinCoreNetworkV1::Regtest => TemplateNetworkV1::Regtest,
