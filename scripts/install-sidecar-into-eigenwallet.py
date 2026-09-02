@@ -32,8 +32,13 @@ def insert_member(cargo: Path, member: str) -> None:
 
 
 def verify_commit(root: Path) -> None:
+    # A tarball checkout has no .git and therefore no provable identity;
+    # skipping verification there would silently void the pin, so it fails.
     if not (root / ".git").exists():
-        return
+        fail(
+            "Eigenwallet checkout has no .git directory; the pinned commit "
+            "cannot be verified. Clone the repository instead of unpacking a tarball."
+        )
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=root,

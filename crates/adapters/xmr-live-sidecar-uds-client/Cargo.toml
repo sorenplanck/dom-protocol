@@ -9,6 +9,13 @@ publish = false
 [dependencies]
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+rand = { workspace = true }
 xmr-live-sidecar-api = { path = "../xmr-live-sidecar-api" }
 xmr-sidecar-auth = { path = "../xmr-sidecar-auth" }
 xmr-spend-port = { path = "../xmr-spend-port" }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "=0.31.3", default-features = false, features = ["socket", "user"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

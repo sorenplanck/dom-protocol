@@ -12,7 +12,6 @@ adapter-dom-real = { path = "../dom-real" }
 thiserror = { workspace = true }
 xmr-delivery-sqlite = { path = "../xmr-delivery-sqlite" }
 xmr-kaystra-bridge = { path = "../xmr-kaystra-bridge" }
-xmr-live-sidecar-blocking-client = { path = "../xmr-live-sidecar-blocking-client" }
 xmr-live-sidecar-uds-client = { path = "../xmr-live-sidecar-uds-client" }
 xmr-rpc-broadcast-blocking = { path = "../xmr-rpc-broadcast-blocking" }
 xmr-secret-store = { path = "../xmr-secret-store" }
