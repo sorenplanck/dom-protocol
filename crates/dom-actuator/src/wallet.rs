@@ -156,6 +156,28 @@ impl DomReservedOutputV1 {
     }
 }
 
+/// Evidence-bound spendable/encumbered totals of one physical DOM wallet.
+///
+/// The spendable criterion is exactly the reservation selector's: a confirmed,
+/// unreserved output whose coinbase maturity (when applicable) has elapsed at
+/// the wallet's last reconciled tip. No blinding or commitment leaves the
+/// wallet through this view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DomSpendableObservationV1 {
+    /// Sum of outputs the reservation selector would currently accept.
+    pub spendable_value: u64,
+    /// Sum of confirmed outputs held by an active reservation.
+    pub encumbered_value: u64,
+    /// Number of outputs contributing to `spendable_value`.
+    pub output_count: u64,
+    /// Wallet's last reconciled chain height.
+    pub canonical_height: u64,
+    /// Block hash at `canonical_height`.
+    pub canonical_anchor: Digest32,
+    /// Commitment to the wallet state this observation was derived from.
+    pub evidence_digest: Digest32,
+}
+
 /// Durable public reservation receipt. No output blinding is present.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DomOutputReservationV1 {
@@ -365,6 +387,62 @@ impl DomParticipantWalletV1 {
     /// Exact immutable two-session authority owned by this physical wallet.
     pub const fn authority_binding(&self) -> DomWalletAuthorityBindingV1 {
         self.authority
+    }
+
+    /// Evidence-bound confirmed-spendable observation for the solver
+    /// inventory. Refused until the wallet has reconciled against a known
+    /// block hash: an unanchored balance is not observation material.
+    pub fn observe_confirmed_spendable(&self) -> DomActuatorResult<DomSpendableObservationV1> {
+        self.audit_physical_authority()?;
+        let tip = self.state.meta.last_reconciled_tip;
+        let Some(anchor) = self.state.meta.last_reconciled_hash else {
+            return Err(DomActuatorError::WalletUnavailable);
+        };
+        let maturity = self.state.network.coinbase_maturity();
+        let mut spendable_value = 0_u64;
+        let mut encumbered_value = 0_u64;
+        let mut output_count = 0_u64;
+        for output in self.state.outputs.iter() {
+            if output.status != OutputStatus::Confirmed {
+                continue;
+            }
+            if output.reserved_for.is_some() {
+                encumbered_value = encumbered_value
+                    .checked_add(output.value)
+                    .ok_or(DomActuatorError::WalletUnavailable)?;
+                continue;
+            }
+            if output.is_coinbase
+                && !output
+                    .origin_block
+                    .is_some_and(|block| tip.saturating_sub(block.height) >= maturity)
+            {
+                continue;
+            }
+            spendable_value = spendable_value
+                .checked_add(output.value)
+                .ok_or(DomActuatorError::WalletUnavailable)?;
+            output_count = output_count
+                .checked_add(1)
+                .ok_or(DomActuatorError::WalletUnavailable)?;
+        }
+        let mut hasher = Blake2b::<U32>::new();
+        hasher.update(b"DOM:wallet-inventory-observation:v1");
+        hasher.update(self.state.chain_id);
+        hasher.update(tip.to_be_bytes());
+        hasher.update(anchor);
+        hasher.update(self.ciphertext_digest);
+        hasher.update(spendable_value.to_be_bytes());
+        hasher.update(encumbered_value.to_be_bytes());
+        hasher.update(output_count.to_be_bytes());
+        Ok(DomSpendableObservationV1 {
+            spendable_value,
+            encumbered_value,
+            output_count,
+            canonical_height: tip,
+            canonical_anchor: anchor,
+            evidence_digest: hasher.finalize().into(),
+        })
     }
 
     /// Borrow a temporary authority for exactly one pre-bound session.

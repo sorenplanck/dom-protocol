@@ -27,9 +27,9 @@ pub use model::{
     ScopedEvmRefundV1, SignerRefusalV1,
 };
 pub use rpc::{
-    EvmRpcErrorV1, EvmRpcV1, RpcAllowanceV1, RpcFinalizedTimeV1, RpcLogV1, RpcPendingNonceV1,
-    RpcReceiptLookupV1, RpcReceiptV1, RpcTransactionLookupV1, RpcTransactionV1,
-    MAX_RPC_RESPONSE_BYTES_V1,
+    EvmInventoryRpcV1, EvmRpcErrorV1, EvmRpcV1, RpcAllowanceV1, RpcBalanceV1, RpcFinalizedTimeV1,
+    RpcLogV1, RpcPendingNonceV1, RpcReceiptLookupV1, RpcReceiptV1, RpcTransactionLookupV1,
+    RpcTransactionV1, MAX_RPC_RESPONSE_BYTES_V1,
 };
 #[cfg(feature = "rpc-http")]
 pub use rpc::{HttpEvmRpcTimeoutsV1, HttpEvmRpcV1};

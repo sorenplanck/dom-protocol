@@ -34,7 +34,7 @@ pub use store::{
 pub use wallet::{
     AuthenticatedDomPayoutFaceV1, DomOutputReservationV1, DomParticipantWalletSessionV1,
     DomParticipantWalletV1, DomPayoutFaceRequestV1, DomPayoutFaceSelectionRequestV1,
-    DomReservedOutputV1, DomWalletAuthorityBindingV1, DomWalletSessionLegV1,
-    FundingSigningShareRequestV1, SharedOutputSpendSigningShareRequestV1,
+    DomReservedOutputV1, DomSpendableObservationV1, DomWalletAuthorityBindingV1,
+    DomWalletSessionLegV1, FundingSigningShareRequestV1, SharedOutputSpendSigningShareRequestV1,
     WalletReservationRequestV1,
 };

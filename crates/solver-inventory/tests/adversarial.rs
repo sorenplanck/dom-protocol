@@ -700,10 +700,34 @@ fn expiry_releases_capacity_but_reservation_id_remains_spent() {
         ),
         Err(InventoryStoreErrorV1::ReservationNotExpired)
     );
+    // The sweep listing agrees with the transition rule: nothing before the
+    // deadline, exactly this (reservation, revision) pair right after it.
+    assert_eq!(
+        fixture
+            .store
+            .expired_reservations(fixture.lease, 1_200)
+            .unwrap(),
+        Vec::new()
+    );
+    assert_eq!(
+        fixture
+            .store
+            .expired_reservations(fixture.lease, 1_201)
+            .unwrap(),
+        vec![(request.reservation_id, 1)]
+    );
     fixture
         .store
         .expire_reservation(fixture.lease, 1, digest(74), request.reservation_id, 1_201)
         .unwrap();
+    // Released rows leave the sweep immediately.
+    assert_eq!(
+        fixture
+            .store
+            .expired_reservations(fixture.lease, 1_202)
+            .unwrap(),
+        Vec::new()
+    );
     assert_eq!(
         fixture
             .store

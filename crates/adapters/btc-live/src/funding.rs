@@ -965,7 +965,7 @@ fn exact_btc_amount(satoshis: u64) -> Result<Value, LiveBitcoinError> {
     Ok(Value::String(decimal))
 }
 
-fn exact_rpc_btc_amount_sat(value: &Value) -> Result<u64, LiveBitcoinError> {
+pub(crate) fn exact_rpc_btc_amount_sat(value: &Value) -> Result<u64, LiveBitcoinError> {
     let Value::Number(number) = value else {
         return Err(LiveBitcoinError::InvalidRpcResponse);
     };

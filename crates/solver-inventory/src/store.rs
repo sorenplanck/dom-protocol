@@ -664,6 +664,53 @@ impl DurableInventoryStoreV1 {
         Ok(record.view())
     }
 
+    /// Lists this authority's `Reserved` rows whose expiry has already
+    /// passed, oldest expiry first. Read-only: each returned pair is the
+    /// exact `(reservation_id, revision)` a subsequent [`Self::expire_reservation`]
+    /// call must present, so a concurrent transition simply turns that call
+    /// into a refused CAS instead of a blind sweep.
+    pub fn expired_reservations(
+        &mut self,
+        lease: InventoryLeaseV1,
+        now_unix_ms: u64,
+    ) -> Result<Vec<(Digest32, u64)>, InventoryStoreErrorV1> {
+        self.audit_storage()?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)?;
+        validate_lease(&transaction, lease, now_unix_ms)?;
+        let expired = {
+            let mut statement = transaction.prepare(
+                "SELECT reservation_id, revision FROM inventory_reservations
+                 WHERE authority_id = ?1 AND state_tag = ?3
+                   AND expires_at_unix_ms < ?2
+                 ORDER BY expires_at_unix_ms, reservation_id",
+            )?;
+            let rows = statement.query_map(
+                params![
+                    lease.authority_id.0.as_slice(),
+                    i64::try_from(now_unix_ms)
+                        .map_err(|_| InventoryStoreErrorV1::InvalidMaterial)?,
+                    STATE_RESERVED,
+                ],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
+            )?;
+            let mut expired = Vec::new();
+            for row in rows {
+                let (reservation, revision) = row?;
+                expired.push((
+                    blob32(reservation)?,
+                    u64::try_from(revision).map_err(|_| InventoryStoreErrorV1::CorruptState)?,
+                ));
+            }
+            expired
+        };
+        audit_runtime_state(&transaction)?;
+        transaction.commit()?;
+        self.audit_storage()?;
+        Ok(expired)
+    }
+
     /// Atomically install a first observation or reconcile a later one under
     /// snapshot CAS. Reorg observations may reduce height/balance but must
     /// carry explicit evidence; existing reservations are never erased and a

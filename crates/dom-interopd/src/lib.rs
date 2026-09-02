@@ -81,6 +81,15 @@ mod production_contracts_session_bootstrap;
 #[cfg(feature = "production")]
 mod production_inputs;
 #[cfg(feature = "production")]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "stage-8 inventory surface; the composition-root wiring sprint consumes it and must remove this expectation"
+    )
+)]
+mod production_inventory;
+#[cfg(feature = "production")]
 mod production_materializer;
 // Shares the `config-only` gate with `production_config`: the codec and its
 // bounds compile and are tested without the production graph, while the client

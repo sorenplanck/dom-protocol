@@ -28,6 +28,7 @@ mod authority;
 mod evidence;
 mod fresh;
 mod funding;
+mod inventory;
 mod rpc;
 mod store;
 
@@ -51,6 +52,7 @@ pub use funding::{
     BitcoinPrebroadcastStoreV1, BitcoinRefundContractV1, BitcoinRefundOutputV1,
     PreparedBitcoinFundingV1, ReopenedBitcoinFundingV1,
 };
+pub use inventory::{observe_confirmed_spendable, BitcoinSpendableObservationV1};
 pub use rpc::{
     bitcoin_signet_challenge_digest_v1, BitcoinCoreNetworkV1, BitcoinCoreRpcClientV1,
     BitcoinCoreRpcConfigV1, BitcoinCoreRpcTimeoutsV1,

@@ -45,6 +45,22 @@ pub struct RpcAllowanceV1 {
     pub evidence_digest: Digest32,
 }
 
+/// Finalized, evidence-bound balance observation for the solver inventory.
+///
+/// Every read is executed against the exact corroborated `finalized` block so
+/// the amount, height and anchor commit to one canonical chain position.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RpcBalanceV1 {
+    /// Exact balance amount as a 256-bit big-endian integer.
+    pub amount: [u8; 32],
+    /// Finalized block height used for the read.
+    pub block_number: u64,
+    /// Canonical finalized block hash.
+    pub block_hash: Digest32,
+    /// Commitment to the read and block responses.
+    pub evidence_digest: Digest32,
+}
+
 /// Canonical finalized EVM block time used to authorize a refund.
 ///
 /// Callers never provide a bare timestamp or boolean. Production evidence is
@@ -229,6 +245,26 @@ pub trait EvmRpcV1 {
         &mut self,
         transaction_hash: Digest32,
     ) -> core::result::Result<RpcReceiptLookupV1, EvmRpcErrorV1>;
+}
+
+/// Finalized balance-observation authority for the solver inventory.
+///
+/// Kept separate from [`EvmRpcV1`] so settlement paths never gain an unused
+/// balance surface and existing implementations stay exact. Implementations
+/// must read at the corroborated `finalized` block only.
+pub trait EvmInventoryRpcV1 {
+    /// Reads the finalized native (wei) balance of `owner`.
+    fn finalized_native_balance(
+        &mut self,
+        owner: EvmAddressV1,
+    ) -> core::result::Result<RpcBalanceV1, EvmRpcErrorV1>;
+
+    /// Reads the finalized ERC-20 `balanceOf(owner)` on `token`.
+    fn finalized_token_balance(
+        &mut self,
+        token: EvmAddressV1,
+        owner: EvmAddressV1,
+    ) -> core::result::Result<RpcBalanceV1, EvmRpcErrorV1>;
 }
 
 #[cfg(feature = "rpc-http")]
@@ -721,6 +757,78 @@ mod http {
         }
     }
 
+    impl EvmInventoryRpcV1 for HttpEvmRpcV1 {
+        fn finalized_native_balance(
+            &mut self,
+            owner: EvmAddressV1,
+        ) -> core::result::Result<RpcBalanceV1, EvmRpcErrorV1> {
+            if owner == ZERO_ADDRESS {
+                return Err(EvmRpcErrorV1::InvalidResponse);
+            }
+            let finalized = self.block("finalized")?;
+            let block_tag = quantity_hex(finalized.number);
+            let read = self.call("eth_getBalance", json!([hex_address(owner), block_tag]))?;
+            let amount = quantity_word(read.value.as_str().ok_or(EvmRpcErrorV1::InvalidResponse)?)?;
+            let exact = self.block(&quantity_hex(finalized.number))?;
+            if exact.number != finalized.number || exact.hash != finalized.hash {
+                return Err(EvmRpcErrorV1::InvalidResponse);
+            }
+            Ok(RpcBalanceV1 {
+                amount,
+                block_number: finalized.number,
+                block_hash: finalized.hash,
+                evidence_digest: digest_evidence(&[
+                    &finalized.evidence_digest,
+                    &read.evidence_digest,
+                    &exact.evidence_digest,
+                ]),
+            })
+        }
+
+        fn finalized_token_balance(
+            &mut self,
+            token: EvmAddressV1,
+            owner: EvmAddressV1,
+        ) -> core::result::Result<RpcBalanceV1, EvmRpcErrorV1> {
+            if token == ZERO_ADDRESS || owner == ZERO_ADDRESS {
+                return Err(EvmRpcErrorV1::InvalidResponse);
+            }
+            let mut calldata = Vec::with_capacity(36);
+            calldata.extend_from_slice(&keccak256(b"balanceOf(address)")[..4]);
+            calldata.extend_from_slice(&[0; 12]);
+            calldata.extend_from_slice(&owner);
+            let finalized = self.block("finalized")?;
+            let block_tag = quantity_hex(finalized.number);
+            let call = self.call(
+                "eth_call",
+                json!([{"to":hex_address(token),"data":hex_data(&calldata)}, block_tag]),
+            )?;
+            let amount_bytes = data_bytes(
+                call.value.as_str().ok_or(EvmRpcErrorV1::InvalidResponse)?,
+                32,
+            )?;
+            if amount_bytes.len() != 32 {
+                return Err(EvmRpcErrorV1::InvalidResponse);
+            }
+            let mut amount = [0; 32];
+            amount.copy_from_slice(&amount_bytes);
+            let exact = self.block(&quantity_hex(finalized.number))?;
+            if exact.number != finalized.number || exact.hash != finalized.hash {
+                return Err(EvmRpcErrorV1::InvalidResponse);
+            }
+            Ok(RpcBalanceV1 {
+                amount,
+                block_number: finalized.number,
+                block_hash: finalized.hash,
+                evidence_digest: digest_evidence(&[
+                    &finalized.evidence_digest,
+                    &call.evidence_digest,
+                    &exact.evidence_digest,
+                ]),
+            })
+        }
+    }
+
     struct RpcValue {
         value: Value,
         evidence_digest: Digest32,
@@ -1017,6 +1125,34 @@ mod http {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn inventory_balance_reads_refuse_zero_addresses_before_any_request() {
+            // The loopback endpoint is never contacted: refusal happens first.
+            let mut rpc = HttpEvmRpcV1::new("https://127.0.0.1:1").expect("endpoint");
+            assert!(matches!(
+                rpc.finalized_native_balance(ZERO_ADDRESS),
+                Err(EvmRpcErrorV1::InvalidResponse)
+            ));
+            assert!(matches!(
+                rpc.finalized_token_balance(ZERO_ADDRESS, [7; 20]),
+                Err(EvmRpcErrorV1::InvalidResponse)
+            ));
+            assert!(matches!(
+                rpc.finalized_token_balance([7; 20], ZERO_ADDRESS),
+                Err(EvmRpcErrorV1::InvalidResponse)
+            ));
+        }
+
+        #[test]
+        fn token_balance_calldata_uses_the_canonical_selector() {
+            // balanceOf(address) => 0x70a08231; the read must never drift to a
+            // different ERC-20 surface.
+            assert_eq!(
+                &keccak256(b"balanceOf(address)")[..4],
+                &[0x70, 0xa0, 0x82, 0x31]
+            );
+        }
 
         #[test]
         fn strict_json_and_hex_reject_ambiguous_encodings() {
