@@ -91,6 +91,8 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod leg_blinding;
+
 use blake2::{
     digest::{Update, VariableOutput},
     Blake2bVar,
@@ -120,6 +122,13 @@ pub const COMPOSED_BINDING_DOMAIN: &[u8] = b"DOM-INTEROP/COMPOSED-BINDING/V1\0";
 /// authenticated time policy, live evidence and conservative interval proof;
 /// it never changes the byte format or acceptance rules of V1.
 pub const COMPOSED_BINDING_DOMAIN_V2: &[u8] = b"DOM-INTEROP/COMPOSED-BINDING/V2\0";
+
+/// Domain tag for [`ComposedBindingV3::binding_digest`]. V3 (DR-PRIV-001,
+/// Level 1) decouples the two legs' witnesses: each settlement commits its
+/// OWN lock point, and the digest additionally commits both compressed
+/// per-leg points; the leg-offset relation proof is verified against this
+/// digest at bind time.
+pub const COMPOSED_BINDING_DOMAIN_V3: &[u8] = b"DOM-INTEROP/COMPOSED-BINDING/V3\0";
 
 /// Everything a composition can refuse, by name (I13). Every refusal is
 /// terminal for the attempted step: there is no partial composition.
@@ -206,6 +215,21 @@ pub enum ComposerRefusal {
     /// not `T`, or `t` is not a canonical secp256k1 scalar.
     #[error("wrong secret")]
     WrongSecret,
+    /// The two settlements commit the same per-leg lock point in a V3
+    /// composition: a zero leg offset defeats the unlinkability purpose
+    /// and `δ ∈ [1, 2^251)` makes it impossible honestly (DR-PRIV-001 I8).
+    #[error("equal per-leg lock points")]
+    EqualLegPoints,
+    /// The leg-offset relation proof does not verify against the relation
+    /// point recomputed from the committed per-leg lock points and this
+    /// binding's digest (DR-PRIV-001 I3/I5).
+    #[error("leg-offset relation proof refused")]
+    RelationProofRefused,
+    /// A witness translation refused: the integer sum left the cross-curve
+    /// range, or the translated witness does not open the consuming leg's
+    /// committed lock point.
+    #[error("witness translation refused")]
+    WitnessTranslationRefused,
     /// The composed fee could not be computed.
     #[error("fee policy refusal: {0}")]
     Fee(#[from] FeePolicyRefusal),
@@ -879,6 +903,331 @@ fn update_time_rung_digest(hash: &mut Blake2bVar, proof: LadderIntervalProofV2) 
     hash.update(&proof.downstream.earliest_seconds.to_be_bytes());
     hash.update(&proof.downstream.latest_seconds.to_be_bytes());
     hash.update(&proof.margin_seconds.to_be_bytes());
+}
+
+/// A validated composition whose two legs carry INDEPENDENT witnesses
+/// joined by a secret integer offset (DR-PRIV-001, Level 1) — NOT RATIFIED.
+///
+/// Unlike V1/V2, the two settlements do NOT commit the same adaptor point:
+/// each leg commits its OWN lock point (`A_up`, `A_dn`), and settlement
+/// publishes two unrelated-looking scalars, removing the byte-equality
+/// linkage an external observer of both chains (T0) exploits today. The
+/// legs are joined off-chain by the secret relation `w_up = w_dn + δ`
+/// (the downstream claim reveals FIRST, exactly as in V1; the consuming
+/// side translates its witness with the offset), authenticated at bind
+/// time by the public relation point `D = A_up − A_dn` — always recomputed
+/// from the committed leg points, never prover-supplied (I3) — and a
+/// Schnorr proof of knowledge of `δ` bound to this binding's digest.
+///
+/// DR-PRIV-001 §1.1 spells the derivation as `w_dn = w_up + δ` where its
+/// "up" names the first-revealed witness; this crate keeps its own V1
+/// vocabulary (downstream reveals first), so the same frozen algebra reads
+/// `consumed = revealed + δ` with consumed = upstream here.
+///
+/// Everything else V1 enforces — one hub, the same-clock timelock ladder,
+/// transit conservation, refund-before-funding, the funding order — holds
+/// unchanged; [`authorize_funding`] applies to V3 compositions as-is. The
+/// single-scalar `verify_revealed_scalar` API is retired with this family:
+/// reveals are verified per leg, against that leg's own committed point.
+#[derive(Clone, Debug)]
+pub struct ComposedBindingV3 {
+    upstream: SettlementTermsV1,
+    downstream: SettlementTermsV1,
+    policy: ComposedWindowPolicyV1,
+    offset_relation_proof: leg_blinding::OffsetRelationProofV1,
+    binding_digest: Digest32,
+}
+
+impl ComposedBindingV3 {
+    /// The digest a V3 composition of these inputs will carry, for the
+    /// endpoint that must PROVE the offset relation before binding.
+    ///
+    /// Validates the full route shape first, so a digest exists only for
+    /// a composition that would pass every non-proof precondition of
+    /// [`ComposedBindingV3::bind`]. The proof's challenge is bound to this
+    /// digest; the digest in turn commits both settlements' canonical
+    /// bytes, the window policy and both compressed per-leg lock points —
+    /// committing the proof bytes themselves into the digest would be
+    /// circular, and adds nothing: the challenge already covers digest,
+    /// `D` and the nonce point.
+    pub fn binding_digest_for(
+        upstream: &SettlementTermsV1,
+        downstream: &SettlementTermsV1,
+        policy: ComposedWindowPolicyV1,
+    ) -> Result<Digest32, ComposerRefusal> {
+        validate_v3_route_shape(upstream, downstream, policy)?;
+        v3_binding_digest(upstream, downstream, policy)
+    }
+
+    /// Validate and freeze a V3 composition. Every refusal is terminal;
+    /// nothing about a refused composition is usable.
+    ///
+    /// Verification order is fail-closed, all-or-nothing (DR-PRIV-001
+    /// §1.5): route shape → digest → recompute `D = A_up − A_dn` from the
+    /// committed points → verify the relation proof against `D` and the
+    /// digest → only then admit the binding. `D` is NEVER accepted as an
+    /// input (I3).
+    pub fn bind(
+        upstream: SettlementTermsV1,
+        downstream: SettlementTermsV1,
+        policy: ComposedWindowPolicyV1,
+        offset_relation_proof: leg_blinding::OffsetRelationProofV1,
+    ) -> Result<Self, ComposerRefusal> {
+        validate_v3_route_shape(&upstream, &downstream, policy)?;
+        let binding_digest = v3_binding_digest(&upstream, &downstream, policy)?;
+        let relation_point = leg_blinding::relation_point_from_committed_legs(
+            &upstream.adaptor_point_sec1,
+            &downstream.adaptor_point_sec1,
+        )
+        .map_err(|_| ComposerRefusal::RelationProofRefused)?;
+        leg_blinding::verify_offset_relation_v1(
+            &relation_point,
+            &offset_relation_proof,
+            &binding_digest,
+        )
+        .map_err(|_| ComposerRefusal::RelationProofRefused)?;
+        Ok(Self {
+            upstream,
+            downstream,
+            policy,
+            offset_relation_proof,
+            binding_digest,
+        })
+    }
+
+    /// The upstream settlement's frozen terms.
+    pub fn upstream(&self) -> &SettlementTermsV1 {
+        &self.upstream
+    }
+
+    /// The downstream settlement's frozen terms.
+    pub fn downstream(&self) -> &SettlementTermsV1 {
+        &self.downstream
+    }
+
+    /// The explicit window policy committed into the digest.
+    pub fn policy(&self) -> ComposedWindowPolicyV1 {
+        self.policy
+    }
+
+    /// The upstream leg's own lock point `A_up`, SEC1 compressed.
+    pub fn upstream_lock_point_sec1(&self) -> [u8; 33] {
+        self.upstream.adaptor_point_sec1
+    }
+
+    /// The downstream leg's own lock point `A_dn`, SEC1 compressed.
+    pub fn downstream_lock_point_sec1(&self) -> [u8; 33] {
+        self.downstream.adaptor_point_sec1
+    }
+
+    /// The verified offset-relation proof this binding admitted.
+    pub fn offset_relation_proof(&self) -> &leg_blinding::OffsetRelationProofV1 {
+        &self.offset_relation_proof
+    }
+
+    /// The binding digest: commits both settlements' canonical bytes
+    /// (length-prefixed), the window policy and both per-leg lock points.
+    pub fn binding_digest(&self) -> Digest32 {
+        self.binding_digest
+    }
+
+    /// The per-leg hand-off: accept a scalar observed on ONE leg's chain
+    /// only if it opens THAT leg's committed lock point and sits inside
+    /// the 252-bit cross-curve domain.
+    ///
+    /// `w·G` is recomputed through `adapter_evm::binding` — the same secp
+    /// helper V1/V2 already rely on (I15). A non-canonical, out-of-range
+    /// or wrong scalar refuses by name and never leaves this function.
+    /// This replaces the V1/V2 single-scalar API for the V3 family.
+    pub fn verify_revealed_leg_scalar(
+        &self,
+        leg: ComposedLeg,
+        observed: &[u8; 32],
+    ) -> Result<leg_blinding::LegWitnessV1, ComposerRefusal> {
+        // Both honest witnesses are below 2^252 by construction (I1); a
+        // reveal outside that range cannot be a leg witness of this
+        // family, whatever point it opens.
+        if observed[0] >= 0x10 {
+            return Err(ComposerRefusal::WrongSecret);
+        }
+        let point = adapter_evm::binding::adaptor_point_of_scalar(observed)
+            .map_err(|_| ComposerRefusal::WrongSecret)?;
+        let expected = match leg {
+            ComposedLeg::Upstream => self.upstream.adaptor_point_sec1,
+            ComposedLeg::Downstream => self.downstream.adaptor_point_sec1,
+        };
+        if point != expected {
+            return Err(ComposerRefusal::WrongSecret);
+        }
+        Ok(leg_blinding::LegWitnessV1::from_verified_big_endian(
+            observed,
+        ))
+    }
+
+    /// Translates the downstream leg's revealed witness into the upstream
+    /// leg's witness: `w_up = w_dn + δ`, over the integers, bound-checked.
+    ///
+    /// Fail-closed on both sides of the arithmetic: a sum outside the
+    /// cross-curve range refuses (corrupted operand, I1), and a sum that
+    /// does not open the upstream leg's committed lock point refuses (the
+    /// supplied offset is not the one this binding's relation proof
+    /// committed to) — the wrong witness never reaches a claim path.
+    pub fn translate_revealed_downstream_witness(
+        &self,
+        revealed_downstream: &leg_blinding::LegWitnessV1,
+        offset: &leg_blinding::LegOffsetV1,
+    ) -> Result<leg_blinding::LegWitnessV1, ComposerRefusal> {
+        let translated = leg_blinding::translate_witness_v1(revealed_downstream, offset)
+            .map_err(|_| ComposerRefusal::WitnessTranslationRefused)?;
+        let point = adapter_evm::binding::adaptor_point_of_scalar(translated.expose_big_endian())
+            .map_err(|_| ComposerRefusal::WitnessTranslationRefused)?;
+        if point != self.upstream.adaptor_point_sec1 {
+            return Err(ComposerRefusal::WitnessTranslationRefused);
+        }
+        Ok(translated)
+    }
+
+    /// The composed treasury share over the DOM transit amount, charged
+    /// once per route — unchanged from V1/V2.
+    pub fn composed_treasury_share(&self) -> Result<u128, ComposerRefusal> {
+        Ok(treasury_share(
+            self.upstream.dom_leg.amount,
+            RouteShapeV1::Composed,
+        )?)
+    }
+}
+
+/// The V1 route-shape and ladder checks, minus the shared-point equality
+/// V3 abolishes: each leg's point must decode to a real curve point on its
+/// own, and the two points must DIFFER (I8) — audits that asserted
+/// equality flip to asserting the committed relation, which
+/// [`ComposedBindingV3::bind`] does through the relation proof.
+fn validate_v3_route_shape(
+    upstream: &SettlementTermsV1,
+    downstream: &SettlementTermsV1,
+    policy: ComposedWindowPolicyV1,
+) -> Result<(), ComposerRefusal> {
+    if policy.hub_margin == 0 || policy.counterparty_margin == 0 {
+        return Err(ComposerRefusal::ZeroSafetyMargin);
+    }
+    upstream
+        .validate()
+        .map_err(|_| ComposerRefusal::InvalidTerms)?;
+    downstream
+        .validate()
+        .map_err(|_| ComposerRefusal::InvalidTerms)?;
+    if upstream.intent_hash != downstream.intent_hash {
+        return Err(ComposerRefusal::RouteIntentMismatch);
+    }
+    if upstream.policy_version != downstream.policy_version {
+        return Err(ComposerRefusal::RoutePolicyMismatch);
+    }
+    if !upstream.recovery.refund_before_funding || !downstream.recovery.refund_before_funding {
+        return Err(ComposerRefusal::UnsafeRecoveryPolicy);
+    }
+    if upstream.settlement_id == downstream.settlement_id
+        || upstream.session_id == downstream.session_id
+    {
+        return Err(ComposerRefusal::SettlementsNotDistinct);
+    }
+    // Per-leg points: each must be a real curve point; equal points would
+    // mean a zero offset, which defeats the purpose and is impossible for
+    // an honest δ ∈ [1, 2^251).
+    adapter_evm::binding::adaptor_address(&upstream.adaptor_point_sec1)
+        .map_err(|_| ComposerRefusal::InvalidAdaptorPoint)?;
+    adapter_evm::binding::adaptor_address(&downstream.adaptor_point_sec1)
+        .map_err(|_| ComposerRefusal::InvalidAdaptorPoint)?;
+    if upstream.adaptor_point_sec1 == downstream.adaptor_point_sec1 {
+        return Err(ComposerRefusal::EqualLegPoints);
+    }
+    if upstream.dom_leg.chain_id != downstream.dom_leg.chain_id {
+        return Err(ComposerRefusal::HubChainMismatch);
+    }
+    if upstream.dom_leg.asset_id != downstream.dom_leg.asset_id {
+        return Err(ComposerRefusal::HubAssetMismatch);
+    }
+    if upstream.dom_leg.adapter_profile_hash != downstream.dom_leg.adapter_profile_hash {
+        return Err(ComposerRefusal::HubProfileMismatch);
+    }
+    if upstream.dom_leg.mechanism != kaystra_core::types::LockMechanism::DomAdaptor2of2
+        || downstream.dom_leg.mechanism != kaystra_core::types::LockMechanism::DomAdaptor2of2
+    {
+        return Err(ComposerRefusal::InvalidHubMechanism);
+    }
+    // The same-clock ladder, exactly as V1 spells it (module docs §3).
+    match (upstream.dom_leg.deadline, downstream.dom_leg.deadline) {
+        (TimelockSpec::BlockHeight { value: up }, TimelockSpec::BlockHeight { value: dn }) => {
+            if !rung_holds(up, dn, policy.hub_margin) {
+                return Err(ComposerRefusal::UnsafeComposedWindow);
+            }
+        }
+        (
+            TimelockSpec::TimestampSeconds { value: up },
+            TimelockSpec::TimestampSeconds { value: dn },
+        ) => {
+            if !rung_holds(up, dn, policy.hub_margin) {
+                return Err(ComposerRefusal::UnsafeComposedWindow);
+            }
+        }
+        _ => return Err(ComposerRefusal::MixedTimelockDomains),
+    }
+    match (
+        upstream.counterparty_leg.deadline,
+        downstream.counterparty_leg.deadline,
+    ) {
+        (
+            TimelockSpec::TimestampSeconds { value: up },
+            TimelockSpec::TimestampSeconds { value: dn },
+        ) => {
+            if !rung_holds(up, dn, policy.counterparty_margin) {
+                return Err(ComposerRefusal::UnsafeComposedWindow);
+            }
+        }
+        (TimelockSpec::BlockHeight { value: up }, TimelockSpec::BlockHeight { value: dn }) => {
+            if upstream.counterparty_leg.chain_id != downstream.counterparty_leg.chain_id {
+                return Err(ComposerRefusal::CrossChainClockMismatch);
+            }
+            if !rung_holds(up, dn, policy.counterparty_margin) {
+                return Err(ComposerRefusal::UnsafeComposedWindow);
+            }
+        }
+        _ => return Err(ComposerRefusal::MixedTimelockDomains),
+    }
+    if upstream.dom_leg.amount != downstream.dom_leg.amount {
+        return Err(ComposerRefusal::DomTransitMismatch);
+    }
+    Ok(())
+}
+
+/// The V3 digest: `BLAKE2b-256(domain-V3 || len(up) || up-canonical ||
+/// len(dn) || dn-canonical || margins BE || A_up || A_dn)` — the A3
+/// pattern of V1, extended with both fixed-width compressed leg points
+/// (DR-PRIV-001 §1.5).
+fn v3_binding_digest(
+    upstream: &SettlementTermsV1,
+    downstream: &SettlementTermsV1,
+    policy: ComposedWindowPolicyV1,
+) -> Result<Digest32, ComposerRefusal> {
+    let up_bytes = upstream
+        .canonical_bytes()
+        .map_err(|_| ComposerRefusal::InvalidTerms)?;
+    let dn_bytes = downstream
+        .canonical_bytes()
+        .map_err(|_| ComposerRefusal::InvalidTerms)?;
+    let mut h = Blake2bVar::new(32).map_err(|_| ComposerRefusal::HashInitialization)?;
+    h.update(COMPOSED_BINDING_DOMAIN_V3);
+    h.update(&(up_bytes.len() as u64).to_be_bytes());
+    h.update(&up_bytes);
+    h.update(&(dn_bytes.len() as u64).to_be_bytes());
+    h.update(&dn_bytes);
+    h.update(&policy.hub_margin.to_be_bytes());
+    h.update(&policy.counterparty_margin.to_be_bytes());
+    h.update(&upstream.adaptor_point_sec1);
+    h.update(&downstream.adaptor_point_sec1);
+    let mut binding_digest = [0u8; 32];
+    h.finalize_variable(&mut binding_digest)
+        .map_err(|_| ComposerRefusal::HashInitialization)?;
+    Ok(binding_digest)
 }
 
 /// The ONLY permitted funding order of a composition.

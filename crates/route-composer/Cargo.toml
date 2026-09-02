@@ -24,6 +24,12 @@ blake2 = "=0.10.6"
 thiserror = { workspace = true }
 # Scalar hygiene: the revealed route scalar lives only in zeroizing memory.
 zeroize = { workspace = true }
+# Point algebra of the leg-offset relation proof (DR-PRIV-001, Level 1):
+# secp256kfun EXACTLY as xmr-dleq-sigma already links it, through the same
+# sigma_fun pin — never a second secp implementation (I15).
+sigma_fun = { version = "=0.7.0", default-features = false, features = ["secp256k1", "alloc"] }
+# Constant-time nonzero check on derived leg witnesses/offsets.
+subtle = { workspace = true }
 
 [dev-dependencies]
 # The integration proof drives two REAL durable engines through the composer,
@@ -42,3 +48,7 @@ tempfile.workspace = true
 # Property-based invariants of the ladder, the digest and the hand-off
 # (same exact pin as rfq and kaystra-core).
 proptest = "=1.7.0"
+# The V3 leg-blinding integration test feeds translated witnesses through
+# the SAME cross-curve range authority the XMR/Solana legs use, and asserts
+# the reserved role byte against the closed registry.
+xmr-dleq-sigma = { path = "../adapters/xmr-dleq-sigma" }
