@@ -80,10 +80,19 @@ fn load_config() -> Result<Config> {
         .context("DOM_XMR_SIDECAR_AUTH_HEX is required")?;
     let key_vec = hex::decode(key_hex).context("sidecar auth key is not hex")?;
     let key: [u8; 32] = key_vec.try_into().map_err(|_| anyhow::anyhow!("sidecar auth key must be 32 bytes"))?;
+    // Both paths are deploy-critical and refuse to default: a CWD-relative
+    // cache silently forks the idempotency history on a service restart, and
+    // a socket in a world-writable directory can be pre-bound by any local
+    // process before this service starts — the client's request carries key
+    // material, so that squat must be impossible by construction.
     let cache_dir = PathBuf::from(env::var("DOM_XMR_SIDECAR_CACHE_DIR")
-        .unwrap_or_else(|_| "./dom-xmr-sidecar-cache".to_owned()));
+        .context("DOM_XMR_SIDECAR_CACHE_DIR is required (absolute path)")?);
+    if !cache_dir.is_absolute() {
+        anyhow::bail!("DOM_XMR_SIDECAR_CACHE_DIR must be an absolute path");
+    }
     let uds_path = PathBuf::from(env::var("DOM_XMR_SIDECAR_UDS")
-        .unwrap_or_else(|_| "/tmp/dom-xmr-sidecar.sock".to_owned()));
+        .context("DOM_XMR_SIDECAR_UDS is required (absolute path outside world-writable directories)")?);
+    validate_uds_path(&uds_path)?;
     Ok(Config {
         listen,
         uds_path,
@@ -294,6 +303,36 @@ fn classify_sweep_error(error: &monero_wallet_ng::sweep::SweepError) -> SidecarO
 }
 
 
+/// World-writable roots a secret-carrying socket must never live in; the
+/// client refuses the same set, so a misdeploy fails on both ends.
+const WORLD_WRITABLE_ROOTS: &[&str] = &["/tmp", "/var/tmp", "/dev/shm"];
+
+/// Refuses a socket path an unprivileged local process could pre-bind. The
+/// parent directory must already exist with mode `0700`: this service never
+/// creates it, so the deployment must consciously provision a private home
+/// for the socket.
+fn validate_uds_path(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if !path.is_absolute() {
+        anyhow::bail!("DOM_XMR_SIDECAR_UDS must be an absolute path");
+    }
+    if WORLD_WRITABLE_ROOTS.iter().any(|root| path.starts_with(root)) {
+        anyhow::bail!("DOM_XMR_SIDECAR_UDS must not live under a world-writable directory");
+    }
+    let parent = path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .context("DOM_XMR_SIDECAR_UDS has no parent directory")?;
+    let metadata = std::fs::metadata(parent)
+        .context("DOM_XMR_SIDECAR_UDS parent directory must already exist")?;
+    if !metadata.is_dir() {
+        anyhow::bail!("DOM_XMR_SIDECAR_UDS parent is not a directory");
+    }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        anyhow::bail!("DOM_XMR_SIDECAR_UDS parent directory must be mode 0700");
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 async fn run_uds(config: Arc<Config>) -> Result<()> {
     use std::os::unix::fs::{FileTypeExt, PermissionsExt};
@@ -304,9 +343,6 @@ async fn run_uds(config: Arc<Config>) -> Result<()> {
             anyhow::bail!("refusing to replace non-socket UDS path");
         }
         std::fs::remove_file(&config.uds_path).context("remove stale UDS")?;
-    }
-    if let Some(parent) = config.uds_path.parent() {
-        std::fs::create_dir_all(parent).context("create UDS parent")?;
     }
     let listener = UnixListener::bind(&config.uds_path).context("bind UDS")?;
     std::fs::set_permissions(&config.uds_path, std::fs::Permissions::from_mode(0o600))
@@ -327,12 +363,39 @@ async fn run_uds(_config: Arc<Config>) -> Result<()> {
     anyhow::bail!("Unix-domain sidecar requires Unix")
 }
 
+/// One small JSON hello; anything larger is not a DOM client.
+const MAX_HELLO_BYTES: usize = 1024;
+
 #[cfg(unix)]
 async fn handle_uds(
     mut stream: tokio::net::UnixStream,
     config: Arc<Config>,
 ) -> Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // The conversation opens with a secretless hello: the client withholds
+    // every scalar until this side proves possession of the shared HMAC key
+    // over the client's fresh nonce, in the dedicated challenge domain.
+    let mut prefix = [0_u8; 4];
+    stream.read_exact(&mut prefix).await.context("read UDS hello length")?;
+    let hello_length = u32::from_be_bytes(prefix) as usize;
+    if hello_length == 0 || hello_length > MAX_HELLO_BYTES {
+        anyhow::bail!("UDS hello exceeds bound");
+    }
+    let mut hello_bytes = vec![0_u8; hello_length];
+    stream.read_exact(&mut hello_bytes).await.context("read UDS hello")?;
+    let hello = serde_json::from_slice::<SidecarHelloV1>(&hello_bytes)
+        .context("malformed UDS hello")?;
+    hello.validate().map_err(|_| anyhow::anyhow!("invalid UDS hello"))?;
+    let proof = SidecarHelloProofV1 {
+        api_version: API_VERSION_V2,
+        proof: config.auth.challenge_proof(&hello.challenge_nonce)
+            .map_err(|_| anyhow::anyhow!("challenge proof failed"))?,
+    };
+    let proof_bytes = serde_json::to_vec(&proof).context("serialize hello proof")?;
+    let proof_length = u32::try_from(proof_bytes.len()).context("hello proof length")?;
+    stream.write_all(&proof_length.to_be_bytes()).await.context("write hello proof length")?;
+    stream.write_all(&proof_bytes).await.context("write hello proof")?;
+
     let mut prefix = [0_u8; 4];
     stream.read_exact(&mut prefix).await.context("read UDS frame length")?;
     let length = u32::from_be_bytes(prefix) as usize;

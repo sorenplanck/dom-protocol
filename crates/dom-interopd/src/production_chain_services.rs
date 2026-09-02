@@ -604,8 +604,22 @@ fn validate_xmr_endpoints(xmr: &XmrEndpointsV2) -> Result<(), ProductionChainSer
     {
         return Err(ProductionChainServicesErrorV1::InvalidXmrEndpoints);
     }
+    // The client's first application frame to this socket carries key
+    // material, so a path any local process could pre-bind is a
+    // misconfiguration, not a preference. The sidecar and its client refuse
+    // the same set at their own boundaries; refusing here keeps the document
+    // from ever admitting a socket the transport would then reject.
+    if XMR_SIDECAR_WORLD_WRITABLE_ROOTS_V2
+        .iter()
+        .any(|root| socket.starts_with(root))
+    {
+        return Err(ProductionChainServicesErrorV1::InvalidXmrEndpoints);
+    }
     Ok(())
 }
+
+/// Standard world-writable roots the sidecar socket must never live in.
+const XMR_SIDECAR_WORLD_WRITABLE_ROOTS_V2: &[&str] = &["/tmp", "/var/tmp", "/dev/shm"];
 
 fn chain_services_digest_v2(bytes: &[u8]) -> Result<[u8; 32], ProductionChainServicesErrorV1> {
     let mut domained = Vec::with_capacity(DIGEST_DOMAIN_V2.len() + bytes.len());
@@ -1184,6 +1198,9 @@ mod tests {
             ("none", "/run/dom/xmr-sidecar.sock"),
             ("http://127.0.0.1:18081", "relative/socket.sock"),
             ("http://127.0.0.1:18081", "/run/dom/with space.sock"),
+            ("http://127.0.0.1:18081", "/tmp/dom-xmr-sidecar.sock"),
+            ("http://127.0.0.1:18081", "/var/tmp/dom-xmr-sidecar.sock"),
+            ("http://127.0.0.1:18081", "/dev/shm/dom-xmr-sidecar.sock"),
         ] {
             assert_eq!(
                 XmrEndpointsV2::new(daemon.to_owned(), PathBuf::from(socket)).err(),

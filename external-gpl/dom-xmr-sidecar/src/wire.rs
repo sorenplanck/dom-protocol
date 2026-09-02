@@ -179,6 +179,31 @@ fn validate_common(
 }
 
 
+/// Client hello opening every UDS conversation; carries no secret. The
+/// client sends nothing else until the sidecar proves possession of the
+/// shared HMAC key over exactly this nonce.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SidecarHelloV1 {
+    pub api_version: u16,
+    pub challenge_nonce: [u8; 32],
+}
+
+impl SidecarHelloV1 {
+    pub fn validate(&self) -> Result<(), WireError> {
+        if self.api_version != API_VERSION_V2 { return Err(WireError::VersionMismatch); }
+        if self.challenge_nonce == [0; 32] { return Err(WireError::InvalidRequest); }
+        Ok(())
+    }
+}
+
+/// Sidecar proof of shared-key possession over the client's challenge nonce,
+/// computed in its own HMAC domain.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SidecarHelloProofV1 {
+    pub api_version: u16,
+    pub proof: [u8; 32],
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "method", content = "request", rename_all = "kebab-case")]
 pub enum SidecarRequestV2 {
