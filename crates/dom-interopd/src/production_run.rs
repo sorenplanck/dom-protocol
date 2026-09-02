@@ -30,7 +30,7 @@ use dom_scriptless_store::{
     BudgetPolicyProfileV1, BudgetPolicyV1, ContractsSessionStoreV1,
     PreparedContractsSessionStoreOpenV1, BUDGET_POLICY_LEN,
 };
-use evm_actuator::{DurableEvmActuatorV1, EvmSignerRoleV1};
+use evm_actuator::{DurableEvmActuatorV1, EvmRpcV1 as _, EvmSignerRoleV1};
 use relay::production::RelayDatabaseIdV1;
 use rfq::v2::SettlementPositionV2;
 use route_executor::LegIdV1;
@@ -243,6 +243,11 @@ pub enum ProductionRunErrorV1 {
     /// at stage 12.
     #[error("production Monero route shape not yet composable")]
     MoneroRouteShape,
+    /// The escrow contract deployed on the counterparty EVM chain does not
+    /// carry the exact runtime bytecode the authenticated registry pinned.
+    /// A proxy, an upgrade, or a substituted deployment refuses startup here.
+    #[error("production EVM escrow codehash diverges from the registry")]
+    EscrowCodehash,
     /// The solver inventory/bond authority could not be created, resumed from
     /// its exact pristine prefix, or reopened under the authenticated binding.
     #[error("production solver inventory store unavailable")]
@@ -465,13 +470,25 @@ pub fn run_production_v1(options: &ProductionRunOptionsV1) -> Result<(), Product
     if chain_services.solana_declared() || chain_services.xmr_endpoints().is_some() {
         return Err(ProductionRunErrorV1::ChainServices);
     }
-    let chain_clients = chain_services
+    let escrow_binding = evm_deployment.adapter_config();
+    let mut chain_clients = chain_services
         .into_base_clients(
             evm_deployment,
             &bitcoin_deployment,
             runtime_bounds.external_call_timeout_ms,
         )
         .map_err(|_| ProductionRunErrorV1::ChainServices)?;
+    // The registry pinned the exact runtime bytecode of the escrow; the chain
+    // must still carry it at the corroborated finalized block before any
+    // route work starts. This is the startup half of the codehash discipline
+    // (the actuator re-checks at dispatch time).
+    let (observed_escrow_codehash, _escrow_code_evidence) = chain_clients
+        .evm
+        .finalized_code_hash(escrow_binding.contract)
+        .map_err(|_| ProductionRunErrorV1::EscrowCodehash)?;
+    if observed_escrow_codehash != escrow_binding.expected_code_hash {
+        return Err(ProductionRunErrorV1::EscrowCodehash);
+    }
     let pending_evm_signer_pair = bind_single_local_evm_signer(
         &inputs,
         local_evm_credential,
