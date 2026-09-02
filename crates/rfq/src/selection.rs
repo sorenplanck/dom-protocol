@@ -69,6 +69,14 @@ pub enum AdmissibilityRefusal {
     /// §4.1.2 — the quote is expired at `now`.
     #[error("quote expired")]
     Expired,
+    /// The RFQ's own quoting window has elapsed at `now` (O-04 closure,
+    /// 2026-09-02). `quote_deadline` was committed and domain-checked but
+    /// bounded nothing in the direct flow: a quote whose `expiry` outlived
+    /// the RFQ's deadline could still win a selection run after it. The
+    /// intent board already proves its mirror deadline; this makes the
+    /// direct path refuse by name instead of by accident of expiry.
+    #[error("rfq quote deadline elapsed")]
+    QuoteDeadlineElapsed,
     /// §4.1.3 — the quote answers a different RFQ.
     #[error("quote answers a different rfq")]
     WrongRfq,
@@ -190,6 +198,12 @@ pub fn admissibility(
     }
     if timelock_value(now) > timelock_value(quote.expiry) {
         return Err(AdmissibilityRefusal::Expired);
+    }
+    // O-04 closure (2026-09-02): the RFQ's quoting window bounds selection.
+    // `quote_deadline` is inside `timelock_domain` by `RfqV1::validate`
+    // (already required above), so this comparison never crosses domains.
+    if timelock_value(now) > timelock_value(rfq.quote_deadline) {
+        return Err(AdmissibilityRefusal::QuoteDeadlineElapsed);
     }
     // §4.1.3 — exact correspondence.
     if quote.rfq_id != rfq.rfq_id {
@@ -509,6 +523,35 @@ mod tests {
         assert_eq!(
             admissibility(&rfq, &candidate, &facts(), DOM, ts(500)).unwrap_err(),
             AdmissibilityRefusal::FeeAboveLimit
+        );
+    }
+
+    /// O-04 closure (2026-09-02): the RFQ's own quoting window bounds
+    /// admissibility. The fixture is exactly the shape the audit named —
+    /// `quote_deadline` at 1_000, quote `expiry` at 2_000 — so before the
+    /// closure a selection run at 1_200 admitted a quote the RFQ's window
+    /// had already closed on.
+    #[test]
+    fn a_selection_after_the_rfq_quote_deadline_is_refused_by_name() {
+        let rfq = sample_rfq(dom_route());
+        let candidate = quote(&rfq, 95, 1);
+        // Past the RFQ deadline, before the quote's own expiry: refused by
+        // the deadline, not by expiry.
+        assert_eq!(
+            admissibility(&rfq, &candidate, &facts(), DOM, ts(1_200)).unwrap_err(),
+            AdmissibilityRefusal::QuoteDeadlineElapsed,
+        );
+        assert_eq!(
+            select_winner(&rfq, &[(candidate, facts())], DOM, ts(1_200)).unwrap_err(),
+            SelectionError::NoAdmissibleQuote,
+        );
+        // The boundary itself is inside the window.
+        assert!(admissibility(&rfq, &candidate, &facts(), DOM, ts(1_000)).is_ok());
+        // Past the quote's own expiry, expiry still wins the enumeration
+        // order (§4.1.2 comes first).
+        assert_eq!(
+            admissibility(&rfq, &candidate, &facts(), DOM, ts(2_500)).unwrap_err(),
+            AdmissibilityRefusal::Expired,
         );
     }
 }

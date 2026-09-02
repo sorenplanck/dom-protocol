@@ -523,3 +523,34 @@ fn the_observer_role_can_drive_nothing() {
         assert_eq!(refusal, AuthRefusal::RoleNotPermitted);
     }
 }
+
+/// O-03 closure (2026-09-02): the committed policy version is adjudicated
+/// against the closed V1 registry, in the same step-4 family as the other
+/// context bindings. Before this, the field was signed but nothing compared
+/// it, so a semantically downgraded envelope with a valid signature passed.
+#[test]
+fn an_unaccepted_policy_version_is_refused_at_step_four() {
+    let mut envelope = unsigned(0, [0u8; 32]);
+    envelope.policy_version = 2;
+    let envelope = sign(envelope, &SOLVER_SECRET);
+    let mut state = TranscriptStateV1::new();
+    let refusal = accept(&envelope, &mut state).unwrap_err();
+    assert_eq!(refusal, AuthRefusal::PolicyVersionNotAccepted);
+    assert_eq!(
+        refusal.step(),
+        ValidationStep::NetworkRecipientSessionExpiry
+    );
+    assert_eq!(
+        state.last(&SOLVER, &INITIATOR),
+        None,
+        "a refusal moved the watermark"
+    );
+    // Zero is not a permissible "before versioning" escape hatch either.
+    let mut envelope = unsigned(0, [0u8; 32]);
+    envelope.policy_version = 0;
+    let envelope = sign(envelope, &SOLVER_SECRET);
+    assert_eq!(
+        accept(&envelope, &mut state).unwrap_err(),
+        AuthRefusal::PolicyVersionNotAccepted
+    );
+}

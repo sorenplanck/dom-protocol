@@ -30,6 +30,12 @@ use crate::{EnvelopeError, ParticipantId, RelayEnvelopeV1, SenderRoleV1};
 /// anything is stored).
 pub const MAX_TRANSCRIPT_ENTRIES: usize = 4_096;
 
+/// The closed policy-version registry of Relay V1 (O-03 closure,
+/// 2026-09-02). Exactly one version has ever been ratified; the acceptance
+/// pipeline refuses any other value. Extending this is a ratification,
+/// exactly like adding a message kind to the D-019 registry.
+pub const ACCEPTED_POLICY_VERSION_V1: u32 = 1;
+
 /// One roster member at a given snapshot: the canonical x-only key and
 /// the role it may speak in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -141,6 +147,15 @@ pub enum AuthRefusal {
     /// Step 4: the envelope belongs to a different route.
     #[error("wrong route")]
     WrongRoute,
+    /// Step 4: the envelope names a policy version outside the closed V1
+    /// registry (O-03, 2026-09-02). The field was previously committed and
+    /// signed but never adjudicated, which preserved authenticity of the
+    /// bytes while leaving semantic downgrade between participants
+    /// undetected. Exactly one version exists, so the registry is closed at
+    /// [`ACCEPTED_POLICY_VERSION_V1`]; a second version is a new
+    /// ratification that extends the constant, never a relaxation here.
+    #[error("policy version not accepted")]
+    PolicyVersionNotAccepted,
     /// Step 4: the envelope expired.
     #[error("expired")]
     Expired,
@@ -200,6 +215,7 @@ impl AuthRefusal {
             | AuthRefusal::WrongRecipient
             | AuthRefusal::WrongSession
             | AuthRefusal::WrongRoute
+            | AuthRefusal::PolicyVersionNotAccepted
             | AuthRefusal::Expired
             | AuthRefusal::WrongTimelockDomain => ValidationStep::NetworkRecipientSessionExpiry,
             AuthRefusal::UnknownRosterSnapshot
@@ -222,10 +238,13 @@ impl AuthRefusal {
 /// What the recipient expects of every envelope it accepts: EXACTLY
 /// the four bindings the ratified §5.4 step 4 names — network,
 /// recipient, session (and its route) — plus the expiry, which comes
-/// from the clock the caller passes. Nothing else belongs here: the
-/// envelope also carries a policy version, but no ratified step tells
-/// a recipient to compare it, and a field nothing reads is how an
-/// unratified rule gets invented later.
+/// from the clock the caller passes.
+///
+/// The policy version is deliberately NOT a field here: it is not the
+/// recipient's choice. The pipeline adjudicates it against the closed
+/// [`ACCEPTED_POLICY_VERSION_V1`] registry (O-03 closure, 2026-09-02),
+/// so no caller can widen what a recipient accepts by constructing a
+/// permissive context.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct RecipientContextV1 {
     /// The recipient's own participant id.
@@ -499,6 +518,13 @@ fn accept_envelope_with_policy<P: MessageTypePolicy>(
     }
     if envelope.route_id != ctx.route_id {
         return Err(AuthRefusal::WrongRoute);
+    }
+    // O-03 closure (2026-09-02): the committed policy version is now
+    // adjudicated, not merely authenticated. The V1 registry is closed at
+    // one value, mirroring the D-019 message-kind registry: recognizing a
+    // byte must never activate it.
+    if envelope.policy_version != ACCEPTED_POLICY_VERSION_V1 {
+        return Err(AuthRefusal::PolicyVersionNotAccepted);
     }
     let (expiry_domain, expiry_value) = timelock_parts(envelope.expiry);
     let (now_domain, now_value) = timelock_parts(now);
