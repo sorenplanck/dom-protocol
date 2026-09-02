@@ -4156,6 +4156,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset",
 ]
 
 [[package]]
@@ -7936,7 +7937,10 @@ dependencies = [
 name = "xmr-live-sidecar-uds-client"
 version = "0.2.0"
 dependencies = [
+ "nix",
+ "rand 0.8.6",
  "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
  "xmr-live-sidecar-api",
  "xmr-sidecar-auth",
@@ -8047,7 +8051,6 @@ dependencies = [
  "thiserror 1.0.69",
  "xmr-delivery-sqlite",
  "xmr-kaystra-bridge",
- "xmr-live-sidecar-blocking-client",
  "xmr-live-sidecar-uds-client",
  "xmr-refund-policy",
  "xmr-rpc-broadcast-blocking",

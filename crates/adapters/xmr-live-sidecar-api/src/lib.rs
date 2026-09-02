@@ -310,6 +310,58 @@ fn validate_common(
     Ok(())
 }
 
+/// Client hello opening every Unix-domain sidecar conversation.
+///
+/// The hello carries no secret. Its only job is to hand the sidecar a fresh
+/// challenge nonce; the client transmits nothing else — in particular no
+/// scalar — until the peer has proven possession of the shared HMAC key over
+/// exactly this nonce. A socket-path squatter therefore learns nothing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SidecarHelloV1 {
+    /// Wire version.
+    pub api_version: u16,
+    /// Fresh client challenge nonce; never reused.
+    pub challenge_nonce: [u8; 32],
+}
+
+impl SidecarHelloV1 {
+    /// Structural validation.
+    pub fn validate(&self) -> Result<(), SidecarApiError> {
+        if self.api_version != API_VERSION_V2 {
+            return Err(SidecarApiError::VersionMismatch);
+        }
+        if self.challenge_nonce == [0; 32] {
+            return Err(SidecarApiError::InvalidRequest);
+        }
+        Ok(())
+    }
+}
+
+/// Sidecar proof of shared-key possession over the client's challenge nonce.
+///
+/// `proof` is HMAC-SHA256 in its own challenge domain, so it can never be
+/// replayed as a request tag and a request tag can never stand in for it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SidecarHelloProofV1 {
+    /// Wire version.
+    pub api_version: u16,
+    /// HMAC-SHA256 over the challenge domain and the client's nonce.
+    pub proof: [u8; 32],
+}
+
+impl SidecarHelloProofV1 {
+    /// Structural validation.
+    pub fn validate(&self) -> Result<(), SidecarApiError> {
+        if self.api_version != API_VERSION_V2 {
+            return Err(SidecarApiError::VersionMismatch);
+        }
+        if self.proof == [0; 32] {
+            return Err(SidecarApiError::InvalidResponse);
+        }
+        Ok(())
+    }
+}
+
 /// Length-framed Unix-domain sidecar request.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "method", content = "request", rename_all = "kebab-case")]

@@ -6,7 +6,6 @@ use adapter_dom_real::RealDomEffectSinkV1;
 use std::path::PathBuf;
 use xmr_delivery_sqlite::SqliteDeliveryStore;
 use xmr_kaystra_bridge::XmrClaimToSpendSink;
-use xmr_live_sidecar_blocking_client::BlockingSidecarPort;
 use xmr_live_sidecar_uds_client::BlockingUdsSidecarPort;
 use xmr_refund_policy::ValidatedRefundPolicy;
 use xmr_rpc_broadcast_blocking::BlockingMoneroBroadcaster;
@@ -72,6 +71,11 @@ pub enum RuntimeWiringError {
     /// the claim-to-sweep consumer must not be installed for a live route.
     #[error("XMR refund policy is not production-capable")]
     RefundNotProductionCapable,
+    /// Loopback HTTP cannot authenticate its local peer (`SO_PEERCRED` does
+    /// not exist for TCP), so it must never carry the spend scalar in a
+    /// production-shaped composition. Use the permissioned Unix socket.
+    #[error("XMR loopback-HTTP sidecar transport cannot authenticate its peer")]
+    LoopbackHttpNotPeerAuthenticated,
 }
 
 /// Installs the XMR secret-consumer bridge into the real DOM effect sink.
@@ -105,11 +109,15 @@ pub fn attach_xmr_consumer(
             let bridge = XmrClaimToSpendSink::new(setup, secrets, delivery, sidecar, broadcaster);
             Ok(sink.with_revealed_secret_sink(Box::new(bridge)))
         }
-        XmrSidecarTransport::LoopbackHttp(url) => {
-            let sidecar =
-                BlockingSidecarPort::new(url, auth).map_err(|_| RuntimeWiringError::Port)?;
-            let bridge = XmrClaimToSpendSink::new(setup, secrets, delivery, sidecar, broadcaster);
-            Ok(sink.with_revealed_secret_sink(Box::new(bridge)))
+        // Loopback TCP has no `SO_PEERCRED`: a local port squatter cannot be
+        // told apart from the sidecar before the request — and with it the
+        // spend scalar — is transmitted, and a key-possession handshake can
+        // be relayed across connections. The scalar-carrying transport in a
+        // production-shaped composition is therefore the permissioned Unix
+        // socket only; the HTTP client remains for laboratory harnesses that
+        // construct it directly.
+        XmrSidecarTransport::LoopbackHttp(_) => {
+            Err(RuntimeWiringError::LoopbackHttpNotPeerAuthenticated)
         }
     }
 }

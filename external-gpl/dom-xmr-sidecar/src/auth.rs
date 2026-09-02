@@ -6,6 +6,9 @@ use zeroize::Zeroizing;
 use crate::wire::{BuildSweepRequestV2, VerifyFundingRequestV2};
 
 const AUTH_DOMAIN: &[u8] = b"DOM-INTEROP/XMR-SIDECAR-AUTH/V2\0";
+/// Distinct domain for the connection-opening challenge, matching the DOM
+/// side: a challenge proof can never double as a request tag.
+const CHALLENGE_DOMAIN: &[u8] = b"DOM-INTEROP/XMR-SIDECAR-CHALLENGE/V1\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AuthError {
@@ -39,6 +42,13 @@ impl AuthKey {
     pub fn verify_build(&self, request: &BuildSweepRequestV2) -> Result<(), AuthError> {
         let bytes = request.canonical_auth_bytes().map_err(|_| AuthError::InvalidRequest)?;
         verify_tag(&self.0, &bytes, &request.auth_tag)
+    }
+
+    /// Proves possession of the shared key over one client challenge nonce,
+    /// before the client will transmit any scalar-carrying request.
+    pub fn challenge_proof(&self, nonce: &[u8; 32]) -> Result<[u8; 32], AuthError> {
+        if nonce == &[0; 32] { return Err(AuthError::InvalidRequest); }
+        Ok(hmac_sha256(&self.0, CHALLENGE_DOMAIN, nonce))
     }
 }
 
