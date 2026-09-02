@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[cfg(feature = "production")]
-const PRODUCTION_USAGE_V1: &str = "usage: dom-interopd self-check [--json]\n       dom-interopd run --state-dir PATH [--create]\n              nine secrets are read from standard input, one pass, no trailing newline:\n              <bearer token>\n<upstream Relay signing secret: 64 lowercase hex>\n<downstream Relay signing secret: 64 lowercase hex>\n<Contracts identity passphrase>\n<DOM wallet passphrase>\n<Bitcoin participant secret: 64 lowercase hex>\n<route-secret seal key: 64 lowercase hex>\n<refund-arming credential: 64 lowercase hex>\n<local EVM signing secret: 64 lowercase hex>";
+const PRODUCTION_USAGE_V1: &str = "usage: dom-interopd self-check [--json]\n       dom-interopd run --state-dir PATH [--create]\n              the V3 secret stream is read from standard input, one pass, no trailing newline:\n              DOM-INTEROPD-SECRETS-V3\n<bearer token>\n<upstream Relay signing secret: 64 lowercase hex>\n<downstream Relay signing secret: 64 lowercase hex>\n<Contracts identity passphrase>\n<DOM wallet passphrase>\n<Bitcoin participant secret: 64 lowercase hex>\n<route-secret seal key: 64 lowercase hex>\n<refund-arming credential: 64 lowercase hex>\n<local EVM signing secret: 64 lowercase hex>\nupstream_f6_hsm_credentials=<count, then that many 64-hex lines>\ndownstream_f6_hsm_credentials=<count, then that many 64-hex lines>";
 
 fn main() -> ExitCode {
     let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -63,8 +63,10 @@ mod production_usage_tests {
 
     #[test]
     fn usage_pins_all_nine_secret_lines() {
-        assert!(PRODUCTION_USAGE_V1.contains("nine secrets"));
-        assert_eq!(PRODUCTION_USAGE_V1.matches('<').count(), 9);
+        assert!(PRODUCTION_USAGE_V1.contains("DOM-INTEROPD-SECRETS-V3"));
+        assert_eq!(PRODUCTION_USAGE_V1.matches('<').count(), 11);
+        assert!(PRODUCTION_USAGE_V1.contains("upstream_f6_hsm_credentials="));
+        assert!(PRODUCTION_USAGE_V1.contains("downstream_f6_hsm_credentials="));
         assert!(PRODUCTION_USAGE_V1.contains("upstream Relay signing secret"));
         assert!(PRODUCTION_USAGE_V1.contains("downstream Relay signing secret"));
         assert!(PRODUCTION_USAGE_V1.contains("DOM wallet passphrase"));

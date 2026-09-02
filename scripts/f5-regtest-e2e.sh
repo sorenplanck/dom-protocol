@@ -11,7 +11,7 @@ umask 077
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 REGTEST_DATADIR="$(mktemp -d)"
-RPCPORT=18443
+RPCPORT="${RPCPORT:-18443}"
 CLI=(bitcoin-cli -regtest -datadir="$REGTEST_DATADIR" -rpcport="$RPCPORT")
 WCLI=("${CLI[@]}" -rpcwallet=e2e)
 CSV_BLOCKS=144
@@ -191,7 +191,7 @@ verify_regtest_v2() {
   grep -qx 'uspe_state=EvidenceVerification' <<<"$result"
 }
 
-bitcoind -regtest -datadir="$REGTEST_DATADIR" -rpcport="$RPCPORT" \
+bitcoind -regtest -datadir="$REGTEST_DATADIR" -rpcport="$RPCPORT" -listen=0 \
   -fallbackfee=0.0001 -txindex=1 -daemon
 for _ in $(seq 1 30); do
   if btc getblockchaininfo >/dev/null 2>&1; then
