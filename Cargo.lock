@@ -5265,10 +5265,14 @@ dependencies = [
  "hex",
  "kaystra-core",
  "proptest",
+ "rand 0.8.6",
  "rfq",
  "route-time-anchor",
+ "sigma_fun",
+ "subtle",
  "tempfile",
  "thiserror 1.0.69",
+ "xmr-dleq-sigma",
  "zeroize",
 ]
 

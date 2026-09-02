@@ -44,6 +44,16 @@ pub const ROLE_XMR_REFUND_SHARE: u8 = 2;
 /// [`ROLE_XMR_REFUND_SHARE`]; the probe in `f8-solana-e2e` showed an XMR
 /// refund proof verifying unchanged as a Solana condition-lock proof.
 pub const ROLE_SOLANA_CONDITION_LOCK: u8 = 3;
+/// Role tag reserved for the composed-route leg-offset relation proof
+/// (DR-PRIV-001, Level 1 — NOT RATIFIED).
+///
+/// Consumed by `route-composer`'s Schnorr proof-of-knowledge transcript for
+/// the secret leg offset δ (`D = δ·G`), not by a cross-curve DLEQ: the byte
+/// lives here because the role space is a single consensus registry, and any
+/// proof that writes a role byte into a transcript draws it from this table
+/// and nowhere else. Roles 1–3 are unchanged by the per-leg witness split —
+/// each leg still proves its own witness.
+pub const ROLE_LEG_OFFSET_RELATION: u8 = 4;
 
 /// The closed role registry. A new leg extends this table in this file, in
 /// the same change that introduces its role constant; `roles_are_unique`
@@ -52,6 +62,7 @@ pub const ROLES_V1: &[(u8, &str)] = &[
     (ROLE_XMR_SHARED_SPEND, "xmr-shared-spend"),
     (ROLE_XMR_REFUND_SHARE, "xmr-refund-share"),
     (ROLE_SOLANA_CONDITION_LOCK, "solana-condition-lock"),
+    (ROLE_LEG_OFFSET_RELATION, "leg-offset-relation"),
 ];
 /// Canonical compressed Monero Pedersen H.
 pub const MONERO_PEDERSEN_H: [u8; 32] = [
