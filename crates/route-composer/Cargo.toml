@@ -30,6 +30,10 @@ zeroize = { workspace = true }
 sigma_fun = { version = "=0.7.0", default-features = false, features = ["secp256k1", "alloc"] }
 # Constant-time nonzero check on derived leg witnesses/offsets.
 subtle = { workspace = true }
+# The closed DLEQ role registry: role byte 4 (leg-offset-relation) is
+# minted THERE and re-exported here — this crate never defines a role
+# byte of its own (L1 package §6; enforced by the static role gate).
+xmr-dleq-sigma = { path = "../adapters/xmr-dleq-sigma" }
 
 [dev-dependencies]
 # The integration proof drives two REAL durable engines through the composer,
@@ -48,7 +52,6 @@ tempfile.workspace = true
 # Property-based invariants of the ladder, the digest and the hand-off
 # (same exact pin as rfq and kaystra-core).
 proptest = "=1.7.0"
-# The V3 leg-blinding integration test feeds translated witnesses through
-# the SAME cross-curve range authority the XMR/Solana legs use, and asserts
-# the reserved role byte against the closed registry.
-xmr-dleq-sigma = { path = "../adapters/xmr-dleq-sigma" }
+# The V3 leg-blinding integration test drives role-bound DLEQ proofs
+# (roles 1..3) over blinded witnesses; prove_bound needs an OS rng.
+rand = { workspace = true }

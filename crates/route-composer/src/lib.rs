@@ -906,108 +906,254 @@ fn update_time_rung_digest(hash: &mut Blake2bVar, proof: LadderIntervalProofV2) 
 }
 
 /// A validated composition whose two legs carry INDEPENDENT witnesses
-/// joined by a secret integer offset (DR-PRIV-001, Level 1) — NOT RATIFIED.
+/// joined by a secret integer offset (Level 1 implementation package §7;
+/// DR-PRIV-001 Part I) — NOT RATIFIED.
 ///
 /// Unlike V1/V2, the two settlements do NOT commit the same adaptor point:
 /// each leg commits its OWN lock point (`A_up`, `A_dn`), and settlement
 /// publishes two unrelated-looking scalars, removing the byte-equality
 /// linkage an external observer of both chains (T0) exploits today. The
 /// legs are joined off-chain by the secret relation `w_up = w_dn + δ`
-/// (the downstream claim reveals FIRST, exactly as in V1; the consuming
-/// side translates its witness with the offset), authenticated at bind
-/// time by the public relation point `D = A_up − A_dn` — always recomputed
-/// from the committed leg points, never prover-supplied (I3) — and a
-/// Schnorr proof of knowledge of `δ` bound to this binding's digest.
+/// (the downstream claim reveals FIRST, exactly as in V1/V2; the
+/// consuming side translates its witness with the offset), authenticated
+/// at bind time by the public relation point `D = A_up − A_dn` — always
+/// recomputed from the committed leg points, never prover-supplied (I3) —
+/// and a Schnorr proof of knowledge of `δ` bound to this binding's digest
+/// preimage.
 ///
-/// DR-PRIV-001 §1.1 spells the derivation as `w_dn = w_up + δ` where its
-/// "up" names the first-revealed witness; this crate keeps its own V1
-/// vocabulary (downstream reveals first), so the same frozen algebra reads
-/// `consumed = revealed + δ` with consumed = upstream here.
+/// The package spells the derivation as `w_dn = w_up + δ` with its "up"
+/// naming the first-revealed witness; this crate keeps its own V1/V2
+/// vocabulary (the downstream settlement reveals first), so the same
+/// frozen algebra reads `consumed = revealed + δ` with consumed =
+/// upstream here.
 ///
-/// Everything else V1 enforces — one hub, the same-clock timelock ladder,
-/// transit conservation, refund-before-funding, the funding order — holds
-/// unchanged; [`authorize_funding`] applies to V3 compositions as-is. The
-/// single-scalar `verify_revealed_scalar` API is retired with this family:
-/// reveals are verified per leg, against that leg's own committed point.
-#[derive(Clone, Debug)]
+/// Admission follows §7.2, fail-closed and in order: (1) both leg points
+/// decode and must differ (`δ = 0` is refused — I8); (2) `D` is
+/// recomputed; (3) the relation proof is verified against `D` and the
+/// binding-digest PREIMAGE; (4) every existing V2 precondition, unchanged
+/// — the authenticated route-time capability included. The final
+/// `binding_digest` additionally commits the 97-byte proof (§7.1), while
+/// the proof's challenge binds the preimage (the digest over everything
+/// except the proof itself — committing the proof into its own challenge
+/// would be circular).
+///
+/// The single-scalar `verify_revealed_scalar` API does not exist in V3
+/// and gets no compatibility shim (§7.3): a function handing out "the
+/// route scalar" is a standing invitation to relink the legs. Reveals
+/// are verified per leg, against that leg's own committed point.
+/// [`authorize_funding`] applies to V3 compositions as-is.
+#[derive(Debug)]
 pub struct ComposedBindingV3 {
     upstream: SettlementTermsV1,
     downstream: SettlementTermsV1,
-    policy: ComposedWindowPolicyV1,
+    route_scope_digest: Digest32,
+    time_policy_digest: Digest32,
+    time_evidence_digest: Digest32,
+    time_proof_digest: Digest32,
+    evidence_sequence: u64,
+    time_proof_issued_at_seconds: u64,
+    time_proof_valid_until_seconds: u64,
+    time_proof_validated_at_seconds: u64,
+    hub_time_proof: LadderIntervalProofV2,
+    counterparty_time_proof: LadderIntervalProofV2,
     offset_relation_proof: leg_blinding::OffsetRelationProofV1,
+    binding_digest_preimage: Digest32,
     binding_digest: Digest32,
 }
 
 impl ComposedBindingV3 {
-    /// The digest a V3 composition of these inputs will carry, for the
-    /// endpoint that must PROVE the offset relation before binding.
+    /// The binding-digest PREIMAGE a V3 composition of these inputs will
+    /// carry — the digest the endpoint that knows `δ` must bind its
+    /// relation proof to, BEFORE calling [`ComposedBindingV3::bind`].
     ///
-    /// Validates the full route shape first, so a digest exists only for
-    /// a composition that would pass every non-proof precondition of
-    /// [`ComposedBindingV3::bind`]. The proof's challenge is bound to this
-    /// digest; the digest in turn commits both settlements' canonical
-    /// bytes, the window policy and both compressed per-leg lock points —
-    /// committing the proof bytes themselves into the digest would be
-    /// circular, and adds nothing: the challenge already covers digest,
-    /// `D` and the nonce point.
-    pub fn binding_digest_for(
+    /// Borrows the (move-only) time capability so proving does not
+    /// consume it; the same capability is then moved into `bind`. The
+    /// per-leg point preconditions are enforced here too, so a preimage
+    /// exists only for a composition that could pass §7.2 steps 1–2.
+    pub fn binding_digest_preimage_for(
         upstream: &SettlementTermsV1,
         downstream: &SettlementTermsV1,
-        policy: ComposedWindowPolicyV1,
+        time_proof: &CurrentRouteTimeLadderV2<'_>,
     ) -> Result<Digest32, ComposerRefusal> {
-        validate_v3_route_shape(upstream, downstream, policy)?;
-        v3_binding_digest(upstream, downstream, policy)
+        let facts = V2TimeProofFacts::from(time_proof);
+        validate_v3_leg_points(upstream, downstream)?;
+        let route_scope = route_scope_digest(upstream, downstream)
+            .map_err(|_| ComposerRefusal::TimeAnchorMismatch)?;
+        v3_binding_digest(upstream, downstream, &route_scope, &facts, None)
     }
 
-    /// Validate and freeze a V3 composition. Every refusal is terminal;
+    /// Validate and freeze a V3 composition against a CURRENT
+    /// authenticated route-time capability. Every refusal is terminal;
     /// nothing about a refused composition is usable.
-    ///
-    /// Verification order is fail-closed, all-or-nothing (DR-PRIV-001
-    /// §1.5): route shape → digest → recompute `D = A_up − A_dn` from the
-    /// committed points → verify the relation proof against `D` and the
-    /// digest → only then admit the binding. `D` is NEVER accepted as an
-    /// input (I3).
     pub fn bind(
         upstream: SettlementTermsV1,
         downstream: SettlementTermsV1,
-        policy: ComposedWindowPolicyV1,
+        time_proof: CurrentRouteTimeLadderV2<'_>,
         offset_relation_proof: leg_blinding::OffsetRelationProofV1,
     ) -> Result<Self, ComposerRefusal> {
-        validate_v3_route_shape(&upstream, &downstream, policy)?;
-        let binding_digest = v3_binding_digest(&upstream, &downstream, policy)?;
+        let facts = V2TimeProofFacts::from(&time_proof);
+        Self::bind_with_time_facts(upstream, downstream, facts, offset_relation_proof)
+    }
+
+    /// Reconstructs the exact original V3 binding from a historically
+    /// verified ladder proof recovered by the durable time authority —
+    /// the V2 recovery discipline, unchanged: no new funding authority,
+    /// no current freshness check, one shared invariant and digest
+    /// implementation with [`ComposedBindingV3::bind`].
+    pub fn bind_recovered(
+        upstream: SettlementTermsV1,
+        downstream: SettlementTermsV1,
+        time_proof: VerifiedFrozenRouteTimeLadderV2,
+        offset_relation_proof: leg_blinding::OffsetRelationProofV1,
+    ) -> Result<Self, ComposerRefusal> {
+        let facts = V2TimeProofFacts::from(&time_proof);
+        Self::bind_with_time_facts(upstream, downstream, facts, offset_relation_proof)
+    }
+
+    fn bind_with_time_facts(
+        upstream: SettlementTermsV1,
+        downstream: SettlementTermsV1,
+        facts: V2TimeProofFacts,
+        offset_relation_proof: leg_blinding::OffsetRelationProofV1,
+    ) -> Result<Self, ComposerRefusal> {
+        // §7.2 (1): decode both leg points; refuse A_up == A_dn.
+        validate_v3_leg_points(&upstream, &downstream)?;
+
+        // §7.2 (2): recompute D = A_up − A_dn (consumed − revealed) from
+        // the committed points — never accepted from the prover (I3).
         let relation_point = leg_blinding::relation_point_from_committed_legs(
             &upstream.adaptor_point_sec1,
             &downstream.adaptor_point_sec1,
         )
         .map_err(|_| ComposerRefusal::RelationProofRefused)?;
+
+        // §7.2 (3): verify the relation proof against D and the digest
+        // PREIMAGE (everything except the proof itself).
+        let route_scope = route_scope_digest(&upstream, &downstream)
+            .map_err(|_| ComposerRefusal::TimeAnchorMismatch)?;
+        let binding_digest_preimage =
+            v3_binding_digest(&upstream, &downstream, &route_scope, &facts, None)?;
         leg_blinding::verify_offset_relation_v1(
             &relation_point,
             &offset_relation_proof,
-            &binding_digest,
+            &binding_digest_preimage,
         )
         .map_err(|_| ComposerRefusal::RelationProofRefused)?;
+
+        // §7.2 (4): every existing V2 precondition, unchanged.
+        validate_v3_route_shape(&upstream, &downstream)?;
+        let upstream_terms_hash = upstream
+            .terms_hash()
+            .map_err(|_| ComposerRefusal::InvalidTerms)?;
+        let downstream_terms_hash = downstream
+            .terms_hash()
+            .map_err(|_| ComposerRefusal::InvalidTerms)?;
+        if facts.upstream_terms_hash != upstream_terms_hash
+            || facts.downstream_terms_hash != downstream_terms_hash
+            || facts.route_scope_digest != route_scope
+        {
+            return Err(ComposerRefusal::TimeAnchorMismatch);
+        }
+        if facts.policy_digest == [0; 32]
+            || facts.evidence_digest == [0; 32]
+            || facts.binding_digest == [0; 32]
+            || facts.evidence_sequence == 0
+            || facts.validated_at_seconds < facts.issued_at_seconds
+            || facts.validated_at_seconds >= facts.valid_until_seconds
+            || !time_rung_is_conservative(facts.hub)
+            || !time_rung_is_conservative(facts.counterparty)
+        {
+            return Err(ComposerRefusal::InvalidTimeAnchorProof);
+        }
+
+        // §7.1: the final binding digest additionally commits the proof.
+        let binding_digest = v3_binding_digest(
+            &upstream,
+            &downstream,
+            &route_scope,
+            &facts,
+            Some(&offset_relation_proof),
+        )?;
+
         Ok(Self {
             upstream,
             downstream,
-            policy,
+            route_scope_digest: route_scope,
+            time_policy_digest: facts.policy_digest,
+            time_evidence_digest: facts.evidence_digest,
+            time_proof_digest: facts.binding_digest,
+            evidence_sequence: facts.evidence_sequence,
+            time_proof_issued_at_seconds: facts.issued_at_seconds,
+            time_proof_valid_until_seconds: facts.valid_until_seconds,
+            time_proof_validated_at_seconds: facts.validated_at_seconds,
+            hub_time_proof: facts.hub,
+            counterparty_time_proof: facts.counterparty,
             offset_relation_proof,
+            binding_digest_preimage,
             binding_digest,
         })
     }
 
-    /// The upstream settlement's frozen terms.
+    /// The upstream settlement's exact frozen terms.
     pub fn upstream(&self) -> &SettlementTermsV1 {
         &self.upstream
     }
 
-    /// The downstream settlement's frozen terms.
+    /// The downstream settlement's exact frozen terms.
     pub fn downstream(&self) -> &SettlementTermsV1 {
         &self.downstream
     }
 
-    /// The explicit window policy committed into the digest.
-    pub fn policy(&self) -> ComposedWindowPolicyV1 {
-        self.policy
+    /// Length-delimited digest of the ordered upstream/downstream terms.
+    pub const fn route_scope_digest(&self) -> Digest32 {
+        self.route_scope_digest
+    }
+
+    /// Digest of the threshold-authenticated static timing policy.
+    pub const fn time_policy_digest(&self) -> Digest32 {
+        self.time_policy_digest
+    }
+
+    /// Digest of the fresh threshold-authenticated checkpoint evidence.
+    pub const fn time_evidence_digest(&self) -> Digest32 {
+        self.time_evidence_digest
+    }
+
+    /// Digest of the exact worst-case ladder capability consumed at binding.
+    pub const fn time_proof_digest(&self) -> Digest32 {
+        self.time_proof_digest
+    }
+
+    /// Monotonic checkpoint-evidence sequence used for this binding.
+    pub const fn evidence_sequence(&self) -> u64 {
+        self.evidence_sequence
+    }
+
+    /// Trusted second at which the time authority issued the consumed proof.
+    pub const fn time_proof_issued_at_seconds(&self) -> u64 {
+        self.time_proof_issued_at_seconds
+    }
+
+    /// First trusted second at which freshness makes this binding unusable
+    /// for a new economic action.
+    pub const fn time_proof_valid_until_seconds(&self) -> u64 {
+        self.time_proof_valid_until_seconds
+    }
+
+    /// Trusted second of the final durable-store revalidation immediately
+    /// consumed by this binding.
+    pub const fn time_proof_validated_at_seconds(&self) -> u64 {
+        self.time_proof_validated_at_seconds
+    }
+
+    /// Proven DOM-height rung projected to conservative absolute seconds.
+    pub const fn hub_time_proof(&self) -> LadderIntervalProofV2 {
+        self.hub_time_proof
+    }
+
+    /// Proven mixed counterparty rung projected to conservative seconds.
+    pub const fn counterparty_time_proof(&self) -> LadderIntervalProofV2 {
+        self.counterparty_time_proof
     }
 
     /// The upstream leg's own lock point `A_up`, SEC1 compressed.
@@ -1025,9 +1171,15 @@ impl ComposedBindingV3 {
         &self.offset_relation_proof
     }
 
-    /// The binding digest: commits both settlements' canonical bytes
-    /// (length-prefixed), the window policy and both per-leg lock points.
-    pub fn binding_digest(&self) -> Digest32 {
+    /// The digest preimage the relation proof's challenge binds: every
+    /// committed field except the proof itself.
+    pub const fn binding_digest_preimage(&self) -> Digest32 {
+        self.binding_digest_preimage
+    }
+
+    /// The final V3 commitment: terms, route scope, time capability,
+    /// both per-leg lock points AND the 97-byte relation proof (§7.1).
+    pub const fn binding_digest(&self) -> Digest32 {
         self.binding_digest
     }
 
@@ -1038,7 +1190,6 @@ impl ComposedBindingV3 {
     /// `w·G` is recomputed through `adapter_evm::binding` — the same secp
     /// helper V1/V2 already rely on (I15). A non-canonical, out-of-range
     /// or wrong scalar refuses by name and never leaves this function.
-    /// This replaces the V1/V2 single-scalar API for the V3 family.
     pub fn verify_revealed_leg_scalar(
         &self,
         leg: ComposedLeg,
@@ -1065,7 +1216,8 @@ impl ComposedBindingV3 {
     }
 
     /// Translates the downstream leg's revealed witness into the upstream
-    /// leg's witness: `w_up = w_dn + δ`, over the integers, bound-checked.
+    /// leg's witness: `w_up = w_dn + δ`, over the integers, bound-checked
+    /// (§7.4 materializer seam).
     ///
     /// Fail-closed on both sides of the arithmetic: a sum outside the
     /// cross-curve range refuses (corrupted operand, I1), and a sum that
@@ -1097,19 +1249,30 @@ impl ComposedBindingV3 {
     }
 }
 
-/// The V1 route-shape and ladder checks, minus the shared-point equality
-/// V3 abolishes: each leg's point must decode to a real curve point on its
-/// own, and the two points must DIFFER (I8) — audits that asserted
-/// equality flip to asserting the committed relation, which
-/// [`ComposedBindingV3::bind`] does through the relation proof.
+/// §7.2 step 1: each leg's point must decode to a real curve point on its
+/// own, and the two points must DIFFER — equal points mean `δ = 0`, which
+/// silently reintroduces the disclosure and is dishonest by range (I8).
+fn validate_v3_leg_points(
+    upstream: &SettlementTermsV1,
+    downstream: &SettlementTermsV1,
+) -> Result<(), ComposerRefusal> {
+    adapter_evm::binding::adaptor_address(&upstream.adaptor_point_sec1)
+        .map_err(|_| ComposerRefusal::InvalidAdaptorPoint)?;
+    adapter_evm::binding::adaptor_address(&downstream.adaptor_point_sec1)
+        .map_err(|_| ComposerRefusal::InvalidAdaptorPoint)?;
+    if upstream.adaptor_point_sec1 == downstream.adaptor_point_sec1 {
+        return Err(ComposerRefusal::EqualLegPoints);
+    }
+    Ok(())
+}
+
+/// §7.2 step 4: the existing V2 route-shape preconditions, unchanged —
+/// minus the shared-adaptor-point checks V3 abolishes (those flip into
+/// [`validate_v3_leg_points`] and the committed-relation proof).
 fn validate_v3_route_shape(
     upstream: &SettlementTermsV1,
     downstream: &SettlementTermsV1,
-    policy: ComposedWindowPolicyV1,
 ) -> Result<(), ComposerRefusal> {
-    if policy.hub_margin == 0 || policy.counterparty_margin == 0 {
-        return Err(ComposerRefusal::ZeroSafetyMargin);
-    }
     upstream
         .validate()
         .map_err(|_| ComposerRefusal::InvalidTerms)?;
@@ -1130,16 +1293,6 @@ fn validate_v3_route_shape(
     {
         return Err(ComposerRefusal::SettlementsNotDistinct);
     }
-    // Per-leg points: each must be a real curve point; equal points would
-    // mean a zero offset, which defeats the purpose and is impossible for
-    // an honest δ ∈ [1, 2^251).
-    adapter_evm::binding::adaptor_address(&upstream.adaptor_point_sec1)
-        .map_err(|_| ComposerRefusal::InvalidAdaptorPoint)?;
-    adapter_evm::binding::adaptor_address(&downstream.adaptor_point_sec1)
-        .map_err(|_| ComposerRefusal::InvalidAdaptorPoint)?;
-    if upstream.adaptor_point_sec1 == downstream.adaptor_point_sec1 {
-        return Err(ComposerRefusal::EqualLegPoints);
-    }
     if upstream.dom_leg.chain_id != downstream.dom_leg.chain_id {
         return Err(ComposerRefusal::HubChainMismatch);
     }
@@ -1154,78 +1307,57 @@ fn validate_v3_route_shape(
     {
         return Err(ComposerRefusal::InvalidHubMechanism);
     }
-    // The same-clock ladder, exactly as V1 spells it (module docs §3).
-    match (upstream.dom_leg.deadline, downstream.dom_leg.deadline) {
-        (TimelockSpec::BlockHeight { value: up }, TimelockSpec::BlockHeight { value: dn }) => {
-            if !rung_holds(up, dn, policy.hub_margin) {
-                return Err(ComposerRefusal::UnsafeComposedWindow);
-            }
-        }
-        (
-            TimelockSpec::TimestampSeconds { value: up },
-            TimelockSpec::TimestampSeconds { value: dn },
-        ) => {
-            if !rung_holds(up, dn, policy.hub_margin) {
-                return Err(ComposerRefusal::UnsafeComposedWindow);
-            }
-        }
-        _ => return Err(ComposerRefusal::MixedTimelockDomains),
-    }
-    match (
-        upstream.counterparty_leg.deadline,
-        downstream.counterparty_leg.deadline,
-    ) {
-        (
-            TimelockSpec::TimestampSeconds { value: up },
-            TimelockSpec::TimestampSeconds { value: dn },
-        ) => {
-            if !rung_holds(up, dn, policy.counterparty_margin) {
-                return Err(ComposerRefusal::UnsafeComposedWindow);
-            }
-        }
-        (TimelockSpec::BlockHeight { value: up }, TimelockSpec::BlockHeight { value: dn }) => {
-            if upstream.counterparty_leg.chain_id != downstream.counterparty_leg.chain_id {
-                return Err(ComposerRefusal::CrossChainClockMismatch);
-            }
-            if !rung_holds(up, dn, policy.counterparty_margin) {
-                return Err(ComposerRefusal::UnsafeComposedWindow);
-            }
-        }
-        _ => return Err(ComposerRefusal::MixedTimelockDomains),
-    }
     if upstream.dom_leg.amount != downstream.dom_leg.amount {
         return Err(ComposerRefusal::DomTransitMismatch);
     }
     Ok(())
 }
 
-/// The V3 digest: `BLAKE2b-256(domain-V3 || len(up) || up-canonical ||
-/// len(dn) || dn-canonical || margins BE || A_up || A_dn)` — the A3
-/// pattern of V1, extended with both fixed-width compressed leg points
-/// (DR-PRIV-001 §1.5).
+/// The V3 digest pipeline: the V2 commitment fields under the V3 domain,
+/// extended with both fixed-width compressed leg points and — for the
+/// final digest only — the 97-byte relation proof (§7.1). `proof: None`
+/// yields the PREIMAGE the relation proof's challenge binds; committing
+/// the proof into its own challenge would be circular.
 fn v3_binding_digest(
     upstream: &SettlementTermsV1,
     downstream: &SettlementTermsV1,
-    policy: ComposedWindowPolicyV1,
+    route_scope: &Digest32,
+    facts: &V2TimeProofFacts,
+    proof: Option<&leg_blinding::OffsetRelationProofV1>,
 ) -> Result<Digest32, ComposerRefusal> {
-    let up_bytes = upstream
+    let upstream_bytes = upstream
         .canonical_bytes()
         .map_err(|_| ComposerRefusal::InvalidTerms)?;
-    let dn_bytes = downstream
+    let downstream_bytes = downstream
         .canonical_bytes()
         .map_err(|_| ComposerRefusal::InvalidTerms)?;
-    let mut h = Blake2bVar::new(32).map_err(|_| ComposerRefusal::HashInitialization)?;
-    h.update(COMPOSED_BINDING_DOMAIN_V3);
-    h.update(&(up_bytes.len() as u64).to_be_bytes());
-    h.update(&up_bytes);
-    h.update(&(dn_bytes.len() as u64).to_be_bytes());
-    h.update(&dn_bytes);
-    h.update(&policy.hub_margin.to_be_bytes());
-    h.update(&policy.counterparty_margin.to_be_bytes());
-    h.update(&upstream.adaptor_point_sec1);
-    h.update(&downstream.adaptor_point_sec1);
+    let upstream_len =
+        u64::try_from(upstream_bytes.len()).map_err(|_| ComposerRefusal::InvalidTerms)?;
+    let downstream_len =
+        u64::try_from(downstream_bytes.len()).map_err(|_| ComposerRefusal::InvalidTerms)?;
+    let mut hash = Blake2bVar::new(32).map_err(|_| ComposerRefusal::HashInitialization)?;
+    hash.update(COMPOSED_BINDING_DOMAIN_V3);
+    hash.update(&upstream_len.to_be_bytes());
+    hash.update(&upstream_bytes);
+    hash.update(&downstream_len.to_be_bytes());
+    hash.update(&downstream_bytes);
+    hash.update(route_scope);
+    hash.update(&facts.policy_digest);
+    hash.update(&facts.evidence_digest);
+    hash.update(&facts.binding_digest);
+    hash.update(&facts.evidence_sequence.to_be_bytes());
+    hash.update(&facts.issued_at_seconds.to_be_bytes());
+    hash.update(&facts.valid_until_seconds.to_be_bytes());
+    hash.update(&facts.validated_at_seconds.to_be_bytes());
+    update_time_rung_digest(&mut hash, facts.hub);
+    update_time_rung_digest(&mut hash, facts.counterparty);
+    hash.update(&upstream.adaptor_point_sec1);
+    hash.update(&downstream.adaptor_point_sec1);
+    if let Some(proof) = proof {
+        hash.update(&proof.to_canonical_bytes());
+    }
     let mut binding_digest = [0u8; 32];
-    h.finalize_variable(&mut binding_digest)
+    hash.finalize_variable(&mut binding_digest)
         .map_err(|_| ComposerRefusal::HashInitialization)?;
     Ok(binding_digest)
 }

@@ -5265,6 +5265,7 @@ dependencies = [
  "hex",
  "kaystra-core",
  "proptest",
+ "rand 0.8.6",
  "rfq",
  "route-time-anchor",
  "sigma_fun",

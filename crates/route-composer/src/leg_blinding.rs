@@ -45,9 +45,11 @@ pub const LEG_OFFSET_RELATION_DOMAIN_V1: &[u8] =
 /// Domain for the deterministic relation-proof nonce (RFC-6979 style: a
 /// broken RNG can never leak `δ` through nonce reuse — DR-PRIV-001 I5).
 const LEG_OFFSET_NONCE_DOMAIN_V1: &[u8] = b"DOM-INTEROP/ROUTE-COMPOSER/LEG-OFFSET-NONCE/V1\0";
-/// The reserved role byte in the closed DLEQ role registry
-/// (`xmr_dleq_sigma::ROLES_V1` successor; NAR-DC-P1-010 discipline).
-pub const ROLE_LEG_OFFSET_RELATION: u8 = 4;
+/// The reserved role byte, re-exported from the closed DLEQ role
+/// registry (`xmr_dleq_sigma::ROLES_V1`). Minted ONLY there — this crate
+/// never defines a role byte of its own (L1 package §6; the static role
+/// gate refuses any out-of-registry mint).
+pub use xmr_dleq_sigma::ROLE_LEG_OFFSET_RELATION;
 
 /// Wire length of a serialized [`OffsetRelationProofV1`]:
 /// 33 (compressed R) ‖ 32 (s) ‖ 32 (binding digest echoed for audit).
@@ -511,6 +513,75 @@ mod tests {
             relation_point_from_committed_legs(&a_from, &a_from),
             Err(LegBlindingErrorV1::RelationProof)
         ));
+    }
+
+    /// L1-T6 (transcript half): a proof whose challenge was computed
+    /// under a swapped domain or role byte never verifies, even with the
+    /// right δ. The forge helper mirrors the prover exactly, so the
+    /// canonical spelling passing proves the helper honest.
+    #[test]
+    fn transcript_domain_or_role_swap_refuses() {
+        fn forge(
+            delta: &LegOffsetV1,
+            digest: &[u8; 32],
+            domain: &[u8],
+            role: u8,
+        ) -> (Point, OffsetRelationProofV1) {
+            let delta_scalar = Scalar::<Secret, Zero>::from_bytes(*delta.0)
+                .and_then(|scalar| scalar.non_zero())
+                .unwrap();
+            let relation_point = g!(delta_scalar * G).normalize().public();
+            let nonce = Scalar::<Secret, Zero>::from_bytes_mod_order([0x42u8; 32])
+                .non_zero()
+                .unwrap();
+            let nonce_point = g!(nonce * G).normalize().public();
+            let mut hasher = Blake2bVar::new(32).unwrap();
+            hasher.update(domain);
+            hasher.update(&[role]);
+            hasher.update(&nonce_point.to_bytes());
+            hasher.update(&relation_point.to_bytes());
+            hasher.update(digest);
+            let mut challenge = [0u8; 32];
+            hasher.finalize_variable(&mut challenge).unwrap();
+            let challenge = Scalar::<Public, Zero>::from_bytes_mod_order(challenge);
+            let response = s!(nonce + challenge * delta_scalar);
+            (
+                relation_point,
+                OffsetRelationProofV1 {
+                    nonce_point: nonce_point.to_bytes(),
+                    response: response.to_bytes(),
+                    binding_digest: *digest,
+                },
+            )
+        }
+
+        let delta = derive_leg_offset_v1(&[5u8; 32], &[6u8; 32], 0, 1).unwrap();
+        let digest = [8u8; 32];
+        let (point, honest) = forge(
+            &delta,
+            &digest,
+            LEG_OFFSET_RELATION_DOMAIN_V1,
+            ROLE_LEG_OFFSET_RELATION,
+        );
+        verify_offset_relation_v1(&point, &honest, &digest).unwrap();
+        let (point, swapped_domain) = forge(
+            &delta,
+            &digest,
+            LEG_WITNESS_DERIVE_DOMAIN_V1,
+            ROLE_LEG_OFFSET_RELATION,
+        );
+        assert!(verify_offset_relation_v1(&point, &swapped_domain, &digest).is_err());
+        let (point, swapped_role) = forge(&delta, &digest, LEG_OFFSET_RELATION_DOMAIN_V1, 1);
+        assert!(verify_offset_relation_v1(&point, &swapped_role, &digest).is_err());
+    }
+
+    /// L1-T11 (module half): `Debug` never exposes secret bytes.
+    #[test]
+    fn secret_types_debug_is_redacted() {
+        let w = derive_leg_witness_v1(&[1u8; 32], &[2u8; 32], 0).unwrap();
+        let d = derive_leg_offset_v1(&[1u8; 32], &[2u8; 32], 0, 1).unwrap();
+        assert_eq!(format!("{w:?}"), "LegWitnessV1(REDACTED)");
+        assert_eq!(format!("{d:?}"), "LegOffsetV1(REDACTED)");
     }
 
     #[test]
