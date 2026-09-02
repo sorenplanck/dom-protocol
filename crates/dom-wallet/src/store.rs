@@ -297,7 +297,7 @@ pub struct PendingSendSlate {
 /// These bytes are persisted only inside the encrypted wallet payload. They
 /// must never be written to the plaintext journal. The sender nonce is
 /// single-use and must be discarded once finalization is implemented.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct PendingSendSlateSecrets {
     /// Sender excess blinding `x_S` used for the aggregate kernel key.
     #[serde(with = "serde_blinding32")]
@@ -318,11 +318,30 @@ pub struct PendingReceiveSlate {
 ///
 /// These bytes are persisted only inside the encrypted wallet payload. They
 /// must never be written to the plaintext journal or exported slate.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct PendingReceiveSlateSecrets {
     /// Recipient output blinding `x_R`.
     #[serde(with = "serde_blinding32")]
     pub recipient_output_blinding: [u8; 32],
+}
+
+// The secret-bearing slate structs never print their scalars: a `{:?}` in any
+// log or error path yields only the redaction marker, never key material.
+impl core::fmt::Debug for PendingSendSlateSecrets {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PendingSendSlateSecrets")
+            .field("sender_excess_blinding", &"<redacted>")
+            .field("sender_nonce", &"<redacted>")
+            .finish()
+    }
+}
+
+impl core::fmt::Debug for PendingReceiveSlateSecrets {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PendingReceiveSlateSecrets")
+            .field("recipient_output_blinding", &"<redacted>")
+            .finish()
+    }
 }
 
 /// A transaction pending confirmation.
