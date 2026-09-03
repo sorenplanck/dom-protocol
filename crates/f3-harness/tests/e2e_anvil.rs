@@ -1392,7 +1392,7 @@ fn anvil_evm_to_dom_direction() {
             observed_binding: binding,
             observed_height: evidence.block_number,
             finalized_height: evidence.finalized_height,
-            revealed,
+            revealed: revealed.clone(),
             pre_signature: &dom_leg.pre,
             dom_now: TimelockPoint::height(dom.height()),
             dom_deadline: TimelockPoint::height(

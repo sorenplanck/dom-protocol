@@ -1133,7 +1133,7 @@ dependencies = [
 
 [[package]]
 name = "dom-chain"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake2",
  "dom-consensus",
@@ -1145,7 +1145,6 @@ dependencies = [
  "dom-store",
  "hex",
  "primitive-types",
- "sha2",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -1153,7 +1152,7 @@ dependencies = [
 
 [[package]]
 name = "dom-config"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dom-core",
  "serde",
@@ -1163,7 +1162,7 @@ dependencies = [
 
 [[package]]
 name = "dom-consensus"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dom-core",
  "dom-crypto",
@@ -1176,7 +1175,7 @@ dependencies = [
 
 [[package]]
 name = "dom-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hex",
  "subtle",
@@ -1186,9 +1185,10 @@ dependencies = [
 
 [[package]]
 name = "dom-crypto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake2",
+ "chacha20poly1305",
  "dom-core",
  "grin_secp256k1zkp",
  "hex",
@@ -1206,7 +1206,7 @@ dependencies = [
 
 [[package]]
 name = "dom-mempool"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dom-consensus",
  "dom-core",
@@ -1220,7 +1220,7 @@ dependencies = [
 
 [[package]]
 name = "dom-node"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "dom-chain",
@@ -1234,7 +1234,9 @@ dependencies = [
  "dom-rpc",
  "dom-serialization",
  "dom-store",
+ "dom-tx",
  "dom-wallet",
+ "dom-wallet-core-api",
  "dom-wire",
  "futures",
  "hex",
@@ -1251,7 +1253,7 @@ dependencies = [
 
 [[package]]
 name = "dom-pmmr"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dom-core",
  "dom-crypto",
@@ -1260,7 +1262,7 @@ dependencies = [
 
 [[package]]
 name = "dom-pow"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake2",
  "dom-core",
@@ -1268,11 +1270,12 @@ dependencies = [
  "primitive-types",
  "randomx-rs",
  "thiserror 1.0.69",
+ "tracing",
 ]
 
 [[package]]
 name = "dom-rpc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "dirs 5.0.1",
@@ -1296,7 +1299,7 @@ dependencies = [
 
 [[package]]
 name = "dom-serialization"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dom-core",
  "thiserror 1.0.69",
@@ -1304,7 +1307,7 @@ dependencies = [
 
 [[package]]
 name = "dom-slate"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dom-consensus",
  "dom-core",
@@ -1314,11 +1317,12 @@ dependencies = [
  "k256",
  "rand 0.8.6",
  "thiserror 1.0.69",
+ "zeroize",
 ]
 
 [[package]]
 name = "dom-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake2",
  "dom-consensus",
@@ -1333,7 +1337,7 @@ dependencies = [
 
 [[package]]
 name = "dom-tx"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dom-consensus",
  "dom-core",
@@ -1344,7 +1348,7 @@ dependencies = [
 
 [[package]]
 name = "dom-wallet"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "bip39",
@@ -1375,16 +1379,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "dom-wallet-core-api"
+version = "0.2.0"
+dependencies = [
+ "dom-consensus",
+ "dom-core",
+ "hex",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "dom-wallet-crypto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "chacha20poly1305",
  "hkdf",
  "rand 0.8.6",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 1.0.69",
  "zeroize",
 ]
@@ -1429,7 +1445,7 @@ dependencies = [
 
 [[package]]
 name = "dom-wallet-keys"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bip39",
  "hmac",
@@ -1442,7 +1458,7 @@ dependencies = [
 
 [[package]]
 name = "dom-wallet2"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dom-consensus",
  "dom-core",
@@ -1452,16 +1468,18 @@ dependencies = [
  "dom-tx",
  "dom-wallet-crypto",
  "dom-wallet-keys",
+ "fs2",
  "hex",
  "reqwest 0.12.28",
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "zeroize",
 ]
 
 [[package]]
 name = "dom-wire"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake2",
  "dom-config",

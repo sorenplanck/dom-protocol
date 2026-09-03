@@ -1,4 +1,9 @@
-//! Chain profiles — NOT RATIFIED.
+//! Chain profiles — RATIFIED (explicit operator decision, 2026-09-02; the
+//! signed register is
+//! `docs/interop/ratifications/e13-executadas/RATIFICACAO-DECISOES-EXECUTADAS-v2.md`
+//! §2.4, kept local by policy). The ratification covers the profile
+//! mechanism and its refusals; it ratifies NO concrete network profile —
+//! every network still requires its own operator-supplied numbers.
 //!
 //! The swap-tab design (agreed with the operator) says: "a network is
 //! enabled by adding a profile, not by touching the engine". This crate

@@ -1,0 +1,60 @@
+# G-F4 Sepolia slash (F4 spec §12 item 3).
+#
+# Manual-only: this spends real (testnet) funds and waits real Ethereum
+# finality twice (~40 min typical), so it never runs on push. Same secrets
+# as the F3 workflow:
+#
+#   SEPOLIA_RPC_URL       endpoint serving the `finalized` tag (chain 11155111)
+#   SEPOLIA_PRIVATE_KEY   throwaway key funded with ~0.05 Sepolia ETH
+#
+# The script refuses any chain that is not Sepolia, never prints the key,
+# and writes its evidence (tx hashes, terminal state) to artifacts/sepolia,
+# uploaded here so the gate record survives the runner.
+name: f4-sepolia
+on:
+  workflow_dispatch:
+    inputs:
+      lock_address:
+        description: >-
+          Existing ConditionLockV2 address to reuse (skips the deploy and
+          its finality wait). Leave empty to deploy fresh. The harness
+          still verifies the runtime bytecode at this address against the
+          tree before trusting it.
+        required: false
+        default: ""
+
+jobs:
+  sepolia-slash:
+    runs-on: ubuntu-latest
+    # Deploy finality + two run finality waits, each bounded at 40 min.
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+      - name: Install pinned Solidity dependencies
+        working-directory: contracts
+        run: |
+          forge install OpenZeppelin/openzeppelin-contracts@v5.1.0 --no-git
+          forge install foundry-rs/forge-std@v1.9.6 --no-git
+      - name: Locate the Foundry binaries
+        run: |
+          echo "FORGE_BIN=$(command -v forge)" >> "$GITHUB_ENV"
+          echo "CAST_BIN=$(command -v cast)" >> "$GITHUB_ENV"
+      - name: Run the G-F4 Sepolia slash
+        env:
+          SEPOLIA_RPC_URL: ${{ secrets.SEPOLIA_RPC_URL }}
+          SEPOLIA_PRIVATE_KEY: ${{ secrets.SEPOLIA_PRIVATE_KEY }}
+          SEPOLIA_LOCK: ${{ inputs.lock_address }}
+          SEPOLIA_YES: "1"
+        run: ./scripts/f4_sepolia_slash.sh
+      - name: Upload the evidence directory
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f4-sepolia-evidence
+          path: artifacts/sepolia
+          if-no-files-found: ignore

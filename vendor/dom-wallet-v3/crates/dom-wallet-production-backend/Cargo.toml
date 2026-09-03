@@ -1,0 +1,24 @@
+[package]
+name = "dom-wallet-production-backend"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+dom-node.workspace = true
+dom-wallet-core-api.workspace = true
+dom-wallet-core-protocol = { path = "../dom-wallet-core-protocol" }
+dom-wallet-core-recovery = { path = "../dom-wallet-core-recovery" }
+dom-wallet-core-restore = { path = "../dom-wallet-core-restore" }
+dom-wallet-core-submit = { path = "../dom-wallet-core-submit" }
+dom-wallet-core-sync = { path = "../dom-wallet-core-sync" }
+dom-wallet-crypto = { package = "dom-wallet-v3-crypto", path = "../dom-wallet-crypto" }
+dom-wallet-embedded-core = { path = "../dom-wallet-embedded-core" }
+dom-wallet-storage = { path = "../dom-wallet-storage" }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

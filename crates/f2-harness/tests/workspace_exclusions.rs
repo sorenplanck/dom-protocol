@@ -26,6 +26,27 @@ const ALLOWED_EXCLUSIONS: &[(&str, &str)] = &[
          its own workspace runs 11 tests including the syscall-stubbed \
          native-path suite, and scripts/run-solana-v8-gates.sh drives them",
     ),
+    // Ratified late (2026-09-02, stage 13): both entries below entered the
+    // exclude list at stage 12 while this pin's gate was neutralized, so the
+    // deliberate-diff moment this test exists for is happening now instead.
+    (
+        "vendor/dom-wallet-v3",
+        "the locally vendored DOM Wallet V3 (its own workspace), reached \
+         only through direct path dependencies in [workspace.dependencies] \
+         — never as members. It is NOT ungated: the six pulled crates \
+         compile, lint and test through every dependent (dom-leg's \
+         compositor suite among them), and the vendored copy carries only \
+         the minimal Zeroizing adaptation, mirrored upstream by the operator",
+    ),
+    (
+        "crates/deploy-genconfig",
+        "the provisioning tool that enables dom-interopd's `production` \
+         features: workspace membership would unify `production` with the \
+         default development set and trip the exclusivity compile_error!. \
+         It is NOT ungated: built and tested from its own directory, exactly \
+         like wallet-desktop, and its cycle gate (tests/cycle_gate.rs) runs \
+         a positive verify plus three mutation classes",
+    ),
 ];
 
 fn declared_exclusions(manifest: &str) -> Vec<String> {

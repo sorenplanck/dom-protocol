@@ -10,6 +10,18 @@ fn test_genesis() -> Hash256 {
     Hash256::from_bytes([0x42u8; 32])
 }
 
+/// The wallet envelope audit requires an owner-only (0700) parent directory;
+/// a raw `TempDir` inherits the process umask and is refused on purpose.
+fn owner_only_tempdir() -> TempDir {
+    let directory = TempDir::new().unwrap();
+    std::fs::set_permissions(
+        directory.path(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .unwrap();
+    directory
+}
+
 fn make_output(value: u64, height: u64, is_coinbase: bool) -> OwnedOutput {
     let bf = BlindingFactor::random();
     let commitment = Commitment::commit(value, &bf);
@@ -61,7 +73,7 @@ fn test_coinbase_mature() {
 
 #[test]
 fn test_wallet_create_and_open() {
-    let temp = TempDir::new().unwrap();
+    let temp = owner_only_tempdir();
     let path = temp.path().join("wallet.dat");
 
     let wallet = Wallet::create(&path, "password123", Network::Mainnet, &test_genesis()).unwrap();
@@ -74,7 +86,7 @@ fn test_wallet_create_and_open() {
 
 #[test]
 fn test_wallet_wrong_password() {
-    let temp = TempDir::new().unwrap();
+    let temp = owner_only_tempdir();
     let path = temp.path().join("wallet.dat");
 
     Wallet::create(&path, "password123", Network::Mainnet, &test_genesis()).unwrap();
@@ -150,7 +162,7 @@ fn test_wallet_build_spend_transaction() {
 fn test_wallet_spend_persists_across_reopen() {
     use dom_consensus::{validate_balance_equation, validate_transaction_structure};
 
-    let temp = TempDir::new().unwrap();
+    let temp = owner_only_tempdir();
     let path = temp.path().join("wallet.dat");
 
     // 1. Create wallet and add output
@@ -183,7 +195,7 @@ fn test_wallet_spend_persists_across_reopen() {
 
 #[test]
 fn test_canonical_block_confirms_pending_spend_after_reopen() {
-    let temp = TempDir::new().unwrap();
+    let temp = owner_only_tempdir();
     let path = temp.path().join("wallet.dat");
 
     let mut wallet =
@@ -230,7 +242,7 @@ fn test_canonical_block_confirms_pending_spend_after_reopen() {
 
 #[test]
 fn test_conflicting_canonical_spend_releases_unconsumed_reservations() {
-    let temp = TempDir::new().unwrap();
+    let temp = owner_only_tempdir();
     let path = temp.path().join("wallet.dat");
 
     let mut wallet =
@@ -301,7 +313,7 @@ fn test_conflicting_canonical_spend_releases_unconsumed_reservations() {
 
 #[test]
 fn test_new_wallet_starts_unlocked() {
-    let temp = TempDir::new().unwrap();
+    let temp = owner_only_tempdir();
     let path = temp.path().join("wallet.dat");
     let w = Wallet::create(&path, "password123", Network::Mainnet, &test_genesis()).unwrap();
     assert!(w.is_unlocked());
@@ -311,7 +323,7 @@ fn test_new_wallet_starts_unlocked() {
 
 #[test]
 fn test_opened_wallet_starts_unlocked() {
-    let temp = TempDir::new().unwrap();
+    let temp = owner_only_tempdir();
     let path = temp.path().join("wallet.dat");
     Wallet::create(&path, "password123", Network::Mainnet, &test_genesis()).unwrap();
     let w = Wallet::open(&path, "password123").unwrap();
@@ -321,7 +333,7 @@ fn test_opened_wallet_starts_unlocked() {
 
 #[test]
 fn test_lock_transitions_to_locked() {
-    let temp = TempDir::new().unwrap();
+    let temp = owner_only_tempdir();
     let path = temp.path().join("wallet.dat");
     let mut w = Wallet::create(&path, "password123", Network::Mainnet, &test_genesis()).unwrap();
     assert!(w.is_unlocked());
@@ -333,7 +345,7 @@ fn test_lock_transitions_to_locked() {
 
 #[test]
 fn test_lock_is_idempotent() {
-    let temp = TempDir::new().unwrap();
+    let temp = owner_only_tempdir();
     let path = temp.path().join("wallet.dat");
     let mut w = Wallet::create(&path, "password123", Network::Mainnet, &test_genesis()).unwrap();
     w.lock();
@@ -344,7 +356,7 @@ fn test_lock_is_idempotent() {
 
 #[test]
 fn test_save_while_locked_returns_locked_error() {
-    let temp = TempDir::new().unwrap();
+    let temp = owner_only_tempdir();
     let path = temp.path().join("wallet.dat");
     let mut w = Wallet::create(&path, "password123", Network::Mainnet, &test_genesis()).unwrap();
     w.lock();
@@ -381,7 +393,7 @@ fn test_scan_block_while_locked_is_noop() {
 
 #[test]
 fn test_unlock_with_wrong_password_is_rejected() {
-    let temp = TempDir::new().unwrap();
+    let temp = owner_only_tempdir();
     let path = temp.path().join("wallet.dat");
     let mut w = Wallet::create(&path, "correct_pw", Network::Mainnet, &test_genesis()).unwrap();
     w.lock();
@@ -401,7 +413,7 @@ fn test_unlock_with_wrong_password_is_rejected() {
 
 #[test]
 fn test_unlock_with_correct_password_restores_session() {
-    let temp = TempDir::new().unwrap();
+    let temp = owner_only_tempdir();
     let path = temp.path().join("wallet.dat");
     let mut w = Wallet::create(&path, "correct_pw", Network::Mainnet, &test_genesis()).unwrap();
     w.lock();
@@ -417,7 +429,7 @@ fn test_unlock_with_correct_password_restores_session() {
 fn test_lock_unlock_roundtrip_preserves_disk_state() {
     // Build a wallet with a pending tx; lock; unlock; verify the
     // pending tx, the reserved output, and the balance all survived.
-    let temp = TempDir::new().unwrap();
+    let temp = owner_only_tempdir();
     let path = temp.path().join("wallet.dat");
 
     let mut wallet =
@@ -458,7 +470,7 @@ fn test_locked_wallet_then_reopen_matches_pre_lock_state() {
     // Models restart-after-lock: the operator locks the wallet, the
     // process exits (drop), a new process opens the wallet with the
     // password. The recovered state must equal the pre-lock state.
-    let temp = TempDir::new().unwrap();
+    let temp = owner_only_tempdir();
     let path = temp.path().join("wallet.dat");
 
     let mut wallet =
@@ -499,7 +511,7 @@ fn test_multiple_wrong_password_attempts_keep_locked() {
     // Locking semantics under repeated bad-password attempts: each
     // attempt is independently rejected; the wallet never accepts a
     // wrong password "by accident" across attempts.
-    let temp = TempDir::new().unwrap();
+    let temp = owner_only_tempdir();
     let path = temp.path().join("wallet.dat");
     let mut w = Wallet::create(&path, "right", Network::Mainnet, &test_genesis()).unwrap();
     w.lock();

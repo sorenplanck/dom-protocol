@@ -1,0 +1,16 @@
+{
+  "schema": "dom-interop/f4/anvil-manifest/v1",
+  "testedHead": "9f415c7c6642bab0495514b01e55b66fb6af5c0a",
+  "dirtyWorktreeEntries": 1,
+  "chainId": "31337",
+  "contract": "0x5fbdb2315678afecb367f032d93f642f64180aa3",
+  "deployedRuntimeCodehash": "0x33c4df043837e30e9e0ff5a71db933849fad94b22c0885734d7f940db8ed5737",
+  "f3Scenarios": ["anvil_dom_to_evm_direction", "log_pages_cover_every_block_exactly_once", "anvil_engine_crash_recovers_to_the_same_outcome", "anvil_erc20_deferred_payout_then_withdraw_in_instalments", "anvil_erc20_estimated_gas_silently_degrades_to_the_pull_path", "anvil_erc20_open_claim_and_observe", "anvil_erc20_refund_by_deadline", "anvil_evm_to_dom_direction", "anvil_pinned_signatures_still_match_the_compiled_contracts", "anvil_refund_by_deadline", "anvil_reorg_rewinds_to_the_common_ancestor_and_t_stays_known", "anvil_settlement_gas_limits_clear_the_deployed_push_threshold"],
+  "f4Scenarios": ["anvil_cap_and_binding_refusals_touch_nothing", "anvil_release_path_is_executed_by_a_third_party", "anvil_reorg_across_the_claim_is_undecidable_not_a_verdict", "anvil_slash_path_survives_a_crash_at_every_transition", "anvil_uncertified_collateral_releases_by_timeout", "anvil_wrong_scalar_slash_reverts_on_chain"],
+  "observedRefusals": ["manifest: refusal over-cap-open = invalid assurance policy: collateral exceeds the compensation cap", "manifest: refusal verifier-terms-binding = policy does not match the configured bond", "manifest: refusal collateral-terms = assurance transition refused: terms hash does not match the protected obligation", "manifest: refusal claim-terms = assurance transition refused: terms hash does not match the protected obligation"],
+  "txCountDuringRefusals": 0,
+  "journal": "manifest: journal-terminal = ClaimWindow revision = 3",
+  "f3Summary": "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 28.04s",
+  "f4Summary": "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.57s",
+  "verdict": "PASS"
+}

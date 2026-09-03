@@ -1,0 +1,25 @@
+[package]
+name = "dom-wallet-node-manager"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+app-test-support = []
+
+[dependencies]
+dom-sidecar.workspace = true
+dom-wallet-updater = { path = "../dom-wallet-updater" }
+rand.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+minisign = "0.9"
+sha2.workspace = true
+tempfile.workspace = true

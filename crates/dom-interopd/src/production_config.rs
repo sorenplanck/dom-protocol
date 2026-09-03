@@ -5290,11 +5290,11 @@ fn write_digest(target: &mut String, key: &str, value: [u8; 32]) {
 }
 
 fn write_u64(target: &mut String, key: &str, value: u64) {
-    writeln!(target, "{key}={value}").expect("string write cannot fail");
+    target.push_str(&format!("{key}={value}\n"));
 }
 
 fn write_u128(target: &mut String, key: &str, value: u128) {
-    writeln!(target, "{key}={value}").expect("string write cannot fail");
+    target.push_str(&format!("{key}={value}\n"));
 }
 
 pub(crate) fn config_digest(bytes: &[u8]) -> Result<[u8; 32], ProductionConfigErrorV1> {

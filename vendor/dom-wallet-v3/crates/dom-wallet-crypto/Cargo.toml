@@ -1,0 +1,26 @@
+[package]
+# Package renamed on 2026-09-02 (Stage 13): the node already ships a package
+# called `dom-wallet-crypto` (crates/dom-wallet-crypto, 0.2.0) and the XMR v7
+# static validator refuses two packages of one name in one tree. The library
+# keeps its crate name, so every `use dom_wallet_crypto::` in this workspace
+# and every `dom-wallet-crypto = { package = "dom-wallet-v3-crypto", … }`
+# dependency key stay exactly as they were.
+name = "dom-wallet-v3-crypto"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+argon2.workspace = true
+chacha20poly1305.workspace = true
+hkdf.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[lib]
+name = "dom_wallet_crypto"

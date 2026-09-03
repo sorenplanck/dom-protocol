@@ -2380,6 +2380,18 @@ mod tests {
     use dom_tx::slate::OutputCommitmentAndProof;
     use tempfile::tempdir;
 
+    // The envelope audit requires an owner-only (0700) parent; `tempdir()`
+    // inherits the process umask, so every on-disk fixture pins the mode.
+    fn owner_only_tempdir() -> tempfile::TempDir {
+        let directory = tempdir().unwrap();
+        std::fs::set_permissions(
+            directory.path(),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
+        directory
+    }
+
     fn fixed_output(value: u64, height: u64, blinding_byte: u8) -> OwnedOutput {
         let blinding = BlindingFactor::from_bytes([blinding_byte; 32]).unwrap();
         let commitment = Commitment::commit(value, &blinding);
@@ -2680,7 +2692,7 @@ mod tests {
 
     #[test]
     fn apply_canonical_block_journals_confirmed_receive_slate() {
-        let dir = tempdir().unwrap();
+        let dir = owner_only_tempdir();
         let genesis = Hash256::from_bytes([43u8; 32]);
         let mut recipient_dir =
             WalletDir::create(dir.path(), "pw", Network::Regtest, &genesis).unwrap();
@@ -2719,7 +2731,7 @@ mod tests {
 
     #[test]
     fn canonical_rescan_confirms_received_slate_output_after_restart() {
-        let dir = tempdir().unwrap();
+        let dir = owner_only_tempdir();
         let genesis = Hash256::from_bytes([42u8; 32]);
         let mut recipient_dir =
             WalletDir::create(dir.path(), "pw", Network::Regtest, &genesis).unwrap();
@@ -2815,7 +2827,7 @@ mod tests {
         // return that key so mark_submitted finds the pending entry. The old
         // code passed tracking_tx_hash(&tx), so every slate finalize logged
         // "mark_submitted failed after submit: pending tx not found".
-        let dir = tempdir().unwrap();
+        let dir = owner_only_tempdir();
         let (mut sender, mut recipient) = slate_participants();
         // Journal must be attached before the spend so the Built event is
         // recorded and the Submitted transition has a record to advance.
@@ -2969,7 +2981,7 @@ mod tests {
 
     #[test]
     fn cancel_tx_keeps_memory_state_when_journal_append_fails() {
-        let dir = tempdir().unwrap();
+        let dir = owner_only_tempdir();
         let not_a_dir = dir.path().join("not-a-dir");
         std::fs::write(&not_a_dir, b"not a directory").unwrap();
         let (mut wallet, tx_hash, commitment) = wallet_with_pending_cancel(&not_a_dir);
@@ -2986,7 +2998,7 @@ mod tests {
 
     #[test]
     fn cancel_tx_updates_memory_state_when_journal_append_succeeds() {
-        let dir = tempdir().unwrap();
+        let dir = owner_only_tempdir();
         let (mut wallet, tx_hash, commitment) = wallet_with_pending_cancel(dir.path());
 
         wallet.cancel_tx(tx_hash).unwrap();
@@ -3005,7 +3017,7 @@ mod tests {
 
     #[test]
     fn verify_password_checks_ciphertext_without_unlocking() {
-        let dir = tempdir().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("w.dom");
         let genesis = Hash256::from_bytes([3u8; 32]);
         let mut wallet =

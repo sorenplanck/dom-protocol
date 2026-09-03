@@ -1,6 +1,6 @@
 [package]
 name = "solver"
-description = "DOM Interop — the reference solver: consumes an RfqV1 and produces an admissible, BIP340-signed QuoteV1 under an explicit pricing policy; gives the RFQ board a counterparty (NOT RATIFIED)"
+description = "DOM Interop — the reference solver: consumes an RfqV1 and produces an admissible, BIP340-signed QuoteV1 under an explicit pricing policy; gives the RFQ board a counterparty (RATIFIED 2026-09-02, explicit operator decision)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -181,9 +181,26 @@ impl WalletDir {
                     path
                 )));
             }
+            // Claiming an empty pre-made directory also pins the owner-only
+            // mode the envelope audit requires.
+            #[cfg(unix)]
+            std::fs::set_permissions(
+                path,
+                <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+            )
+            .map_err(|e| WalletError::Io(format!("restrict wallet directory: {e}")))?;
         } else {
             std::fs::create_dir_all(path)
                 .map_err(|e| WalletError::Io(format!("create wallet directory: {e}")))?;
+            // The envelope audit admits only an owner-only (0700) wallet
+            // directory; `create_dir_all` inherits the process umask, so the
+            // mode is pinned explicitly instead of depending on it.
+            #[cfg(unix)]
+            std::fs::set_permissions(
+                path,
+                <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+            )
+            .map_err(|e| WalletError::Io(format!("restrict wallet directory: {e}")))?;
         }
 
         // Acquire the lockfile FIRST so any concurrent create races
@@ -262,9 +279,26 @@ impl WalletDir {
                     path
                 )));
             }
+            // Claiming an empty pre-made directory also pins the owner-only
+            // mode the envelope audit requires.
+            #[cfg(unix)]
+            std::fs::set_permissions(
+                path,
+                <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+            )
+            .map_err(|e| WalletError::Io(format!("restrict wallet directory: {e}")))?;
         } else {
             std::fs::create_dir_all(path)
                 .map_err(|e| WalletError::Io(format!("create wallet directory: {e}")))?;
+            // The envelope audit admits only an owner-only (0700) wallet
+            // directory; `create_dir_all` inherits the process umask, so the
+            // mode is pinned explicitly instead of depending on it.
+            #[cfg(unix)]
+            std::fs::set_permissions(
+                path,
+                <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+            )
+            .map_err(|e| WalletError::Io(format!("restrict wallet directory: {e}")))?;
         }
 
         let lockfile_path = path.join(WALLET_LOCK_NAME);

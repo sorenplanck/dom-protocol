@@ -88,6 +88,7 @@ fn recipient() -> RecipientContextV1 {
         network_id: NETWORK,
         session_id: SESSION,
         route_id: ROUTE,
+        policy_version: 1,
     }
 }
 

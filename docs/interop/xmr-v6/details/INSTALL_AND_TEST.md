@@ -10,8 +10,8 @@
 ## Commands
 
 ```bash
-python3 scripts/apply-v6.py /home/leonardov/dom-protocol
-cd /home/leonardov/dom-protocol
+python3 scripts/apply-v6.py ~/dom-protocol
+cd ~/dom-protocol
 bash scripts/xmr-v6/run-v6-gates.sh
 ```
 

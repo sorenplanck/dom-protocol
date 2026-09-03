@@ -106,6 +106,22 @@ impl BudgetPolicyV1 {
         &self.bytes
     }
 
+    /// Derives the evidence-profile variant of this exact policy.
+    ///
+    /// Every budget bound is preserved byte-for-byte; only the profile tag
+    /// and the storage digest over it change, and the result is revalidated
+    /// through [`Self::from_bytes`]. This exists solely for the F7 wallet
+    /// composition, whose retained dual-custody journal is an evidence
+    /// store: the composition's economic validations still require the
+    /// caller's production-ratified policy before deriving this variant.
+    pub fn evidence_profile_variant(&self) -> Result<Self, CanonicalCodecError> {
+        let mut bytes = *self.as_bytes();
+        bytes[10] = BudgetPolicyProfileV1::EvidenceOnly as u8;
+        let digest = storage_hash(StorageHashDomainV1::BudgetPolicy, &bytes[..112]);
+        bytes[112..144].copy_from_slice(&digest);
+        Self::from_bytes(&bytes)
+    }
+
     /// Returns the closed policy profile.
     pub const fn profile(&self) -> BudgetPolicyProfileV1 {
         self.profile

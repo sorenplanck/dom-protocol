@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="480" viewBox="0 0 1600 480" role="img" aria-labelledby="title description">
+  <title id="title">DOM Wallet V3</title>
+  <desc id="description">A dark bronze and paper banner with an abstract protected-state motif, ledger geometry, and canonical continuity.</desc>
+  <defs>
+    <radialGradient id="bronzeGlow" cx="24%" cy="48%" r="54%">
+      <stop offset="0" stop-color="#b87333" stop-opacity="0.16"/>
+      <stop offset="0.5" stop-color="#7a4a22" stop-opacity="0.06"/>
+      <stop offset="1" stop-color="#0a0807" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="ledgerGrid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M48 0H0V48" fill="none" stroke="#2a2018" stroke-width="1"/>
+    </pattern>
+    <linearGradient id="bronzeRule" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#7a4a22" stop-opacity="0"/>
+      <stop offset="0.16" stop-color="#7a4a22" stop-opacity="0.82"/>
+      <stop offset="0.5" stop-color="#d4914a" stop-opacity="0.96"/>
+      <stop offset="0.84" stop-color="#7a4a22" stop-opacity="0.82"/>
+      <stop offset="1" stop-color="#7a4a22" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1600" height="480" fill="#0a0807"/>
+  <rect width="1600" height="480" fill="url(#bronzeGlow)"/>
+  <rect width="1600" height="480" fill="url(#ledgerGrid)" opacity="0.42"/>
+  <path d="M0 72H1600M0 408H1600" stroke="#2a2018" stroke-width="1"/>
+  <path d="M0 73H1600M0 407H1600" stroke="#3d2f22" stroke-opacity="0.42" stroke-width="1"/>
+
+  <g fill="none" stroke-linecap="square">
+    <path d="M56 344H164L208 300H322L366 256H484" stroke="#3d2f22" stroke-width="1.5"/>
+    <path d="M72 376H188L232 332H338L382 288H502" stroke="#2a2018" stroke-width="1"/>
+    <path d="M1074 148H1178L1222 192H1334L1378 236H1544" stroke="#3d2f22" stroke-width="1.5"/>
+    <path d="M1052 328H1160L1204 284H1316L1360 240H1536" stroke="#2a2018" stroke-width="1"/>
+    <g fill="#7a4a22" stroke="none">
+      <rect x="160" y="340" width="8" height="8"/>
+      <rect x="362" y="252" width="8" height="8"/>
+      <rect x="1174" y="144" width="8" height="8"/>
+      <rect x="1374" y="232" width="8" height="8"/>
+    </g>
+  </g>
+
+  <g id="dom-official-medallion" transform="translate(112 82)" aria-label="DOM medallion symbol">
+    <circle cx="158" cy="158" r="148" fill="#0a0807" stroke="#3d2f22" stroke-width="1"/>
+    <circle cx="158" cy="158" r="132" fill="#14100d" stroke="#7a4a22" stroke-width="3"/>
+    <circle cx="158" cy="158" r="119" fill="none" stroke="#b87333" stroke-width="1"/>
+    <circle cx="158" cy="158" r="105" fill="#0a0807" stroke="#3d2f22" stroke-width="1.5"/>
+    <path d="M158 53V75M210 67L199 86M249 106L230 117M263 158H241M249 210L230 199M210 249L199 230M158 263V241M106 249L117 230M67 210L86 199M53 158H75M67 106L86 117M106 67L117 86" fill="none" stroke="#7a4a22" stroke-width="2"/>
+    <path d="M96 115C122 88 194 88 220 115M96 201C122 228 194 228 220 201" fill="none" stroke="#3d2f22" stroke-width="1"/>
+    <path d="M98 158H218" fill="none" stroke="#b87333" stroke-width="1"/>
+    <text x="158" y="178" text-anchor="middle" fill="#e6ddd0" font-family="Cinzel, Georgia, Times New Roman, serif" font-size="56" font-weight="700" letter-spacing="4">DOM</text>
+    <circle cx="158" cy="158" r="91" fill="none" stroke="#d4914a" stroke-opacity="0.38" stroke-width="1"/>
+    <g fill="#8a6a3f">
+      <circle cx="158" cy="67" r="3"/><circle cx="249" cy="158" r="3"/><circle cx="158" cy="249" r="3"/><circle cx="67" cy="158" r="3"/>
+    </g>
+  </g>
+
+  <g transform="translate(532 117)">
+    <text x="2" y="24" fill="#7d7060" font-family="IBM Plex Mono, SFMono-Regular, Consolas, Liberation Mono, monospace" font-size="14" font-weight="600" letter-spacing="3">DOM / WALLET / SPECIFICATION FOUNDATION</text>
+    <path d="M0 52H804" stroke="url(#bronzeRule)" stroke-width="2"/>
+    <text x="0" y="132" fill="#e6ddd0" font-family="Cinzel, Georgia, Times New Roman, serif" font-size="66" font-weight="700" letter-spacing="6">DOM WALLET V3</text>
+    <text x="3" y="181" fill="#b8aa97" font-family="Inter, Arial, Helvetica, sans-serif" font-size="23" font-weight="400" letter-spacing="0.25">Secure state. Deterministic recovery. Native DOM sovereignty.</text>
+    <g transform="translate(2 222)" fill="none" stroke-linecap="square">
+      <path d="M0 0H56L78 22H134L156 0H212L234 22H290" stroke="#7a4a22" stroke-width="1.5"/>
+      <path d="M316 22H372L394 0H450L472 22H528L550 0H642" stroke="#3d2f22" stroke-width="1.5"/>
+      <rect x="74" y="18" width="8" height="8" fill="#b87333" stroke="none"/>
+      <rect x="230" y="18" width="8" height="8" fill="#b87333" stroke="none"/>
+      <rect x="390" y="-4" width="8" height="8" fill="#8a6a3f" stroke="none"/>
+      <rect x="546" y="-4" width="8" height="8" fill="#8a6a3f" stroke="none"/>
+    </g>
+    <text x="2" y="280" fill="#7d7060" font-family="IBM Plex Mono, SFMono-Regular, Consolas, Liberation Mono, monospace" font-size="13" font-weight="600" letter-spacing="2.4">CANONICAL STATE  /  DURABLE RECOVERY  /  DOM-NATIVE</text>
+  </g>
+
+  <path d="M212 440H1388" stroke="url(#bronzeRule)" stroke-width="1"/>
+</svg>

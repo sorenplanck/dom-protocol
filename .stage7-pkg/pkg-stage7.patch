@@ -1,0 +1,789 @@
+diff -ruN wt/crates/dom-interopd/src/lib.rs edit/dom-interopd/src/lib.rs
+--- a/crates/dom-interopd/src/lib.rs	2026-09-01 15:33:16.000000000 +0000
++++ b/crates/dom-interopd/src/lib.rs	2026-09-01 16:50:49.936587688 +0000
+@@ -63,6 +63,8 @@
+ #[cfg(feature = "production")]
+ mod production_noise_relay;
+ #[cfg(feature = "production")]
++mod production_plan_persistence;
++#[cfg(feature = "production")]
+ mod production_plan_source;
+ #[cfg(feature = "production")]
+ mod production_provisioning;
+@@ -185,7 +187,7 @@
+ #[cfg(feature = "production")]
+ pub use production_run::{
+     run_production_v1, ProductionRunErrorV1, ProductionRunModeV1, ProductionRunOptionsV1,
+-    MISSING_PRODUCTION_PARTS_V1,
++    PRODUCTION_KNOWN_LIMITS_V1,
+ };
+ #[cfg(feature = "production")]
+ pub use production_signal::{
+diff -ruN wt/crates/dom-interopd/src/main.rs edit/dom-interopd/src/main.rs
+--- a/crates/dom-interopd/src/main.rs	2026-08-31 19:41:12.000000000 +0000
++++ b/crates/dom-interopd/src/main.rs	2026-09-01 16:50:59.953938097 +0000
+@@ -76,15 +76,14 @@
+ 
+ /// Parses `run` and hands off to the composition root.
+ ///
+-/// On refusal the missing parts are printed one per line, because an operator
+-/// who runs this needs to know what is absent rather than that something
+-/// failed. The parts come from `MISSING_PRODUCTION_PARTS_V1`, which is the
+-/// measured list and not a guess.
++/// The fail-closed limits of this build are printed one per line at startup,
++/// from `PRODUCTION_KNOWN_LIMITS_V1`, so an operator knows which paths refuse
++/// by policy before the route is driven.
+ #[cfg(feature = "production")]
+ fn run_production(arguments: &[OsString]) -> ExitCode {
+     use dom_interopd::{
+-        require_operational_artifact_v1, run_production_v1, ProductionRunErrorV1,
+-        ProductionRunModeV1, ProductionRunOptionsV1, MISSING_PRODUCTION_PARTS_V1,
++        require_operational_artifact_v1, run_production_v1, ProductionRunModeV1,
++        ProductionRunOptionsV1, PRODUCTION_KNOWN_LIMITS_V1,
+     };
+ 
+     // Refuse a debug-profile or otherwise incomplete artifact before parsing
+@@ -132,15 +131,13 @@
+         return ExitCode::from(2);
+     };
+ 
++    for limit in PRODUCTION_KNOWN_LIMITS_V1 {
++        eprintln!("  known limit: {limit}");
++    }
+     match run_production_v1(&ProductionRunOptionsV1 { state_dir, mode }) {
+         Ok(()) => ExitCode::SUCCESS,
+         Err(error) => {
+             eprintln!("{error}");
+-            if error == ProductionRunErrorV1::NotComposable {
+-                for part in MISSING_PRODUCTION_PARTS_V1 {
+-                    eprintln!("  missing: {part}");
+-                }
+-            }
+             ExitCode::FAILURE
+         }
+     }
+diff -ruN wt/crates/dom-interopd/src/production_bitcoin_prebroadcast.rs edit/dom-interopd/src/production_bitcoin_prebroadcast.rs
+--- a/crates/dom-interopd/src/production_bitcoin_prebroadcast.rs	2026-09-01 15:35:25.000000000 +0000
++++ b/crates/dom-interopd/src/production_bitcoin_prebroadcast.rs	2026-09-01 16:48:49.878447395 +0000
+@@ -46,6 +46,11 @@
+     /// F6 has not consumed the one-shot payout proof before child construction.
+     #[error("Bitcoin payout authority has not been consumed")]
+     PayoutNotConsumed,
++    /// A durably recovered exact Bitcoin claim was found, but the production
++    /// composition root has no authenticated M.8 participant round yet, so it
++    /// cannot rebind that claim without inventing its session facts.
++    #[error("Bitcoin claim recovery is not composable in this build")]
++    ClaimRecoveryNotComposable,
+ }
+ 
+ /// Final move-only handoff to the concrete Bitcoin settlement child.
+@@ -65,6 +70,24 @@
+ }
+ 
+ impl ProductionBitcoinPrebroadcastChildHandoffV7 {
++    /// Releases the funding authority for a child that will never materialize
++    /// a claim in this process.
++    ///
++    /// This is the composition root's only Bitcoin path while the
++    /// authenticated M.8 participant round is absent: funding and refund are
++    /// real, and every claim materialization is refused by the child. A
++    /// durably recovered claim is a contradiction with that policy, so it
++    /// fails closed here instead of being silently dropped or rebound from a
++    /// caller-shaped session.
++    pub(crate) fn into_funding_only(
++        self,
++    ) -> Result<ProductionBitcoinFundingAuthorityV1, ProductionBitcoinPrebroadcastErrorV7> {
++        if self.recovered_claim.is_some() {
++            return Err(ProductionBitcoinPrebroadcastErrorV7::ClaimRecoveryNotComposable);
++        }
++        Ok(self.funding)
++    }
++
+     /// Binds a recovered Finalized claim to the complete authenticated route.
+     /// No Prepared V1 authority can cross this boundary.
+     pub(crate) fn bind_recovered_claim(
+diff -ruN wt/crates/dom-interopd/src/production_f6/terminal_release.rs edit/dom-interopd/src/production_f6/terminal_release.rs
+--- a/crates/dom-interopd/src/production_f6/terminal_release.rs	2026-09-01 10:40:25.000000000 +0000
++++ b/crates/dom-interopd/src/production_f6/terminal_release.rs	2026-09-01 16:48:49.878652270 +0000
+@@ -161,6 +161,20 @@
+             .map_err(map_route_error)
+     }
+ 
++    /// Full-history audit proving every committed action is an
++    /// external-custody descriptor. The composition root must run it before
++    /// installing the closed production runner; a route whose journal already
++    /// carries a generic runner action cannot be driven by that policy.
++    pub(crate) fn audit_external_custody_only_v1(
++        &self,
++    ) -> Result<route_executor::RouteSnapshotV1, ProductionF6ErrorV2> {
++        self.store
++            .try_borrow()
++            .map_err(|_| ProductionF6ErrorV2::TerminalUnavailable)?
++            .audit_external_custody_only_v1(self.route_id)
++            .map_err(map_route_error)
++    }
++
+     fn read_store<T>(
+         &self,
+         operation: impl FnOnce(&DurableRouteStoreV1) -> Result<T, RouteStoreErrorV1>,
+diff -ruN wt/crates/dom-interopd/src/production_plan_persistence.rs edit/dom-interopd/src/production_plan_persistence.rs
+--- a/crates/dom-interopd/src/production_plan_persistence.rs	1970-01-01 00:00:00.000000000 +0000
++++ b/crates/dom-interopd/src/production_plan_persistence.rs	2026-09-01 16:48:31.018178262 +0000
+@@ -0,0 +1,171 @@
++//! Production persistence policy for settlement plans.
++//!
++//! Until this module existed the only implementor of
++//! [`ProductionSettlementPlanPersistenceV1`] was the test double in
++//! `production_settlement`, so the composition root could not assemble the
++//! settlement bridge without dressing a test object as policy. This owner
++//! carries the one authenticated plan authority minted by
++//! `ProductionSettlementMaterializationOwnerV1::split` and forwards every
++//! install/refence to the durable coordinator through it. No plan can be
++//! installed here from caller-supplied facts: the authority itself refuses
++//! anything outside the exact route/composition/role-plan scope it was
++//! derived from.
++//!
++//! **Time policy.** Every entrypoint receives a trusted `now` from the bridge
++//! (the same clock the coordinator lease is renewed with). This owner retains
++//! a process-local high-water mark and refuses regression: a plan may be
++//! installed, revalidated or re-fenced only with a time that is not earlier
++//! than the last time it accepted. Durable non-regression across restarts is
++//! owned by the route supervisor and coordinator leases, not duplicated here.
++
++use route_executor::EventIdV1;
++use settlement_coordinator::{
++    CompositeSettlementPlanV1, CoordinatorLeaseV1, Digest32, DurableSettlementCoordinatorV1,
++    SettlementActionV1, SettlementPlanViewV1, StoredSettlementPlanV1,
++};
++
++use crate::production_materializer::ProductionAuthenticatedSettlementPlanAuthorityV1;
++use crate::production_settlement::{
++    map_coordinator_error, ProductionSettlementPlanPersistenceV1,
++};
++use crate::supervisor::AuthorityRefusalV1;
++
++const ZERO_DIGEST: Digest32 = [0u8; 32];
++
++/// Sole production plan persistence owner.
++///
++/// Move-only: it owns the authenticated plan authority and is itself moved
++/// into the settlement bridge exactly once.
++#[must_use = "the plan persistence owner must be moved into the settlement bridge"]
++pub(crate) struct ProductionSettlementPlanPersistenceOwnerV1 {
++    authority: ProductionAuthenticatedSettlementPlanAuthorityV1,
++    last_accepted_unix_ms: u64,
++}
++
++impl core::fmt::Debug for ProductionSettlementPlanPersistenceOwnerV1 {
++    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
++        formatter.write_str("ProductionSettlementPlanPersistenceOwnerV1([authority redacted])")
++    }
++}
++
++impl ProductionSettlementPlanPersistenceOwnerV1 {
++    /// Binds the exact plan authority and the trusted composition time.
++    pub(crate) fn new(
++        authority: ProductionAuthenticatedSettlementPlanAuthorityV1,
++        trusted_now_unix_ms: u64,
++    ) -> Result<Self, AuthorityRefusalV1> {
++        if trusted_now_unix_ms == 0 {
++            return Err(AuthorityRefusalV1::Refused);
++        }
++        Ok(Self {
++            authority,
++            last_accepted_unix_ms: trusted_now_unix_ms,
++        })
++    }
++
++    fn accept_time(&mut self, trusted_now_unix_ms: u64) -> Result<(), AuthorityRefusalV1> {
++        if trusted_now_unix_ms == 0 || trusted_now_unix_ms < self.last_accepted_unix_ms {
++            return Err(AuthorityRefusalV1::Inconsistent);
++        }
++        self.last_accepted_unix_ms = trusted_now_unix_ms;
++        Ok(())
++    }
++
++    fn require_route_event(route_event_id: EventIdV1) -> Result<(), AuthorityRefusalV1> {
++        if route_event_id == ZERO_DIGEST {
++            return Err(AuthorityRefusalV1::Inconsistent);
++        }
++        Ok(())
++    }
++}
++
++impl ProductionSettlementPlanPersistenceV1 for ProductionSettlementPlanPersistenceOwnerV1 {
++    fn install_new_plan(
++        &mut self,
++        coordinator: &mut DurableSettlementCoordinatorV1,
++        plan: CompositeSettlementPlanV1,
++        route_event_id: EventIdV1,
++        trusted_now_unix_ms: u64,
++    ) -> Result<SettlementPlanViewV1, AuthorityRefusalV1> {
++        Self::require_route_event(route_event_id)?;
++        self.accept_time(trusted_now_unix_ms)?;
++        coordinator
++            .install_plan(&mut self.authority, plan, trusted_now_unix_ms)
++            .map_err(map_coordinator_error)
++    }
++
++    fn revalidate_preinstalled_new_plan(
++        &mut self,
++        stored: &StoredSettlementPlanV1,
++        route_event_id: EventIdV1,
++        trusted_now_unix_ms: u64,
++    ) -> Result<(), AuthorityRefusalV1> {
++        Self::require_route_event(route_event_id)?;
++        // Presence in the coordinator is not proof that Funding committed; the
++        // time gate is consumed again, and only a Funding plan may be
++        // preinstalled ahead of its parent route event.
++        if stored.plan().bindings().action != SettlementActionV1::Funding {
++            return Err(AuthorityRefusalV1::Inconsistent);
++        }
++        self.accept_time(trusted_now_unix_ms)
++    }
++
++    fn refence_preinstalled_new_plan(
++        &mut self,
++        coordinator: &mut DurableSettlementCoordinatorV1,
++        lease: CoordinatorLeaseV1,
++        replacement: CompositeSettlementPlanV1,
++        progress_evidence_digest: Digest32,
++        route_event_id: EventIdV1,
++        trusted_now_unix_ms: u64,
++    ) -> Result<SettlementPlanViewV1, AuthorityRefusalV1> {
++        Self::require_route_event(route_event_id)?;
++        if replacement.bindings().action != SettlementActionV1::Funding
++            || progress_evidence_digest == ZERO_DIGEST
++        {
++            return Err(AuthorityRefusalV1::Inconsistent);
++        }
++        self.accept_time(trusted_now_unix_ms)?;
++        coordinator
++            .refence_plan(
++                lease,
++                replacement,
++                progress_evidence_digest,
++                &mut self.authority,
++                trusted_now_unix_ms,
++            )
++            .map_err(map_coordinator_error)
++    }
++
++    fn refence_existing_plan(
++        &mut self,
++        coordinator: &mut DurableSettlementCoordinatorV1,
++        lease: CoordinatorLeaseV1,
++        replacement: CompositeSettlementPlanV1,
++        progress_evidence_digest: Digest32,
++        trusted_now_unix_ms: u64,
++    ) -> Result<SettlementPlanViewV1, AuthorityRefusalV1> {
++        if progress_evidence_digest == ZERO_DIGEST {
++            return Err(AuthorityRefusalV1::Inconsistent);
++        }
++        self.accept_time(trusted_now_unix_ms)?;
++        coordinator
++            .refence_plan(
++                lease,
++                replacement,
++                progress_evidence_digest,
++                &mut self.authority,
++                trusted_now_unix_ms,
++            )
++            .map_err(map_coordinator_error)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use static_assertions::assert_not_impl_any;
++
++    use super::*;
++
++    assert_not_impl_any!(ProductionSettlementPlanPersistenceOwnerV1: Clone, Copy, Default);
++}
+diff -ruN wt/crates/dom-interopd/src/production_run.rs edit/dom-interopd/src/production_run.rs
+--- a/crates/dom-interopd/src/production_run.rs	2026-09-01 15:41:00.000000000 +0000
++++ b/crates/dom-interopd/src/production_run.rs	2026-09-01 16:51:30.334467165 +0000
+@@ -11,13 +11,13 @@
+ //!
+ //! Nothing here is a stand-in. There is no mock, no laboratory value and no
+ //! `evidence-only` surface: where a piece is absent it is absent, and
+-//! [`ProductionRunErrorV1::NotComposable`] carries the list.
++//! [`PRODUCTION_KNOWN_LIMITS_V1`] names the fail-closed limits.
+ 
+ use std::fs::File;
+ use std::path::{Path, PathBuf};
+ use std::rc::Rc;
+ use std::sync::Arc;
+-use std::time::{SystemTime, UNIX_EPOCH};
++use std::time::{Duration, SystemTime, UNIX_EPOCH};
+ 
+ use adapter_dom_real::RealDomRpcRuntimeV1;
+ use btc_actuator::DurableBitcoinActuatorV1;
+@@ -39,6 +39,35 @@
+ use solver_inventory::DurableInventoryStoreV1;
+ 
+ use crate::production_bitcoin_prebroadcast::ProductionBitcoinPrebroadcastOwnerV7;
++use crate::production_child_btc::{
++    ProductionBitcoinChildPortV1, SystemProductionBitcoinChildClockV1,
++};
++use crate::production_child_router::ProductionSettlementChildRouterV1;
++use crate::production_composite_loop::{
++    run_production_composite_runtime_bounded_v1, ProductionCompositeActivationExitV1,
++    ProductionCompositeActivationV1, ProductionCompositeLoopConfigV1,
++    ProductionCompositeRuntimeExitV1,
++};
++use crate::production_materializer::{
++    ProductionCustodiedFirstExposureClaimAuthorityV1,
++    ProductionSettlementMaterializationOwnerV1,
++};
++use crate::production_plan_persistence::ProductionSettlementPlanPersistenceOwnerV1;
++use crate::production_plan_source::{
++    ProductionDomPublicSecretSourceScopeV1, ProductionDomPublicSecretSourceV1,
++    ProductionLateBitcoinPublicSecretSourceV1, ProductionPublicSecretSourceRouterV1,
++    VerifiedProductionSettlementPlanSourceV1,
++};
++use crate::production_runner::ProductionExternalCustodyOnlyRunnerV1;
++use crate::production_settlement::{
++    assemble_production_settlement_authorities_with_child_port_v1,
++    ProductionSettlementBridgeConfigV1,
++};
++use crate::runtime::{
++    ProductionRouteRuntimeV1, RouteRuntimeAuthoritiesV1, RouteRuntimeConfigV1,
++    RouteRuntimeOperationalAuthoritiesV1, RouteRuntimeRecoveryAuthoritiesV1,
++};
++use crate::supervisor::{RouteSupervisorConfigV1, RouteSupervisorV1, SystemClockV1};
+ use crate::production_chain_services::{
+     load_production_chain_services_v1, ProductionChainClientsV1,
+ };
+@@ -234,33 +263,38 @@
+     /// The host clock is before the Unix epoch, so no trusted second exists.
+     #[error("production host clock is unusable")]
+     HostClock,
+-    /// Everything above succeeded and the route still cannot be composed,
+-    /// because parts of the composition have no production implementation.
+-    ///
+-    /// This is the honest terminal state of this binary today. The parts are
+-    /// named in [`MISSING_PRODUCTION_PARTS_V1`] and printed by `main`, so an
+-    /// operator learns exactly what is absent instead of reading "failed".
+-    #[error("production route is not composable yet")]
+-    NotComposable,
++    /// The Bitcoin funding child could not be composed from the sole armed
++    /// prebroadcast owner, or a durably recovered claim was found that this
++    /// build cannot rebind without the authenticated M.8 participant round.
++    #[error("production Bitcoin child authority unavailable")]
++    BitcoinChildAuthority,
++    /// The public-secret sources, first-exposure custody or materialization
++    /// owner refused the authenticated route scope.
++    #[error("production settlement plan source unavailable")]
++    PlanSource,
++    /// The composite Relay/Noise loop could not be configured, activated or
++    /// driven under the retained Stage-12 owner.
++    #[error("production composite relay loop failed")]
++    CompositeLoop,
++    /// The activated route store could not be acquired under the production
++    /// lease/fencing authority, or its journal contradicts the closed runner
++    /// policy.
++    #[error("production route supervisor unavailable")]
++    RouteSupervisor,
++    /// The concrete route runtime refused its authorities or configuration, or
++    /// failed closed while driving the route.
++    #[error("production route runtime failed")]
++    RouteRuntime,
+ }
+ 
+-/// Every part the composition root still lacks, in the order it would need
+-/// them. Printed verbatim on refusal.
++/// Known, deliberately fail-closed limits of this composition root.
+ ///
+-/// This list is the specification of the remaining work and is deliberately
+-/// concrete: each line names a trait or a type and where a production
+-/// implementation would have to exist. It is not a wish list — every entry was
+-/// measured, and the absence of each was confirmed across the workspace rather
+-/// than assumed.
+-pub const MISSING_PRODUCTION_PARTS_V1: &[&str] = &[
+-    "F7M8AnchorAuthority: canonical live DOM/Bitcoin anchor evidence must mint one linear V2 bundle for Contracts and both Bitcoin claim signers",
+-    "BitcoinClaimHandoff: the post-M8 fresh claim must feed one retry-safe child and one chain-observed extraction context without duplicating signing authority",
+-    "PublicSecretSources: DOM/EVM/Bitcoin claim observers must share the exact child RPC/runtime owners and accept only materialized expected transaction identities",
+-    "ContinuousTimeAuthority: every long-lived runtime use of V10 time intervals must pass through the durable non-regressing route/actuator clocks",
+-    "SettlementChildAuthorityV1: `ProductionSettlementChildRouterV1` exists, but is not yet constructed by this composition root",
+-    "SettlementChildObserverV1: `ProductionSettlementChildRouterV1` exists, but is not yet constructed by this composition root",
+-    "RouteSupervisor: the activated RouteStore has not yet been acquired under the production lease and fencing authority",
+-    "CompositeRuntimeLoop: Relay/Noise submit-exchange-poll and `ProductionRouteRuntimeV1::step` are not yet interleaved under shutdown and bounded backpressure",
++/// Printed once by `main` at startup so an operator knows which paths refuse
++/// by policy rather than by fault. Each entry names the exact refusal point;
++/// none is a placeholder, mock or degraded substitute.
++pub const PRODUCTION_KNOWN_LIMITS_V1: &[&str] = &[
++    "BitcoinClaim: the Bitcoin child is composed funding/refund-only; every claim materialization is refused by `ProductionBitcoinChildPortV1` until the authenticated DSC1 M.8 participant round (pubnonce/partial/aggregate) exists, and a durably recovered claim refuses startup (`ClaimRecoveryNotComposable`)",
++    "EvmPublicSecretSource: no EVM reextraction source is installed; `ProductionPublicSecretSourceRouterV1` refuses EVM-scoped reextraction, and recovery of an already-public `t` uses the sealed retention vault only",
+ ];
+ 
+ /// Runs the production composition root as far as it can go today.
+@@ -288,8 +322,13 @@
+ /// 12. the complete RFQ-late F6 pair, including wallet-authenticated payout
+ ///     faces, exact prepared prefixes and the one-shot route-store handoff;
+ /// 13. the central Relay plus both Store-sharing Contracts/F6 workers;
+-/// 14. the refusal, because the parts named in
+-///     [`MISSING_PRODUCTION_PARTS_V1`] do not exist.
++/// 14. the funding/refund-only Bitcoin child, the exact child router, the
++///     public-secret sources and the split materialization owner;
++/// 15. the settlement bridge, the composite Relay/Noise activation of the F6
++///     pair, the route supervisor lease and the concrete route runtime;
++/// 16. the interleaved Relay/route loop until terminal or safe shutdown, then
++///     teardown in reverse ownership order. The fail-closed limits are named
++///     in [`PRODUCTION_KNOWN_LIMITS_V1`].
+ ///
+ /// **On the trusted second, because the word is doing work.** Step 4 wants a
+ /// second the composition root vouches for, and this takes it from the host
+@@ -559,7 +598,7 @@
+             .map_err(|_| ProductionRunErrorV1::Provisioning)?,
+         ProductionRunModeV1::ReopenExisting => bitcoin_stage_before_begin,
+     };
+-    let bitcoin_actuator_store = open_bitcoin_actuator_store(
++    let mut bitcoin_actuator_store = open_bitcoin_actuator_store(
+         options.mode,
+         bitcoin_stage_before_begin,
+         bitcoin_stage,
+@@ -1159,38 +1198,306 @@
+             scope: evm_scope,
+         })
+         .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
+-    let _stage13_composition_handoff = (
+-        relay_stage12_owner,
+-        f6_runtime_receiver,
++    // ------------------------------------------------------------------
++    // Stage 14 — the sole Bitcoin child (funding/refund real, claim closed).
++    //
++    // F6 already consumed the payout proof above, so the armed owner may now
++    // become the one funding authority. There is no authenticated M.8
++    // participant round in this build, so the child is composed with
++    // `ProductionBitcoinChildPortV1::new`: funding and refund are driven by
++    // the real actuator and Core client, and every claim materialization is
++    // refused by the child itself (`claim: None`). A durably recovered claim
++    // contradicts that policy and refuses startup rather than being rebound
++    // from caller-shaped session facts. See `PRODUCTION_KNOWN_LIMITS_V1`.
++    // ------------------------------------------------------------------
++    let bitcoin_leg = chain_signers.bitcoin_leg();
++    let bitcoin_funding = bitcoin_prebroadcast_owner
++        .into_child_handoff(&inputs)
++        .map_err(|_| ProductionRunErrorV1::BitcoinChildAuthority)?
++        .into_funding_only()
++        .map_err(|_| ProductionRunErrorV1::BitcoinChildAuthority)?;
++    let bitcoin_lease = bitcoin_actuator_store
++        .acquire_lease(trusted_now_millis_v1()?, runtime_bounds.actuator_lease_ms)
++        .map_err(|_| ProductionRunErrorV1::BitcoinChildAuthority)?;
++    let bitcoin_child = ProductionBitcoinChildPortV1::new(
++        bitcoin_actuator_store,
++        bitcoin_chain_client,
++        bitcoin_lease,
++        SystemProductionBitcoinChildClockV1,
++        bitcoin_funding,
++    )
++    .map_err(|_| ProductionRunErrorV1::BitcoinChildAuthority)?;
++    let bitcoin_chain_id = inputs
++        .admission()
++        .bitcoin_deployment_capability(bitcoin_leg)
++        .map_err(|_| ProductionRunErrorV1::BitcoinChildAuthority)?
++        .profile()
++        .chain_id
++        .0;
++
++    // ------------------------------------------------------------------
++    // Stage 15 — exact child router. The DOM port is already authenticated by
++    // its own composition; the EVM and Bitcoin ports are sealed here. Both
++    // counterparty faces are present, so the router cannot degrade to a
++    // single-face route.
++    // ------------------------------------------------------------------
++    let child_router = ProductionSettlementChildRouterV1::new(
++        dom_child,
++        Some(ProductionSettlementChildRouterV1::authenticate_evm(evm_child)),
++        Some(ProductionSettlementChildRouterV1::authenticate_bitcoin(
++            bitcoin_child,
++        )),
++    )
++    .map_err(|_| ProductionRunErrorV1::SettlementChildAuthority)?;
++
++    // ------------------------------------------------------------------
++    // Stages 16-17 — first-exposure custody and the public-secret sources.
++    //
++    // The route reveals on the downstream DOM leg first (`DomRevealsFirst`,
++    // `LocalOrigin`), so the DOM downstream consumer minted by the DOM child
++    // composition is the only first-exposure observer. The upstream DOM
++    // consumer has no role in this reveal mode and is released here rather
++    // than parked. The Bitcoin source is late-installable and is completed by
++    // the materialization owner once an exact expected transaction exists. No
++    // EVM source is installed (see `PRODUCTION_KNOWN_LIMITS_V1`); the router
++    // refuses EVM-scoped reextraction instead of guessing a transaction id.
++    // ------------------------------------------------------------------
++    let first_exposure =
++        ProductionCustodiedFirstExposureClaimAuthorityV1::bind(&inputs, &role_plan)
++            .map_err(|_| ProductionRunErrorV1::PlanSource)?;
++    let [upstream_dom_consumer, downstream_dom_consumer] = dom_public_secret_consumers;
++    drop(upstream_dom_consumer);
++    let dom_trusted_chain_id = relay_stage12_owner
++        .leg(LegIdV1::Downstream)
++        .trusted_chain_id();
++    let dom_source_scope = ProductionDomPublicSecretSourceScopeV1::authenticate(
++        composition_digest,
++        settlement_coordinator::SettlementLegV1::Downstream,
++        inputs.composition().downstream().settlement_id.0,
++        downstream_dom_binding,
++        dom_trusted_chain_id,
++    )
++    .map_err(|_| ProductionRunErrorV1::PlanSource)?;
++    let (dom_secret_source, dom_secret_installer) = relay_stage12_owner
++        .leg_mut(LegIdV1::Downstream)
++        .contracts_mut()
++        .dom_public_secret_source(dom_source_scope, downstream_dom_consumer)
++        .map_err(|_| ProductionRunErrorV1::PlanSource)?;
++    let (bitcoin_secret_source, bitcoin_secret_installer) =
++        ProductionLateBitcoinPublicSecretSourceV1::new_installable(
++            route_id,
++            composition_digest,
++            bitcoin_chain_id,
++        )
++        .map_err(|_| ProductionRunErrorV1::PlanSource)?;
++    let secret_source_router = ProductionPublicSecretSourceRouterV1::new(
++        dom_secret_source,
++        // No EVM reextraction source exists in this build; the type parameter
++        // is pinned to an existing source type only so the router's generic
++        // resolves. See `PRODUCTION_KNOWN_LIMITS_V1`.
++        Option::<ProductionDomPublicSecretSourceV1>::None,
++        Some(bitcoin_secret_source),
++    )
++    .map_err(|_| ProductionRunErrorV1::PlanSource)?;
++
++    // ------------------------------------------------------------------
++    // Stages 18-21 — materialization owner, plan source, persistence and the
++    // five settlement authorities. The owner is split exactly once into the
++    // draft materializer (plan source), the child runtime handle (bridge
++    // child port) and the authenticated plan authority (persistence). The
++    // coordinator is moved into the bridge; no second handle to it exists.
++    // ------------------------------------------------------------------
++    let materialization_owner = ProductionSettlementMaterializationOwnerV1::authenticate(
++        &inputs,
++        &coordinator,
+         role_plan,
+         upstream_source_scope,
+         downstream_source_scope,
+-        dom_child,
+-        dom_public_secret_consumers,
+-        dom_f7_scanner,
+-        bitcoin_prebroadcast_owner,
+-        evm_child,
+-        bitcoin_chain_client,
+-        bitcoin_live,
+-        chain_signers,
+-        bitcoin_actuator_store,
+-        coordinator,
++        child_router,
++        first_exposure,
++        dom_secret_installer,
++        Some(bitcoin_secret_installer),
++    )
++    .map_err(|_| ProductionRunErrorV1::PlanSource)?;
++    let (draft_materializer, child_runtime_handle, plan_authority) =
++        materialization_owner.split();
++    let plan_source = VerifiedProductionSettlementPlanSourceV1::new(
++        route_id,
++        inputs.admission().frozen_bindings().clone(),
++        inputs.composition_owner(),
++        secret_source_router,
+         route_secret_retention,
+-        refund_arming_authority,
+-        deadline_timer,
+-        operational_policies,
+-        relay_network_config,
++        draft_materializer,
++    )
++    .map_err(|_| ProductionRunErrorV1::PlanSource)?;
++    let plan_persistence = ProductionSettlementPlanPersistenceOwnerV1::new(
++        plan_authority,
++        trusted_now_millis_v1()?,
++    )
++    .map_err(|_| ProductionRunErrorV1::PlanSource)?;
++    let bridge_config = ProductionSettlementBridgeConfigV1::new(
++        pins.process_owner_id,
++        runtime_bounds.coordinator_lease_ms,
++    )
++    .map_err(|_| ProductionRunErrorV1::CoordinatorStore)?;
++    let settlement = assemble_production_settlement_authorities_with_child_port_v1(
++        coordinator,
++        bridge_config,
++        plan_source,
++        plan_persistence,
++        child_runtime_handle,
+     );
+ 
+-    // The composition point. Stages 1 through 12 and the Stage-13 refund owner
+-    // above exist and have run; everything below is named in
+-    // `MISSING_PRODUCTION_PARTS_V1`. The single Contracts/Relay owner is
+-    // retained above; the route runtime is composed here once those parts
+-    // exist, and deliberately not before: a route driven by anything other
+-    // than its real authorities would report progress it did not make.
+-    Err(ProductionRunErrorV1::NotComposable)
++    // ------------------------------------------------------------------
++    // Stages 22-24 — composite Relay/Noise loop and F6 pair activation.
++    //
++    // The retained Stage-12 owner moves into the composite loop here; every
++    // authority that needed `&mut` access to it was derived above. Socket and
++    // exchange bounds come from the authenticated V10 external-call bound and
++    // the Relay poll backoff, so no timing constant is invented. Activation is
++    // bounded per invocation and re-entered until the exact pair receiver
++    // releases the route Store, or shutdown is requested.
++    // ------------------------------------------------------------------
++    let external_call_bound = Duration::from_millis(runtime_bounds.external_call_timeout_ms);
++    let relay_backoff = Duration::from_millis(runtime_bounds.relay_poll_backoff_ms);
++    let composite_config = ProductionCompositeLoopConfigV1::new(
++        external_call_bound,
++        external_call_bound,
++        external_call_bound,
++        relay_backoff,
++        PRODUCTION_ACTIVATION_ROUND_BUDGET_V1,
++    )
++    .map_err(|_| ProductionRunErrorV1::CompositeLoop)?;
++    let mut activation = ProductionCompositeActivationV1::new(
++        relay_stage12_owner,
++        f6_runtime_receiver,
++        relay_network_config,
++        composite_config,
++    )
++    .map_err(|_| ProductionRunErrorV1::CompositeLoop)?;
++    let (mut relay_loop, route_store) = loop {
++        match activation.activate_bounded(&mut _run_control) {
++            ProductionCompositeActivationExitV1::Ready { relay, route_store } => {
++                break (relay, route_store);
++            }
++            ProductionCompositeActivationExitV1::RoundBudgetExhausted(again) => {
++                activation = again;
++            }
++            ProductionCompositeActivationExitV1::Shutdown(_) => {
++                // Shutdown before activation: no route lease was taken and no
++                // effect was externalized by this process. The retained
++                // stores are closed by drop in reverse construction order.
++                return Ok(());
++            }
++            ProductionCompositeActivationExitV1::Failed { error: _, .. } => {
++                return Err(ProductionRunErrorV1::CompositeLoop);
++            }
++        }
++    };
++
++    // ------------------------------------------------------------------
++    // Stages 25-26 — runner policy audit and route supervisor acquisition.
++    //
++    // The production runner is the closed external-custody-only policy; it is
++    // installed only after the full-history audit proves the retained journal
++    // never committed a generic runner action. The supervisor then takes the
++    // one route lease under the process owner id and the authenticated V10
++    // lease/renewal/dispatch bounds.
++    // ------------------------------------------------------------------
++    route_store
++        .audit_external_custody_only_v1()
++        .map_err(|_| ProductionRunErrorV1::RouteSupervisor)?;
++    let per_queue_batch_limit = usize::try_from(runtime_bounds.per_queue_batch_limit)
++        .map_err(|_| ProductionRunErrorV1::Configuration)?;
++    let supervisor_config = RouteSupervisorConfigV1::new(
++        runtime_bounds.lease_duration_ms,
++        runtime_bounds.renew_before_ms,
++        runtime_bounds.dispatch_lease_ms,
++        per_queue_batch_limit,
++    )
++    .map_err(|_| ProductionRunErrorV1::RouteSupervisor)?;
++    let supervisor = RouteSupervisorV1::acquire_production_route_store(
++        route_store,
++        route_id,
++        pins.process_owner_id,
++        supervisor_config,
++        SystemClockV1,
++    )
++    .map_err(|_| ProductionRunErrorV1::RouteSupervisor)?;
++
++    // ------------------------------------------------------------------
++    // Stages 27-29 — the exact authority set and the concrete route runtime.
++    // ------------------------------------------------------------------
++    let operational = RouteRuntimeOperationalAuthoritiesV1 {
++        refund: refund_arming_authority,
++        action: settlement.action,
++        observer: settlement.observer,
++        runner: ProductionExternalCustodyOnlyRunnerV1,
++    };
++    let recovery = RouteRuntimeRecoveryAuthoritiesV1 {
++        custody: settlement.custody,
++        timers: deadline_timer,
++        reconciler: settlement.takeover,
++        retirement: settlement.retirement,
++    };
++    let authorities = RouteRuntimeAuthoritiesV1::new(operational, recovery);
++    let runtime_config = RouteRuntimeConfigV1::new(
++        runtime_bounds.waiting_backoff_ms,
++        runtime_bounds.recovery_backoff_ms,
++        supervisor_config,
++    )
++    .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
++    let mut route_runtime = ProductionRouteRuntimeV1::new(
++        supervisor,
++        inputs.admission().clone(),
++        authorities,
++        runtime_config,
++    )
++    .map_err(|_| ProductionRunErrorV1::RouteRuntime)?;
++
++    // ------------------------------------------------------------------
++    // Stages 30-31 — interleaved Relay/route execution until terminal or safe
++    // shutdown. Each invocation is bounded; budget exhaustion re-enters the
++    // same loop with the same owners, so the bound limits blocking, not the
++    // route. Every route step is a durable driver call; nothing here reports
++    // progress the Store has not recorded.
++    // ------------------------------------------------------------------
++    let _retained_for_f7_m8 = (chain_signers, dom_f7_scanner, bitcoin_live, operational_policies);
++    loop {
++        match run_production_composite_runtime_bounded_v1(
++            &mut relay_loop,
++            &mut route_runtime,
++            &mut _run_control,
++            PRODUCTION_INTERLEAVED_ROUND_BUDGET_V1,
++        )
++        .map_err(|_| ProductionRunErrorV1::RouteRuntime)?
++        {
++            ProductionCompositeRuntimeExitV1::Terminal { .. }
++            | ProductionCompositeRuntimeExitV1::Shutdown { .. } => break,
++            ProductionCompositeRuntimeExitV1::RoundBudgetExhausted { .. } => {}
++        }
++    }
++
++    // ------------------------------------------------------------------
++    // Stages 32-33 — teardown in reverse ownership order. The route runtime
++    // (and its lease) goes first, then the Relay loop and its Noise sessions,
++    // then every retained store by scope exit; the signal-bridge guard is the
++    // last to drop and restores the prior mask on this return path.
++    // ------------------------------------------------------------------
++    drop(route_runtime);
++    drop(relay_loop);
++    Ok(())
+ }
+ 
++/// Bounded Relay rounds per activation invocation. The composition root
++/// re-enters activation on exhaustion, so this bounds blocking between
++/// shutdown checks, not the activation itself.
++const PRODUCTION_ACTIVATION_ROUND_BUDGET_V1: u64 = 4_096;
++
++/// Bounded interleaved rounds per runtime invocation, re-entered on
++/// exhaustion for the same reason.
++const PRODUCTION_INTERLEAVED_ROUND_BUDGET_V1: u64 = 4_096;
++
+ fn required_f6_v4_path<'bootstrap>(
+     bootstrap: &'bootstrap ValidatedProductionBootstrapV1,
+     role: ProductionF6PathRoleV4,
+diff -ruN wt/crates/dom-interopd/src/production_settlement.rs edit/dom-interopd/src/production_settlement.rs
+--- a/crates/dom-interopd/src/production_settlement.rs	2026-08-31 17:35:26.000000000 +0000
++++ b/crates/dom-interopd/src/production_settlement.rs	2026-09-01 16:48:31.020376279 +0000
+@@ -1835,7 +1835,7 @@
+     Ok(output)
+ }
+ 
+-fn map_coordinator_error(error: CoordinatorErrorV1) -> AuthorityRefusalV1 {
++pub(crate) fn map_coordinator_error(error: CoordinatorErrorV1) -> AuthorityRefusalV1 {
+     match error {
+         CoordinatorErrorV1::StorageUnavailable
+         | CoordinatorErrorV1::LeaseHeld

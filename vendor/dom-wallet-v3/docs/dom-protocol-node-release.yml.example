@@ -1,0 +1,40 @@
+# Install this workflow in sorenplanck/dom-protocol after review.
+# It is documentation here and cannot publish from dom-wallet-v3.
+name: Publish signed DOM node feed
+
+on:
+  push:
+    tags: ["node-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: stable
+          components: clippy,rustfmt
+      - run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse "${GITHUB_REF}^{commit}")" = "$GITHUB_SHA"
+          cargo fmt --all --check
+          cargo check --workspace --all-targets --locked
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo test --workspace --all-targets --locked
+
+  # Production implementation must add pinned multi-platform builders, generate
+  # each sidecar manifest from the exact final binary, and consume detached
+  # signatures produced offline by the release operator. No private signing key
+  # may enter GitHub Actions or repository secrets: CI verifies with compiled
+  # public keys and never signs. SHA-256, byte lengths and signatures must pass
+  # before atomic draft-to-public promotion. node-latest.json must bind the
+  # immutable commit, compatibility fields, platform artifacts and monotonic
+  # sequence. A commit or branch build is never an update source, and this
+  # workflow must never publish a Wallet release.

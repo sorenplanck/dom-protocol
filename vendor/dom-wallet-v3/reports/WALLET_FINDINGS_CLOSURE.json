@@ -1,0 +1,178 @@
+[
+  {
+    "id": "C1",
+    "status": "FIXED_TESTED",
+    "root_cause": "Mining depended on an IBD metric that the pinned production node never updated.",
+    "production_files": ["src-tauri/src/lib.rs", "crates/dom-wallet-core/src/lib.rs", "crates/dom-wallet-embedded-core/src/miner.rs", "crates/dom-wallet-production-backend/src/lib.rs"],
+    "tests": ["regression_c1_mining_policy_allows_connected_genesis_but_never_zero_peers_or_peer_ahead", "regression_c1_miner_uses_authoritative_peer_height_without_ibd_metric", "live_mainnet_genesis_wallet_syncs_at_zero_without_mining"],
+    "verification_commands": ["cargo test -p dom-wallet-tauri-shell regression_c1", "cargo test -p dom-wallet-tauri-shell live_mainnet_genesis_wallet_syncs_at_zero_without_mining -- --ignored"]
+  },
+  {
+    "id": "C2",
+    "status": "FIXED_TESTED",
+    "root_cause": "Cancellation used lifecycle subsets and had no durable independent record that submission may have reached the network.",
+    "production_files": ["crates/dom-wallet-domain/src/lib.rs", "crates/dom-wallet-core/src/lib.rs", "crates/dom-wallet-storage/src/lib.rs"],
+    "tests": ["regression_c2_exhaustive_lifecycle_exposure_cancellation_invariant", "regression_c2_legacy_exposure_migration_is_conservative_and_idempotent", "regression_c2_submitting_restart_and_post_acceptance_crash_retain_reservations"],
+    "verification_commands": ["cargo test --workspace regression_c2"]
+  },
+  {
+    "id": "C3",
+    "status": "FIXED_TESTED",
+    "root_cause": "Slate expiry was validated against the supplied expiry itself rather than the canonical tip and had no maximum lifetime.",
+    "production_files": ["crates/dom-wallet-core-protocol/src/lib.rs", "crates/dom-wallet-core/src/lib.rs"],
+    "tests": ["regression_c3_expiry_boundaries_overflow_and_restart_round_trip"],
+    "verification_commands": ["cargo test -p dom-wallet-core regression_c3"]
+  },
+  {
+    "id": "C4",
+    "status": "FIXED_TESTED",
+    "root_cause": "Export and import paths assigned lifecycle values unconditionally and could regress a submitted transaction.",
+    "production_files": ["crates/dom-wallet-domain/src/lib.rs", "crates/dom-wallet-core/src/lib.rs"],
+    "tests": ["regression_c4_transition_table_is_exhaustive_and_cancelled_is_terminal", "regression_c4_export_is_read_only_after_submitted_mempool_and_confirmed"],
+    "verification_commands": ["cargo test --workspace regression_c4"]
+  },
+  {
+    "id": "C5",
+    "status": "FIXED_TESTED",
+    "root_cause": "Readiness treated lock availability as synchronization and the frontend substituted local height for unknown peer height.",
+    "production_files": ["src-tauri/src/lib.rs", "frontend/status.js", "frontend/main.js"],
+    "tests": ["regression_c5_authoritative_node_readiness_table_covers_every_state", "regression_c5_frontend_renders_every_authoritative_state_without_local_height_fallback"],
+    "verification_commands": ["cargo test -p dom-wallet-tauri-shell regression_c5", "cd frontend && npm test"]
+  },
+  {
+    "id": "A1",
+    "status": "FIXED_TESTED",
+    "root_cause": "The encrypted payload was the only password oracle, so invalid credentials and authenticated corruption collapsed into one storage error.",
+    "production_files": ["crates/dom-wallet-storage/src/lib.rs", "crates/dom-wallet-core/src/lib.rs", "src-tauri/src/lib.rs"],
+    "tests": ["regression_a1_real_encrypted_fixtures_separate_auth_storage_and_corruption_errors"],
+    "verification_commands": ["cargo test -p dom-wallet-storage regression_a1"]
+  },
+  {
+    "id": "A2",
+    "status": "FIXED_TESTED",
+    "root_cause": "The locked gate had no close/switch action and interrupted creation had neither authenticated resume nor abort.",
+    "production_files": ["crates/dom-wallet-storage/src/lib.rs", "crates/dom-wallet-core/src/lib.rs", "src-tauri/src/lib.rs", "src-tauri/src/main.rs", "frontend/index.html", "frontend/main.js"],
+    "tests": ["regression_a2_lock_close_and_switch_wallets_without_process_restart", "regression_a2_gate_exposes_close_switch_and_no_raw_path_open"],
+    "verification_commands": ["cargo test -p dom-wallet-core regression_a2", "cd frontend && npm test"]
+  },
+  {
+    "id": "A3",
+    "status": "FIXED_TESTED",
+    "root_cause": "Mining stop and error exits left unreaped handles and permanent STOPPING or ERROR states.",
+    "production_files": ["src-tauri/src/lib.rs"],
+    "tests": ["regression_a3_mining_worker_reaps_recovers_and_restarts_for_100_cycles"],
+    "verification_commands": ["cargo test -p dom-wallet-tauri-shell regression_a3"]
+  },
+  {
+    "id": "A4",
+    "status": "FIXED_TESTED",
+    "root_cause": "Synchronization ran synchronously on the command path and then held the service mutex across a full reconcile-to-tip loop, so pause and mining stop could not interrupt a large sync.",
+    "production_files": ["src-tauri/src/lib.rs", "crates/dom-wallet-core/src/lib.rs", "crates/dom-wallet-production-backend/src/lib.rs"],
+    "tests": ["regression_a4_background_sync_keeps_status_and_mining_stop_responsive_without_timing"],
+    "verification_commands": ["cargo test -p dom-wallet-tauri-shell regression_a4"]
+  },
+  {
+    "id": "A5",
+    "status": "FIXED_TESTED",
+    "root_cause": "One shared last_error field mixed authentication, node, synchronization, mining, submission, and updater failures.",
+    "production_files": ["crates/dom-wallet-core/src/lib.rs", "src-tauri/src/lib.rs"],
+    "tests": ["regression_a5_error_domains_do_not_contaminate_or_cross_clear"],
+    "verification_commands": ["cargo test -p dom-wallet-core regression_a5"]
+  },
+  {
+    "id": "A6",
+    "status": "FIXED_TESTED",
+    "root_cause": "Identity, readiness, or peer probe failures could retain node_started and the frontend reused the last READY snapshot without a stale state.",
+    "production_files": ["src-tauri/src/lib.rs", "frontend/main.js", "frontend/status.js"],
+    "tests": ["regression_a6_dead_node_clears_started_state_and_never_reuses_ready_status"],
+    "verification_commands": ["cargo test -p dom-wallet-tauri-shell regression_a6", "cd frontend && npm test"]
+  },
+  {
+    "id": "A7",
+    "status": "FIXED_TESTED",
+    "root_cause": "Public IPC accepted raw filesystem paths, did not constrain opens to complete direct children of the managed catalog, and storage opens followed internal metadata/generation symlinks.",
+    "production_files": ["src-tauri/src/lib.rs", "src-tauri/src/main.rs", "frontend/main.js", "crates/dom-wallet-storage/src/lib.rs"],
+    "tests": ["regression_a7_managed_open_rejects_traversal_staging_symlink_and_outside_paths", "regression_a7_internal_wallet_symlinks_never_escape_the_managed_directory"],
+    "verification_commands": ["cargo test -p dom-wallet-tauri-shell regression_a7"]
+  },
+  {
+    "id": "A8",
+    "status": "FIXED_TESTED",
+    "root_cause": "Seed-restore staging was hidden from the product and had no authenticated discovery, resume, or abort lifecycle.",
+    "production_files": ["crates/dom-wallet-core-restore/src/lib.rs", "src-tauri/src/main.rs", "frontend/index.html", "frontend/main.js"],
+    "tests": ["regression_a8_abandoned_restore_is_private_discoverable_resumable_and_authenticated_abortable"],
+    "verification_commands": ["cargo test -p dom-wallet-core-restore regression_a8"]
+  },
+  {
+    "id": "M1",
+    "status": "FIXED_TESTED",
+    "root_cause": "Command names, Tauri handlers, and frontend permission checks were independent hardcoded lists with a stale fixed length.",
+    "production_files": ["src-tauri/src/lib.rs", "src-tauri/src/main.rs", "frontend/main.js", "frontend/bridge.js"],
+    "tests": ["regression_m1_registry_is_exact_unique_and_served_to_the_frontend"],
+    "verification_commands": ["cargo test -p dom-wallet-tauri-shell regression_m1", "cd frontend && npm test"]
+  },
+  {
+    "id": "M2",
+    "status": "FIXED_TESTED",
+    "root_cause": "The product advertised node and peer update states despite having no working production feed call sites.",
+    "production_files": ["src-tauri/src/lib.rs", "src-tauri/src/main.rs", "frontend/index.html", "frontend/main.js"],
+    "tests": ["regression_m2_product_contract_exposes_only_the_signed_wallet_update_feed", "settings expose separate fail-closed Wallet and node update states"],
+    "verification_commands": ["cargo test -p dom-wallet-tauri-shell regression_m2", "cd frontend && npm test"]
+  },
+  {
+    "id": "M3",
+    "status": "FIXED_TESTED",
+    "root_cause": "Poisoned or partially mutated services mapped to a retryable temporary error; disk reconstruction did not replace the entire service and reset ancillary runtime state.",
+    "production_files": ["src-tauri/src/lib.rs", "src-tauri/src/main.rs"],
+    "tests": ["regression_m3_poisoned_service_requires_typed_disk_reconstruction"],
+    "verification_commands": ["cargo test -p dom-wallet-tauri-shell regression_m3"]
+  },
+  {
+    "id": "M4",
+    "status": "FIXED_TESTED",
+    "root_cause": "Updater safe-point inspection and shutdown were separate operations and ignored active workers, lifecycle mutations, and closed-wallet durable transaction state.",
+    "production_files": ["src-tauri/src/lib.rs", "src-tauri/src/main.rs"],
+    "tests": ["regression_m4_activity_coordinator_atomically_excludes_update_races"],
+    "verification_commands": ["cargo test -p dom-wallet-tauri-shell regression_m4"]
+  },
+  {
+    "id": "M5",
+    "status": "FIXED_TESTED",
+    "root_cause": "Update check directly downloaded, installed, closed, and restarted while automatic updates were hardcoded.",
+    "production_files": ["src-tauri/src/main.rs", "src-tauri/src/lib.rs", "frontend/index.html", "frontend/main.js"],
+    "tests": ["regression_m5_check_download_apply_and_preference_are_distinct"],
+    "verification_commands": ["cargo test -p dom-wallet-tauri-shell regression_m5", "cd frontend && npm test"]
+  },
+  {
+    "id": "M6",
+    "status": "FIXED_TESTED",
+    "root_cause": "The updater buffered the network body under one timeout, mapped transport failures to signature failure before enforcing signed size, and accepted unconstrained or symlinked staging destinations.",
+    "production_files": ["crates/dom-wallet-updater/src/lib.rs", "src-tauri/src/main.rs"],
+    "tests": ["regression_m6_streaming_enforces_size_hash_signature_and_distinct_timeouts", "regression_m6_staging_rejects_symlink_traversal_and_outside_root_paths"],
+    "verification_commands": ["cargo test -p dom-wallet-updater regression_m6"]
+  },
+  {
+    "id": "M7",
+    "status": "FIXED_TESTED",
+    "root_cause": "phrase_confirmed was persisted but never enforced, frontend mnemonic state survived ceremony dismissal, and dismissal left no authenticated way to redisplay an unconfirmed phrase.",
+    "production_files": ["crates/dom-wallet-core/src/lib.rs", "frontend/main.js"],
+    "tests": ["regression_m7_phrase_confirmation_is_a_durable_policy_gate", "regression_m7_frontend_clears_phrase_and_exposes_no_persistent_secret_state"],
+    "verification_commands": ["cargo test -p dom-wallet-core regression_m7", "cd frontend && npm test"]
+  },
+  {
+    "id": "M8",
+    "status": "FIXED_TESTED",
+    "root_cause": "The QR API claimed reassembly while emitting one frame, mutated export lifecycle, and used the sender identifier for receiver responses.",
+    "production_files": ["src-tauri/src/lib.rs", "frontend/index.html", "frontend/main.js", "crates/dom-wallet-core/src/lib.rs"],
+    "tests": ["regression_m8_qr_multipart_bounds_order_duplicates_conflicts_roles_and_replay", "QR exchange stays local, uses canonical native frames, and releases camera state"],
+    "verification_commands": ["cargo test -p dom-wallet-tauri-shell regression_m8", "cd frontend && npm test"]
+  },
+  {
+    "id": "M9",
+    "status": "FIXED_TESTED",
+    "root_cause": "wallet_list accepted any named directory and creation wrote directly into the final name without recoverable activation staging.",
+    "production_files": ["crates/dom-wallet-storage/src/lib.rs", "src-tauri/src/lib.rs"],
+    "tests": ["regression_m9_catalog_lists_only_complete_structurally_valid_wallets", "regression_m9_interrupted_creation_can_resume_or_authenticated_abort_without_consuming_name", "regression_m9_generation_crash_between_write_and_activation_recovers_atomically"],
+    "verification_commands": ["cargo test --workspace regression_m9"]
+  }
+]

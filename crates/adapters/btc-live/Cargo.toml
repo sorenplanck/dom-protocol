@@ -40,3 +40,8 @@ expect_used = "deny"
 panic = "deny"
 todo = "deny"
 unimplemented = "deny"
+
+[features]
+# Dual-key fresh-route preparation for e2e harnesses only; production
+# composition never enables it (stage-11 hardening of the stage-6 finding).
+harness = []

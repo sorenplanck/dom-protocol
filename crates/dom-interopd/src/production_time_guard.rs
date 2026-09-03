@@ -66,9 +66,16 @@ pub(crate) enum EconomicBoundaryTimeRequirementV2 {
 
 /// Classifies an exact route action without consulting a clock or a mutable
 /// authority.
-#[expect(
-    dead_code,
-    reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
+// `cfg_attr(not(test))` (2026-09-02): the integration harness includes this
+// file by `#[path]` and exercises the surface, so a plain expectation is
+// unfulfilled there while the production lib still needs it. The tripwire
+// stands where it matters — the PRODUCTION build fails when first wired.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
+    )
 )]
 pub(crate) const fn economic_boundary_time_requirement_v2(
     action: ActionKindV1,
@@ -190,73 +197,102 @@ pub(crate) struct FundingTimeAuthorizationV2<'authority> {
 }
 
 impl<'authority> FundingTimeAuthorizationV2<'authority> {
-    #[expect(
-        dead_code,
-        reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
+    // Same `cfg_attr(not(test))` shape as `economic_boundary_time_requirement_v2`
+    // above, for the same reason (2026-09-02).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
+        )
     )]
     pub(crate) const fn scope(&self) -> FundingTimeAuthorizationScopeV2 {
         self.facts.scope
     }
 
-    #[expect(
-        dead_code,
-        reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
+        )
     )]
     pub(crate) const fn route_scope_digest(&self) -> [u8; 32] {
         self.facts.route_scope_digest
     }
 
-    #[expect(
-        dead_code,
-        reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
+        )
     )]
     pub(crate) const fn policy_digest(&self) -> [u8; 32] {
         self.facts.policy_digest
     }
 
-    #[expect(
-        dead_code,
-        reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
+        )
     )]
     pub(crate) const fn admission_evidence_digest(&self) -> [u8; 32] {
         self.facts.admission_evidence_digest
     }
 
-    #[expect(
-        dead_code,
-        reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
+        )
     )]
     pub(crate) const fn admission_evidence_sequence(&self) -> u64 {
         self.facts.admission_evidence_sequence
     }
 
-    #[expect(
-        dead_code,
-        reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
+        )
     )]
     pub(crate) const fn admission_proof_digest(&self) -> [u8; 32] {
         self.facts.admission_proof_digest
     }
 
-    #[expect(
-        dead_code,
-        reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
+        )
     )]
     pub(crate) const fn admission_issued_at_seconds(&self) -> u64 {
         self.facts.admission_issued_at_seconds
     }
 
-    #[expect(
-        dead_code,
-        reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
+        )
     )]
     pub(crate) const fn admission_validated_at_seconds(&self) -> u64 {
         self.facts.admission_validated_at_seconds
     }
 
-    #[expect(
-        dead_code,
-        reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
+        )
     )]
     pub(crate) const fn admission_valid_until_seconds(&self) -> u64 {
         self.facts.admission_valid_until_seconds
@@ -606,9 +642,12 @@ where
 {
     /// Moves the route-scoped time authority and the authenticated base plan
     /// authority behind one non-bypassable persistence boundary.
-    #[expect(
-        dead_code,
-        reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "frozen funding-time economic guard surface (F7/M8); fails the build when first wired"
+        )
     )]
     pub(crate) fn new(time_guard: ProductionRouteTimeGuardV2, base_plan_authority: A) -> Self {
         Self {

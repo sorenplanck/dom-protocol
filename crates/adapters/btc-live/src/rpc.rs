@@ -12,7 +12,9 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use bitcoin::hashes::Hash;
-use bitcoin::{blockdata::constants::genesis_block, Address, BlockHash, Network, Txid};
+#[cfg(any(test, feature = "harness"))]
+use bitcoin::Address;
+use bitcoin::{blockdata::constants::genesis_block, BlockHash, Network, Txid};
 use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
 use reqwest::blocking::{Client, Response};
@@ -290,6 +292,7 @@ impl BitcoinCoreRpcClientV1 {
         )
     }
 
+    #[cfg(any(test, feature = "harness"))]
     pub(crate) fn fresh_wallet_destination_script(
         &self,
         label: &'static str,

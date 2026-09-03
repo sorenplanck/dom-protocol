@@ -1,0 +1,50 @@
+[package]
+name = "dom-wallet-tauri-shell"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+base64.workspace = true
+dom-wallet-core = { path = "../crates/dom-wallet-core" }
+dom-wallet-core-api.workspace = true
+dom-wallet-core-restore = { path = "../crates/dom-wallet-core-restore" }
+dom-wallet-core-sync = { path = "../crates/dom-wallet-core-sync" }
+dom-wallet-domain = { path = "../crates/dom-wallet-domain" }
+dom-wallet-embedded-core = { path = "../crates/dom-wallet-embedded-core" }
+dom-wallet-updater = { path = "../crates/dom-wallet-updater" }
+dom-wallet-node-manager = { path = "../crates/dom-wallet-node-manager" }
+dom-wallet-remote-source = { path = "../crates/dom-wallet-remote-source" }
+dom-wallet-storage = { path = "../crates/dom-wallet-storage" }
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest13.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+tracing.workspace = true
+url.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+tauri.workspace = true
+tauri-plugin-updater.workspace = true
+
+[dev-dependencies]
+dom-wallet-crypto = { path = "../crates/dom-wallet-crypto" }
+dom-wallet-node-manager = { path = "../crates/dom-wallet-node-manager", features = ["app-test-support"] }
+tempfile.workspace = true
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[lib]
+name = "dom_wallet_tauri_shell"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dom-wallet-tauri-shell"
+path = "src/main.rs"

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+msg_file="${1:?missing commit message file}"
+if grep -Eiq "^[[:space:]]*Co-authored-by:" "$msg_file"; then
+  echo "ERROR: Co-authored-by trailers are forbidden. Commits must be authored only by Soren Planck." >&2
+  exit 1
+fi

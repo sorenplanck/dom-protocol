@@ -1,0 +1,23 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "DOM Wallet V3",
+  "version": "0.3.2",
+  "identifier": "org.domprotocol.wallet.v3",
+  "build": {
+    "beforeBuildCommand": "node build.mjs",
+    "frontendDist": "../frontend/dist"
+  },
+  "app": { "windows": [{ "label": "main", "title": "DOM Wallet V3", "width": 1100, "height": 760 }] },
+  "bundle": {
+    "createUpdaterArtifacts": true,
+    "icon": ["../frontend/assets/dom-coin.png", "icons/icon.ico"]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXkgNzQxOTdBOTVDQTMwOUNGMApSV1R3bkRES2xYb1pkRzNvYlZSaUxQZlZSSHIxN0UwRmoyR044SVoyckJraXBSWnZJSVc2UExKMwo=",
+      "endpoints": [
+        "https://github.com/sorenplanck/dom-wallet-v3/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

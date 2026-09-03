@@ -141,6 +141,16 @@ pub enum AuthRefusal {
     /// Step 4: the envelope belongs to a different route.
     #[error("wrong route")]
     WrongRoute,
+    /// Step 4: the envelope's policy version is not the session's pinned
+    /// version (O-03 closure, 2026-09-02). The field was previously
+    /// committed and signed but never adjudicated by this pipeline, which
+    /// preserved authenticity of the bytes while leaving semantic downgrade
+    /// between participants undetected. The accepted version is the
+    /// SESSION'S — pinned in [`RecipientContextV1`] from the same provisioned
+    /// wire facts the daemon already compares RFQs against — never a value
+    /// the envelope gets to choose, and zero is refused unconditionally.
+    #[error("policy version not accepted")]
+    PolicyVersionNotAccepted,
     /// Step 4: the envelope expired.
     #[error("expired")]
     Expired,
@@ -200,6 +210,7 @@ impl AuthRefusal {
             | AuthRefusal::WrongRecipient
             | AuthRefusal::WrongSession
             | AuthRefusal::WrongRoute
+            | AuthRefusal::PolicyVersionNotAccepted
             | AuthRefusal::Expired
             | AuthRefusal::WrongTimelockDomain => ValidationStep::NetworkRecipientSessionExpiry,
             AuthRefusal::UnknownRosterSnapshot
@@ -222,10 +233,16 @@ impl AuthRefusal {
 /// What the recipient expects of every envelope it accepts: EXACTLY
 /// the four bindings the ratified §5.4 step 4 names — network,
 /// recipient, session (and its route) — plus the expiry, which comes
-/// from the clock the caller passes. Nothing else belongs here: the
-/// envelope also carries a policy version, but no ratified step tells
-/// a recipient to compare it, and a field nothing reads is how an
-/// unratified rule gets invented later.
+/// from the clock the caller passes, and the session's pinned policy
+/// version (O-03 closure, 2026-09-02).
+///
+/// The policy version joins the context because that is where the rest
+/// of the system already pins it: the durable inbox derives this context
+/// from the provisioned `RouteWireContextV1`, the daemon's F6 lifecycle
+/// refuses an RFQ whose version differs from the same wire facts, and the
+/// route-transport bridge compares its own envelopes against its context.
+/// The pipeline refuses a mismatch — and zero — before the expiry check,
+/// so a semantically downgraded envelope never reaches the signature step.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct RecipientContextV1 {
     /// The recipient's own participant id.
@@ -236,6 +253,9 @@ pub struct RecipientContextV1 {
     pub session_id: Digest32,
     /// The route binding of the session.
     pub route_id: Digest32,
+    /// The session's pinned policy version (never zero); an envelope
+    /// naming any other value is refused at step 4.
+    pub policy_version: u32,
 }
 
 /// One accepted envelope's position, kept so replay, gap, equivocation
@@ -499,6 +519,13 @@ fn accept_envelope_with_policy<P: MessageTypePolicy>(
     }
     if envelope.route_id != ctx.route_id {
         return Err(AuthRefusal::WrongRoute);
+    }
+    // O-03 closure (2026-09-02): the committed policy version is now
+    // adjudicated, not merely authenticated, against the SESSION'S pinned
+    // value — the same provisioned wire fact the daemon compares RFQs
+    // against. Zero never matches: a zero context is itself refused.
+    if ctx.policy_version == 0 || envelope.policy_version != ctx.policy_version {
+        return Err(AuthRefusal::PolicyVersionNotAccepted);
     }
     let (expiry_domain, expiry_value) = timelock_parts(envelope.expiry);
     let (now_domain, now_value) = timelock_parts(now);

@@ -104,11 +104,18 @@ def main() -> int:
         manifest_count += 1
         name = data.get('package', {}).get('name')
         if name:
-            if name in packages:
+            rel_manifest = str(manifest.relative_to(root)).replace('\\', '/')
+            # The install flow copies the GPL sidecar into the build checkout
+            # under sidecar-gpl/, so the same package name appearing there is
+            # the installation itself, not a duplicate. Two copies OUTSIDE the
+            # build checkout are still refused.
+            in_build_checkout = rel_manifest.startswith('sidecar-gpl/')
+            if name in packages and not in_build_checkout and not packages[name].startswith('sidecar-gpl/'):
                 errors.append(
-                    f'duplicate package {name}: {packages[name]} and {manifest.relative_to(root)}'
+                    f'duplicate package {name}: {packages[name]} and {rel_manifest}'
                 )
-            packages[name] = str(manifest.relative_to(root))
+            if not in_build_checkout or name not in packages:
+                packages[name] = rel_manifest
         for section in ('dependencies', 'dev-dependencies', 'build-dependencies'):
             for dep, spec in data.get(section, {}).items():
                 if not isinstance(spec, dict) or 'path' not in spec:
@@ -170,7 +177,8 @@ def main() -> int:
     if scripts_dir.exists():
         for shell in sorted(scripts_dir.glob('*.sh')):
             result = subprocess.run(
-                ['bash', '-n', str(shell)],
+                ['bash', '-n'],
+                input=shell.read_bytes(),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,

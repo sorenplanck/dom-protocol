@@ -1,0 +1,50 @@
+[package]
+name = "dom-wallet-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+default = []
+legacy-http-tests = ["dep:dom-wallet-chain", "dep:dom-wallet-protocol"]
+
+[dependencies]
+dom-adaptor.workspace = true
+dom-consensus.workspace = true
+dom-core.workspace = true
+dom-crypto.workspace = true
+dom-node.workspace = true
+dom-serialization.workspace = true
+dom-slate.workspace = true
+dom-wallet-chain = { path = "../dom-wallet-chain", optional = true }
+dom-wallet-core-protocol = { path = "../dom-wallet-core-protocol" }
+dom-wallet-core-recovery = { path = "../dom-wallet-core-recovery" }
+dom-wallet-core-restore = { path = "../dom-wallet-core-restore" }
+dom-wallet-core-submit = { path = "../dom-wallet-core-submit" }
+dom-wallet-core-api.workspace = true
+dom-wallet-core-sync = { path = "../dom-wallet-core-sync" }
+dom-wallet-crypto = { package = "dom-wallet-v3-crypto", path = "../dom-wallet-crypto" }
+dom-wallet-domain = { path = "../dom-wallet-domain" }
+dom-wallet-embedded-core = { path = "../dom-wallet-embedded-core" }
+dom-wallet-production-backend = { path = "../dom-wallet-production-backend" }
+dom-wallet-protocol = { path = "../dom-wallet-protocol", optional = true }
+dom-wallet-storage = { path = "../dom-wallet-storage" }
+hex.workspace = true
+rand.workspace = true
+sha2.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+dom-config.workspace = true
+dom-crypto.workspace = true
+dom-wallet.workspace = true
+dom-wallet-remote-source = { path = "../dom-wallet-remote-source" }
+reqwest.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true

@@ -1,0 +1,118 @@
+# G-F3 Sepolia close-out (docs/SEPOLIA-RUNBOOK.md).
+#
+# Manual-only: this spends real (testnet) funds and takes ~1.5 h of real
+# Ethereum finality and refund-deadline waiting, so it never runs on push.
+# The operator supplies two repository secrets and dispatches the workflow:
+#
+#   SEPOLIA_RPC_URL       endpoint serving the `finalized` tag (chain 11155111)
+#   SEPOLIA_PRIVATE_KEY   throwaway key funded with ~0.05 Sepolia ETH
+#
+# The script itself refuses any chain that is not Sepolia, never prints the
+# key, and writes its evidence to artifacts/sepolia — uploaded here as a run
+# artifact so the gate record survives the runner.
+name: f3-sepolia
+on:
+  workflow_dispatch:
+    inputs:
+      skip_harness:
+        description: >-
+          Settlement flows only (--skip-harness). A rehearsal, NOT the gate:
+          G-F3 requires the f3-harness phase.
+        type: boolean
+        default: false
+      preflight_only:
+        description: Run the preflight checks and stop before spending anything.
+        type: boolean
+        default: false
+      native_address:
+        description: >-
+          Existing ConditionLockV2 address to reuse (skips the deploy and
+          its finality wait; the preflight then prices the run without the
+          deploy budget). Requires erc20_address too. The script still
+          verifies BOTH on-chain runtime codehashes against this tree and
+          refuses any mismatch.
+        required: false
+        default: ""
+      erc20_address:
+        description: Existing ConditionLockERC20V2 address to reuse (with native_address).
+        required: false
+        default: ""
+
+jobs:
+  sepolia-e2e:
+    runs-on: ubuntu-latest
+    # Preflight + deploy + two settlement directions + real finality waits
+    # + the refund deadline. The runbook budgets ~1.5 h; leave slack.
+    # The 2026-08-10 gate run measured 18-19 min per finality wait and six
+    # waits total; with the bounded RPC retries the script can legitimately
+    # spend ~110 min inside the run plus setup and build. 170 left no slack
+    # against a single wait brushing its own 2400s bound; 200 does, without
+    # weakening anything (each wait is still individually bounded).
+    timeout-minutes: 200
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.1
+      # Compilation cache only, as in the f4/f5 workflows: the preflight
+      # still builds the harness and every phase still executes in full.
+      - uses: Swatinem/rust-cache@v2
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+      # contracts/.gitignore excludes lib/; same pinned tags as the contracts job.
+      - name: Install pinned Solidity dependencies
+        working-directory: contracts
+        run: |
+          forge install OpenZeppelin/openzeppelin-contracts@v5.1.0 --no-git
+          forge install foundry-rs/forge-std@v1.9.6 --no-git
+      # foundry-toolchain puts forge/cast on PATH at a location that varies by
+      # runner; point the script at the resolved binaries rather than guessing.
+      - name: Locate the Foundry binaries
+        run: |
+          echo "FORGE_BIN=$(command -v forge)" >> "$GITHUB_ENV"
+          echo "CAST_BIN=$(command -v cast)" >> "$GITHUB_ENV"
+      # Reuse path: nominate an existing deployment by writing the deploy
+      # evidence file the script's reuse logic reads. TRUST does not come
+      # from this file — sepolia.sh compares the LIVE on-chain runtime
+      # codehash of both addresses against the contracts built from this
+      # tree and refuses any divergence; the file only names candidates.
+      - name: Nominate an existing deployment for verified reuse
+        if: inputs.native_address != '' && inputs.erc20_address != ''
+        env:
+          NATIVE: ${{ inputs.native_address }}
+          ERC20: ${{ inputs.erc20_address }}
+        run: |
+          mkdir -p artifacts/sepolia
+          python3 - <<'PY'
+          import json, os
+          json.dump(
+              {
+                  "result": "OK",
+                  "schema": "dom-interop/f3/sepolia-deploy/v1",
+                  "note": "nominated by workflow input; trusted only after "
+                          "the live codehash verification in sepolia.sh",
+                  "contracts": {
+                      "native": {"address": os.environ["NATIVE"]},
+                      "erc20": {"address": os.environ["ERC20"]},
+                  },
+              },
+              open("artifacts/sepolia/deploy.json", "w"),
+              indent=2,
+          )
+          PY
+      - name: Run the G-F3 Sepolia script
+        env:
+          SEPOLIA_RPC_URL: ${{ secrets.SEPOLIA_RPC_URL }}
+          SEPOLIA_PRIVATE_KEY: ${{ secrets.SEPOLIA_PRIVATE_KEY }}
+          # The runner is non-interactive; the script's confirmation prompt
+          # is answered by the operator having dispatched this workflow.
+          SEPOLIA_YES: "1"
+          SEPOLIA_SKIP_HARNESS: ${{ inputs.skip_harness && '1' || '0' }}
+          SEPOLIA_PREFLIGHT_ONLY: ${{ inputs.preflight_only && '1' || '0' }}
+        run: ./scripts/sepolia.sh
+      - name: Upload the evidence directory
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sepolia-evidence
+          path: artifacts/sepolia
+          if-no-files-found: ignore

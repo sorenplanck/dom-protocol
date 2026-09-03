@@ -37,7 +37,7 @@ rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs"
 [dev-dependencies]
 getrandom = "=0.3.4"
 f7-anchor-authority = { path = "../f7-anchor-authority" }
-# LAB (NOT RATIFIED): the composed-route live test ties the real Bitcoin claim
+# LAB (RATIFIED 2026-09-02, explicit operator decision): the composed-route live test ties the real Bitcoin claim
 # to the EVM leg by deriving address(t*G) / point(t) with the same real secp
 # helper the EVM adapter uses. adapter-evm does not import the DOM pin.
 adapter-evm = { path = "../adapters/evm" }

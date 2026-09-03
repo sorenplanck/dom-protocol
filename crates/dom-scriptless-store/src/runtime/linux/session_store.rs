@@ -10920,6 +10920,39 @@ impl ContractsSessionStoreV1 {
         Ok(DurableTransportOutcomeV1::Accepted(record.receipt(false)))
     }
 
+    /// Claim-only post-anchor transport entrypoint for the F7 composition.
+    ///
+    /// The consumed linear capability is reauthenticated before delegating to
+    /// the global DSC1 journal. The ordinary transport path also checks the
+    /// same durable consumed record for `FundingConfirmed` signing messages,
+    /// so this convenience boundary cannot be bypassed by calling it directly.
+    /// Evidence-only compatibility boundary: it delegates to
+    /// [`Self::accept_transport_message`], which carries the same gate.
+    #[cfg(any(test, feature = "evidence-only"))]
+    pub fn accept_post_anchor_dom_claim_transport_message(
+        &self,
+        authorization: &ConsumedClaimSigningAuthorizationV1,
+        signed_bytes: &[u8],
+        successor: &SessionRecordV1,
+        failed_closed_successor: Option<&SessionRecordV1>,
+    ) -> Result<DurableTransportOutcomeV1, SessionStoreError> {
+        {
+            let _guard = self.operation_lock()?;
+            let (issued, _, _) = self.authenticate_live_consumed_claim_authority(authorization)?;
+            let envelope = ParsedTransportEnvelopeV1::parse(signed_bytes)?;
+            if envelope.session_id != issued.session_id
+                || !(0x0c..=0x0f).contains(&envelope.message_type)
+            {
+                return Err(SessionStoreError::ClaimSigningAuthorityUnavailable);
+            }
+        }
+        self.accept_transport_message_with_successor(
+            signed_bytes,
+            successor,
+            failed_closed_successor,
+        )
+    }
+
     fn operation_lock(&self) -> Result<MutexGuard<'_, ()>, SessionStoreError> {
         self.operation
             .lock()
@@ -41710,10 +41743,6 @@ mod tests {
             })
         }
 
-        #[expect(
-            clippy::too_many_arguments,
-            reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
-        )]
         fn alternate_reveal(
             &self,
             context_commitment: [u8; 32],
@@ -42551,7 +42580,7 @@ mod tests {
         // and authenticated the canonical staging inode. An unregistered file
         // present before `prepare_open` is correctly rejected by the inventory
         // gate and would not exercise the intended post-prepare path swap.
-        std::fs::write(&planted_path, planted)?;
+        std::fs::write(&planted_path, &planted)?;
         std::fs::set_permissions(&planted_path, std::fs::Permissions::from_mode(FILE_MODE))?;
         std::fs::rename(&staging, &displaced)?;
         std::fs::rename(&planted_path, &staging)?;

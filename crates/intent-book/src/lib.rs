@@ -1,6 +1,10 @@
 //! # intent-book
 //!
-//! The DOM intent board — INTENT_BOOK_DESIGN.md. **NOT RATIFIED.**
+//! The DOM intent board — INTENT_BOOK_DESIGN.md. **RATIFIED** (explicit
+//! operator decision, 2026-09-02; the signed register is
+//! `docs/interop/ratifications/e13-executadas/RATIFICACAO-DECISOES-EXECUTADAS-v2.md`
+//! §2.5, kept local by policy). Merit weights remain mandatory operator
+//! configuration with no default (OQ-S4); the ratification defines none.
 //!
 //! This is **not** an order book: there is no resting order under custody
 //! and no on-chain matching ("Isto NÃO é um order book […] É uma vitrine de

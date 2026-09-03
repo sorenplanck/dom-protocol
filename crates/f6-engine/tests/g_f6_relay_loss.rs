@@ -252,6 +252,7 @@ fn context_for(recipient: ParticipantId) -> RecipientContextV1 {
         network_id: NETWORK,
         session_id: SESSION,
         route_id: ROUTE_ID,
+        policy_version: 1,
     }
 }
 

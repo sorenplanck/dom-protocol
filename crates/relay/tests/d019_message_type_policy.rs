@@ -148,6 +148,7 @@ fn recipient() -> RecipientContextV1 {
         network_id: NETWORK,
         session_id: SESSION,
         route_id: ROUTE,
+        policy_version: 1,
     }
 }
 
@@ -546,6 +547,7 @@ fn accept_at(
         network_id: NETWORK,
         session_id: SESSION,
         route_id: ROUTE,
+        policy_version: 1,
     };
     let raw = envelope.canonical_bytes().unwrap();
     accept_envelope(&raw, &ctx, &rosters(), state, now()).map(|a| a.digest)

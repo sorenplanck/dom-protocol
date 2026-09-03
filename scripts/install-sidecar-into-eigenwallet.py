@@ -40,7 +40,8 @@ def verify_commit(root: Path) -> None:
             "cannot be verified. Clone the repository instead of unpacking a tarball."
         )
     result = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        ["git", "rev-parse", "HEAD"],
+        cwd=root,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

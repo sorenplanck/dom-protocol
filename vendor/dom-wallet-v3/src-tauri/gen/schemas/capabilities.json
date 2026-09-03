@@ -1,0 +1,1 @@
+{"main-window":{"identifier":"main-window","description":"Minimal core capability for the DOM Wallet V3 main window.","local":true,"windows":["main"],"permissions":["core:default"]}}

@@ -21,7 +21,7 @@ rusqlite = { workspace = true }
 # Crash injection at the eleven boundaries of F2 spec §13. Test-only:
 # the feature is off by default and no production dependency enables it.
 store = { workspace = true, features = ["failpoints"] }
-# LAB (NOT RATIFIED): the composed-route engine proof derives the shared
+# LAB (RATIFIED 2026-09-02, explicit operator decision): the composed-route engine proof derives the shared
 # adaptor point T = t*G with the same real secp helper the EVM leg uses, so
 # the engine composition is tied to the level-1 cryptographic binding.
 adapter-evm = { path = "../adapters/evm" }

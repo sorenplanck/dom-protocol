@@ -179,7 +179,9 @@ machine-local root the code validates against, naming four credential files.
 `crates/f2-harness/tests/workspace_exclusions.rs` now refuses the path itself
 rather than listing it, so re-adding it under exclusion cannot pass.
 
-**`dom-leg/f7-wallet-compositor`** — the Wallet V3 compositor, and the six
+**`dom-leg/f7-wallet-compositor-evidence-only`** (named `f7-wallet-compositor`
+until the Stage 13 guard pass required the name to carry the surface it
+forwards) — the Wallet V3 compositor, and the six
 `dom-wallet-*` git dependencies it switched on. Three written bases, none of
 them anyone's judgement: `check-boundaries.sh:13` makes an ordinary DOM Wallet
 dependency an architectural violation; `dom-leg`'s own comment declared the

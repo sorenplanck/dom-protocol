@@ -185,6 +185,7 @@ fn rfq_to_terms_binding_end_to_end_over_the_relay() {
         network_id: NETWORK,
         session_id: SESSION,
         route_id: ROUTE_ID,
+        policy_version: 1,
     };
     let mut solver_state = TranscriptStateV1::new();
     let raws = relay_node.deliver(&SOLVER);
@@ -224,6 +225,7 @@ fn rfq_to_terms_binding_end_to_end_over_the_relay() {
         network_id: NETWORK,
         session_id: SESSION,
         route_id: ROUTE_ID,
+        policy_version: 1,
     };
     let mut initiator_state = TranscriptStateV1::new();
     let raws = relay_node.deliver(&INITIATOR);
