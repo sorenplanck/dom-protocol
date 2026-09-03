@@ -24,7 +24,7 @@ dom-wallet-core-restore = { path = "../dom-wallet-core-restore" }
 dom-wallet-core-submit = { path = "../dom-wallet-core-submit" }
 dom-wallet-core-api.workspace = true
 dom-wallet-core-sync = { path = "../dom-wallet-core-sync" }
-dom-wallet-crypto = { path = "../dom-wallet-crypto" }
+dom-wallet-crypto = { package = "dom-wallet-v3-crypto", path = "../dom-wallet-crypto" }
 dom-wallet-domain = { path = "../dom-wallet-domain" }
 dom-wallet-embedded-core = { path = "../dom-wallet-embedded-core" }
 dom-wallet-production-backend = { path = "../dom-wallet-production-backend" }

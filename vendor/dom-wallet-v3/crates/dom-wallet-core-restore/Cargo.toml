@@ -14,7 +14,7 @@ dom-wallet-core-api.workspace = true
 dom-wallet-recovery.workspace = true
 dom-wallet-core-recovery = { path = "../dom-wallet-core-recovery" }
 dom-wallet-core-sync = { path = "../dom-wallet-core-sync" }
-dom-wallet-crypto = { path = "../dom-wallet-crypto" }
+dom-wallet-crypto = { package = "dom-wallet-v3-crypto", path = "../dom-wallet-crypto" }
 dom-wallet-domain = { path = "../dom-wallet-domain" }
 dom-wallet-storage = { path = "../dom-wallet-storage" }
 thiserror.workspace = true

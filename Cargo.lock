@@ -2068,7 +2068,7 @@ dependencies = [
  "dom-serialization",
  "dom-slate",
  "dom-tx",
- "dom-wallet-crypto 0.2.0",
+ "dom-wallet-crypto",
  "dom-wallet-keys",
  "fs2",
  "hex",
@@ -2128,11 +2128,11 @@ dependencies = [
  "dom-wallet-core-restore",
  "dom-wallet-core-submit",
  "dom-wallet-core-sync",
- "dom-wallet-crypto 0.3.2",
  "dom-wallet-domain",
  "dom-wallet-embedded-core",
  "dom-wallet-production-backend",
  "dom-wallet-storage",
+ "dom-wallet-v3-crypto",
  "hex",
  "rand 0.8.6",
  "serde",
@@ -2201,10 +2201,10 @@ dependencies = [
  "dom-wallet-core-api",
  "dom-wallet-core-recovery",
  "dom-wallet-core-sync",
- "dom-wallet-crypto 0.3.2",
  "dom-wallet-domain",
  "dom-wallet-recovery",
  "dom-wallet-storage",
+ "dom-wallet-v3-crypto",
  "thiserror 2.0.18",
  "uuid",
  "zeroize",
@@ -2248,21 +2248,6 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 1.0.69",
- "zeroize",
-]
-
-[[package]]
-name = "dom-wallet-crypto"
-version = "0.3.2"
-dependencies = [
- "argon2",
- "chacha20poly1305",
- "hkdf",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.18",
  "zeroize",
 ]
 
@@ -2319,9 +2304,9 @@ dependencies = [
  "dom-wallet-core-restore",
  "dom-wallet-core-submit",
  "dom-wallet-core-sync",
- "dom-wallet-crypto 0.3.2",
  "dom-wallet-embedded-core",
  "dom-wallet-storage",
+ "dom-wallet-v3-crypto",
  "thiserror 2.0.18",
 ]
 
@@ -2359,13 +2344,28 @@ dependencies = [
 name = "dom-wallet-storage"
 version = "0.3.2"
 dependencies = [
- "dom-wallet-crypto 0.3.2",
  "dom-wallet-domain",
+ "dom-wallet-v3-crypto",
  "fs2",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "uuid",
+]
+
+[[package]]
+name = "dom-wallet-v3-crypto"
+version = "0.3.2"
+dependencies = [
+ "argon2",
+ "chacha20poly1305",
+ "hkdf",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "zeroize",
 ]
 
 [[package]]
@@ -2378,7 +2378,7 @@ dependencies = [
  "dom-serialization",
  "dom-slate",
  "dom-tx",
- "dom-wallet-crypto 0.2.0",
+ "dom-wallet-crypto",
  "dom-wallet-keys",
  "fs2",
  "hex",

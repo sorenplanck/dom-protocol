@@ -6,7 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-dom-wallet-crypto = { path = "../dom-wallet-crypto" }
+dom-wallet-crypto = { package = "dom-wallet-v3-crypto", path = "../dom-wallet-crypto" }
 dom-wallet-domain = { path = "../dom-wallet-domain" }
 fs2.workspace = true
 serde.workspace = true
