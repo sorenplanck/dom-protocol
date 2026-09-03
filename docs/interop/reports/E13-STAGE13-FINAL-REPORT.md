@@ -1,7 +1,7 @@
 # Stage 13 — final report: guards, CI, release readiness and controlled publication
 
 - Date: 2026-09-02 / 2026-09-03. Branch `feat/interop-stage9`.
-- Snapshot audited: HEAD `161c0650a7855db083c1cdfffa2aa85539bd4073`, 20 commits ahead
+- Snapshot audited: HEAD `1f74bfc9c7613f07e541c14b7ca80654f72f7cbb`, 20 commits ahead
   of `origin/mainnetswap` (`187b13e2…`), 0 behind, after absorbing upstream #104 and #105.
 - Every number below was measured in this pass on this snapshot; nothing is carried over
   from an earlier report unless it says so. Local logs live under `~/.dom-interop-logs/`
@@ -96,8 +96,8 @@ Run as CI runs it, on a clean checkout: one real error — two packages named
 
 `mainnetswap publication boundary` requires the 29 node crates to be byte-identical to
 `origin/mainnetswap`. Three ratified local commits touch them: the wallet directory
-`0700` pin (`1a35bab`), the slate-secret redaction in `Debug` (`3240c6e`) and the
-node-side part of the F7 restoration (`b77fab2`). Reverting them would loosen ratified
+`0700` pin (`2b24035`), the slate-secret redaction in `Debug` (`1abcd31`) and the
+node-side part of the F7 restoration (`9478393`). Reverting them would loosen ratified
 hardening; publishing them is the push. The gate turns green with item 6 and with
 nothing else.
 
@@ -186,3 +186,15 @@ Cargo.lock                                          86490303…
 
 The three `ignored` in the daemon suite are scenarios that require an external
 environment, documented in the crate; there are no other ignores in the measured set.
+
+## 9. History note
+
+Before publication the 21 outgoing commits were rewritten once
+(`git filter-branch --index-filter`, removing
+`docs/interop/DOM-INTEROP-IMPLEMENTATION-LOG.md` from every commit): one commit had
+appended 39 lines to that local-only log, and the push would have published them. Every
+file other than the log is byte-identical to the measured snapshot, so the measurements
+above stand; author, committer and dates were preserved. The commit hashes cited in this
+report are the rewritten ones. The log's 28 245 already-published lines are removed by the
+first outgoing commit; purging them from the remote history is a separate operator
+decision.
