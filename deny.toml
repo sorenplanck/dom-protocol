@@ -14,14 +14,14 @@ version = 2
 yanked = "deny"
 ignore = [
     # bincode 1.3.3 — the maintainers ceased development permanently and the
-    # advisory itself states they "consider version 1.3.3 a complete version
-    # ... not in need of any updates"; there is no safe upgrade to move to
-    # (2.x is a different crate surface, and the solana-*/xmr-dleq-sigma
-    # consumers pin 1.x through their own upstreams). An unmaintained notice,
-    # not a vulnerability: nothing to patch, so it is acknowledged here rather
-    # than left failing the gate forever. Revisit if a RUSTSEC entry ever
-    # reports an actual soundness or security defect in 1.3.3.
-    { id = "RUSTSEC-2025-0141", reason = "unmaintained notice with no upgrade path; pinned consumers, no known vulnerability" },
+    # advisory itself declares 1.3.3 complete and not in need of updates;
+    # there is no safe upgrade to move to (2.x is a different crate surface,
+    # and the solana-*/xmr-dleq-sigma consumers pin 1.x through their own
+    # upstreams). An unmaintained notice, not a vulnerability: nothing to
+    # patch. Waiver recorded in f2-harness/tests/advisory_ignores.rs with
+    # its expiry; revisit if a RUSTSEC entry ever reports an actual
+    # soundness or security defect in 1.3.3.
+    "RUSTSEC-2025-0141",
 ]
 
 [licenses]

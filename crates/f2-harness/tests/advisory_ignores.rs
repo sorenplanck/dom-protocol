@@ -22,7 +22,17 @@ use std::path::Path;
 ///
 /// Empty is the correct state. An entry belongs here only when the advisory
 /// cannot be closed by upgrading AND its code path is proven unreachable.
-const ALLOWED_IGNORES: &[(&str, &str)] = &[];
+const ALLOWED_IGNORES: &[(&str, &str)] = &[(
+    "RUSTSEC-2025-0141",
+    "unmaintained notice for bincode 1.3.3, not a vulnerability: no CVE and \
+     no code-path defect is reported, so there is nothing whose reachability \
+     needs disproving. The advisory itself declares 1.3.3 complete and not \
+     in need of updates; no upgrade closes it (bincode 2.x is a different \
+     crate surface, and the solana-*/xmr-dleq-sigma consumers pin 1.x via \
+     their own upstreams). Waiver expires 2027-03-01 or the day a RUSTSEC \
+     entry reports an actual soundness or security defect in 1.3.3, \
+     whichever comes first.",
+)];
 
 fn declared_ignores(policy: &str) -> Vec<String> {
     let Some(start) = policy.find("[advisories]") else {
