@@ -90,6 +90,31 @@ impl RouteLegWitnessAuthorityV1 {
         })
     }
 
+    /// The sealed-retention identity of a downstream exposure under the
+    /// V3 family (the plan-source seam's vault half).
+    ///
+    /// Adjudication, recorded here because the vault type predates V3:
+    /// [`route_secret_vault::RouteSecretBindingsV2`] binds "the adaptor
+    /// point the sealed scalar opens". Under V3 the observed downstream
+    /// reveal opens the DOWNSTREAM leg's own lock point, and the V3
+    /// binding digest already pins the whole route (both leg points and
+    /// the offset-relation proof) — so the existing bindings type is
+    /// exactly right with `A_dn` in the point slot, and the vault grows
+    /// no second format.
+    #[cfg(feature = "production")]
+    pub fn retention_bindings_for_downstream_exposure(
+        &self,
+        exposure: route_secret_vault::RouteSecretExposureV2,
+    ) -> Result<route_secret_vault::RouteSecretBindingsV2, LegWitnessAuthorityRefusalV1> {
+        route_secret_vault::RouteSecretBindingsV2::new(
+            self.route_id,
+            self.composition.binding_digest(),
+            exposure,
+            self.composition.downstream_lock_point_sec1(),
+        )
+        .map_err(|_| LegWitnessAuthorityRefusalV1::InvalidScope)
+    }
+
     /// The §7.4 flow, whole: verify a downstream reveal against the
     /// downstream lock point, derive δ locally, translate, and hand back
     /// the upstream leg's ordinary witness — or refuse by name.

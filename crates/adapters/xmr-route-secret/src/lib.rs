@@ -15,6 +15,9 @@ pub enum RouteSecretError {
     /// Cross-curve proof failed.
     #[error("cross-curve route secret: {0}")]
     Dleq(#[from] DleqError),
+    /// Restored witness does not open the stored proof's claim.
+    #[error("restored witness does not open the stored proof's claim")]
+    WitnessClaimMismatch,
 }
 
 /// Secret plus its public bound proof. Secret `Debug` is redacted by construction.
@@ -47,6 +50,41 @@ impl XmrRouteSecret {
             ROLE_XMR_SHARED_SPEND,
             rng,
         )?;
+        Ok(Self { secret, proof })
+    }
+
+    /// Rebuilds the session secret from a GIVEN canonical witness and the
+    /// registered proof — the same restore discipline the Solana twin
+    /// (`solana_route_secret::SolanaRouteSecret::restore`) already carries.
+    ///
+    /// Two callers need this: restart recovery, and the Level-1 blinded
+    /// route family (DR-PRIV-001), where the leg witness is DERIVED from
+    /// the route seed rather than sampled, then re-expressed through
+    /// `CrossCurveSecret252::from_little_endian` — the range authority.
+    /// Both the proof and the witness are demanded and checked against
+    /// each other; a mismatched pair is refused rather than resumed.
+    pub fn restore(
+        witness_little_endian: [u8; 32],
+        proof: BoundCrossCurveProofV1,
+        rng: &mut (impl CryptoRng + RngCore),
+    ) -> Result<Self, RouteSecretError> {
+        let secret = CrossCurveSecret252::from_little_endian(witness_little_endian)?;
+        let registered = verify_bound(
+            &proof,
+            &proof.settlement_id,
+            &proof.context_hash,
+            ROLE_XMR_SHARED_SPEND,
+        )?;
+        let reproved = prove_bound(
+            &secret,
+            proof.settlement_id,
+            proof.context_hash,
+            ROLE_XMR_SHARED_SPEND,
+            rng,
+        )?;
+        if reproved.bundle.claim != registered {
+            return Err(RouteSecretError::WitnessClaimMismatch);
+        }
         Ok(Self { secret, proof })
     }
 
