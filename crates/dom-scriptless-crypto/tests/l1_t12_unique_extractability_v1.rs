@@ -35,8 +35,7 @@ use dom_crypto::{schnorr_challenge, PartialSig, PublicKey, SchnorrSignature};
 use dom_scriptless_crypto::{
     begin_claim_adaptor_round_v1, begin_refund_adaptor_round_v1,
     verify_claim_adaptor_pre_signature_v1, ClaimAdaptorRoundInputsV1,
-    ClaimAdaptorVerificationRequestV1, RefundAdaptorRoundInputsV1,
-    CLAIM_ADAPTOR_PRE_SIGNATURE_LEN,
+    ClaimAdaptorVerificationRequestV1, RefundAdaptorRoundInputsV1, CLAIM_ADAPTOR_PRE_SIGNATURE_LEN,
 };
 use dom_scriptless_primitives::{
     scriptless_add_public_points, scriptless_verify_final_signature, secret_scalar_mul_add_assign,
