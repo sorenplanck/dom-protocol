@@ -331,34 +331,62 @@ async fn side_chain_block_does_not_rewrite_canonical_tip_after_restart() {
     config.data_dir = data_dir.clone();
     let _ = std::fs::remove_file(config.wallet_path.as_ref().unwrap());
 
-    let node = spawn_node(config.clone()).await;
-    mine_blocks(&node, 1).await.expect("canonical mining");
-
-    let (canonical_tip, canonical_height, canonical_diff) = {
-        let chain = node.chain.lock().await;
-        (chain.tip_hash, chain.tip_height, chain.tip_difficulty)
-    };
-
     // The node's fork choice breaks an equal-work tie by the lexicographically
     // smaller hash (dom_chain::is_better_fork_choice_tip), and both blocks are at
     // height 1 on regtest with the same fixed target — equal total difficulty by
     // construction. This test is about a side block that LOSES that tie-break; one
     // that wins exercises the reorg path and invalidates everything below.
-    let (side_bytes, side_hash) = {
-        let mut attempt = 0;
+    //
+    // Both hashes are uniform over the space below the regtest target, so with a
+    // FIXED canonical the chance that a bounded batch of candidates all win the
+    // tie-break does not vanish: a canonical that lands near the top of the valid
+    // range beats every candidate, and bounding only the candidate loop made this
+    // test fail about one run in seventeen BY CONSTRUCTION (the integral of p^16).
+    // So when a batch exhausts, the whole coin is re-flipped: node and store are
+    // discarded and a FRESH canonical is mined, which re-randomizes the tie-break
+    // boundary. Five fresh canonicals bound the failure odds below one in a
+    // million while keeping every hash the miner's own.
+    let (node, canonical_tip, canonical_height, canonical_diff, side_bytes, side_hash) = {
+        let mut round = 0;
         loop {
-            let (bytes, hash) = produce_single_block("sidechain-source", 43403).await;
-            assert_ne!(
-                hash, canonical_tip,
-                "test requires two distinct height-1 blocks"
-            );
-            if hash.as_bytes() > canonical_tip.as_bytes() {
-                break (bytes, hash);
+            let _ = std::fs::remove_dir_all(&data_dir);
+            let _ = std::fs::remove_file(config.wallet_path.as_ref().unwrap());
+            let node = spawn_node(config.clone()).await;
+            mine_blocks(&node, 1).await.expect("canonical mining");
+
+            let (canonical_tip, canonical_height, canonical_diff) = {
+                let chain = node.chain.lock().await;
+                (chain.tip_hash, chain.tip_height, chain.tip_difficulty)
+            };
+
+            let mut side = None;
+            for _ in 0..16 {
+                let (bytes, hash) = produce_single_block("sidechain-source", 43403).await;
+                assert_ne!(
+                    hash, canonical_tip,
+                    "test requires two distinct height-1 blocks"
+                );
+                if hash.as_bytes() > canonical_tip.as_bytes() {
+                    side = Some((bytes, hash));
+                    break;
+                }
             }
-            attempt += 1;
+            if let Some((side_bytes, side_hash)) = side {
+                break (
+                    node,
+                    canonical_tip,
+                    canonical_height,
+                    canonical_diff,
+                    side_bytes,
+                    side_hash,
+                );
+            }
+            drop(node);
+            round += 1;
             assert!(
-                attempt < 16,
-                "could not mine a height-1 block that loses the equal-work tie-break"
+                round < 5,
+                "five fresh canonicals in a row sat too high in the target range \
+                 for any candidate to lose the equal-work tie-break"
             );
         }
     };
