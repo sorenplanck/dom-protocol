@@ -262,18 +262,25 @@ impl NodeSettings {
     /// already happened once (see `OBSOLETE_SOLE_BOOTSTRAP`). Add every new hub
     /// here.
     ///
-    /// Testnet and regtest return an EMPTY list on purpose. No public hub is
-    /// known to be reachable on either, and shipping one dead address is worse
-    /// than shipping none: an empty list keeps `disable_dns_seeds` false, so
-    /// DNS-seed discovery still runs, while a dead address would be the sole
-    /// bootstrap and discovery would be switched off to honour it.
+    /// Testnet ships the hub `deploy/README.md` documents as the way onto the
+    /// network while `testnet-seed1.dom-protocol.org` is not live. A factory
+    /// entry does NOT switch discovery off: `to_node_config` sets
+    /// `disable_dns_seeds` only when the set DIFFERS from this list, so testnet
+    /// gets a reachable peer AND keeps trying DNS for when the seed goes live.
+    /// Leaving it empty would have left the default install — `NodeSettings`
+    /// defaults to Testnet — with a dead DNS name and no fallback, since
+    /// `resolve_seeds` carries hardcoded IPs for mainnet only.
+    ///
+    /// Regtest returns an EMPTY list on purpose: it is a local-only network and
+    /// no public hub can be correct for it.
     pub fn default_seed_peers(network: NetworkKind) -> Vec<String> {
         match network {
             NetworkKind::Mainnet => vec![
                 "66.42.127.141:33369".to_string(),
                 "64.177.121.62:33369".to_string(),
             ],
-            NetworkKind::Testnet | NetworkKind::Regtest => Vec::new(),
+            NetworkKind::Testnet => vec!["64.111.92.205:33370".to_string()],
+            NetworkKind::Regtest => Vec::new(),
         }
     }
 
@@ -285,7 +292,7 @@ impl NodeSettings {
     /// `["192.153.57.211:8443"]` on disk. Without the fallback that value would
     /// differ from the factory list, `disable_dns_seeds` would stay true, and
     /// the fix would only ever reach fresh installs.
-    fn normalized_seed_peers(&self) -> Vec<String> {
+    pub fn normalized_seed_peers(&self) -> Vec<String> {
         let mut peers = Vec::new();
         for peer in &self.seed_peers {
             let peer = peer.trim();
@@ -712,15 +719,92 @@ mod tests {
         );
     }
 
-    /// Without a custom seed peer the default behavior is unchanged: DNS-seed
-    /// discovery stays enabled and the testnet DNS seed list is preserved.
+    /// Without a custom seed peer, DNS-seed discovery stays enabled and the
+    /// testnet DNS seed list is preserved — the point of the test. The factory
+    /// bootstrap now fills in as well, so discovery has BOTH paths: the peer
+    /// works today, and DNS takes over when the seed name goes live.
     #[test]
     fn no_custom_seed_peers_keep_dns_seeds_enabled() {
         let settings = testnet_settings_with_seed(vec![]);
         let config = settings.to_node_config(None).expect("config");
+        assert_eq!(
+            config.seed_peers,
+            NodeSettings::default_seed_peers(NetworkKind::Testnet)
+        );
+        assert!(
+            !config.disable_dns_seeds,
+            "the factory bootstrap must not switch DNS discovery off"
+        );
+        assert_eq!(config.dns_seeds, NodeConfig::testnet().dns_seeds);
+    }
+
+    /// The default install selects Testnet, so an empty factory list there left
+    /// onboarding with only `testnet-seed1.dom-protocol.org` — which
+    /// `deploy/README.md` records as not live — and no IP fallback, because
+    /// `resolve_seeds` hardcodes mainnet only. The default must be dialable.
+    #[test]
+    fn default_testnet_install_has_a_reachable_bootstrap() {
+        let settings = NodeSettings::default();
+        assert_eq!(
+            settings.network,
+            NetworkKind::Testnet,
+            "this test guards the DEFAULT network; update it if that changes"
+        );
+
+        let config = settings.to_node_config(None).expect("config");
+        assert!(
+            !config.seed_peers.is_empty(),
+            "the default install must ship a bootstrap peer it can actually dial"
+        );
+        assert!(
+            !config.disable_dns_seeds,
+            "and must still reach for DNS once the seed name is live"
+        );
+    }
+
+    /// Regtest is local-only: no public hub can be correct for it, and an empty
+    /// list keeps DNS discovery on rather than pinning a wrong address.
+    #[test]
+    fn regtest_ships_no_factory_bootstrap() {
+        assert!(NodeSettings::default_seed_peers(NetworkKind::Regtest).is_empty());
+        let config = regtest_settings_with_seed(vec![])
+            .to_node_config(None)
+            .expect("config");
         assert!(config.seed_peers.is_empty());
         assert!(!config.disable_dns_seeds);
-        assert_eq!(config.dns_seeds, NodeConfig::testnet().dns_seeds);
+    }
+
+    /// `normalized_seed_peers` is what the node dials, so it is also what the
+    /// Settings UI must display. These are the two inputs whose normalized form
+    /// differs from what is on disk — the migration cases.
+    #[test]
+    fn normalized_seed_peers_reports_the_effective_bootstrap() {
+        // An install that persisted the obsolete sole bootstrap.
+        let stale = mainnet_settings_with_seed(
+            OBSOLETE_SOLE_BOOTSTRAP
+                .iter()
+                .map(|peer| peer.to_string())
+                .collect(),
+        );
+        assert_eq!(
+            stale.normalized_seed_peers(),
+            NodeSettings::default_seed_peers(NetworkKind::Mainnet),
+            "the obsolete bootstrap must normalize to the factory list"
+        );
+
+        // A wallet whose list is empty (or only blanks).
+        let empty = mainnet_settings_with_seed(vec!["   ".into()]);
+        assert_eq!(
+            empty.normalized_seed_peers(),
+            NodeSettings::default_seed_peers(NetworkKind::Mainnet)
+        );
+
+        // A real user override is reported verbatim, never replaced.
+        let overridden = mainnet_settings_with_seed(vec!["127.0.0.1:18443".into()]);
+        assert_eq!(
+            overridden.normalized_seed_peers(),
+            vec!["127.0.0.1:18443".to_string()]
+        );
     }
 
     #[test]
