@@ -45,9 +45,25 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FOUNDRY_BIN="${FOUNDRY_BIN:-$HOME/.config/.foundry/bin}"
-ANVIL="${ANVIL_BIN:-$FOUNDRY_BIN/anvil}"
-FORGE="${FORGE_BIN:-$FOUNDRY_BIN/forge}"
-CAST="${CAST_BIN:-$FOUNDRY_BIN/cast}"
+
+# Resolution order per binary: an explicit *_BIN override wins verbatim; then
+# the pinned FOUNDRY_BIN directory; then PATH. The PATH fallback is what CI
+# needs — foundry-toolchain installs onto PATH, not under $HOME/.config — and
+# the hard "missing Foundry binary" refusal below still fires when none of the
+# three resolves.
+resolve_foundry_bin() {
+  # $1 = explicit override (may be empty), $2 = binary name
+  if [ -n "$1" ]; then
+    printf '%s\n' "$1"
+  elif [ -x "$FOUNDRY_BIN/$2" ]; then
+    printf '%s\n' "$FOUNDRY_BIN/$2"
+  else
+    command -v "$2" || printf '%s\n' "$FOUNDRY_BIN/$2"
+  fi
+}
+ANVIL="$(resolve_foundry_bin "${ANVIL_BIN:-}" anvil)"
+FORGE="$(resolve_foundry_bin "${FORGE_BIN:-}" forge)"
+CAST="$(resolve_foundry_bin "${CAST_BIN:-}" cast)"
 PORT="${F3_ANVIL_PORT:-8547}"
 RPC="http://127.0.0.1:${PORT}"
 CHAIN_ID=31337
@@ -100,6 +116,19 @@ for bin in "$ANVIL" "$FORGE" "$CAST"; do
     exit 1
   fi
 done
+
+# The gate's cargo runs are `--offline` on purpose (see below): a network
+# resolve in the middle of a run is a source of unrelated failures. That only
+# works when the locked dependencies are already in the local cargo cache —
+# true on a warmed developer machine, false on a cold CI runner, where the
+# first `cargo test --offline` dies unable to check out the secp256k1-zkp git
+# pin. So do ALL the network work here, up front, before the node even
+# starts: fetch exactly what the lockfile pins, and fail loudly while failing
+# is still cheap. The gate itself stays offline.
+if ! cargo fetch --locked; then
+  echo "cargo fetch --locked failed; the offline gate below cannot run without the pinned dependencies" >&2
+  exit 1
+fi
 
 ANVIL_PID=""
 # Reached only through the EXIT/INT/TERM trap below, which shellcheck cannot see.

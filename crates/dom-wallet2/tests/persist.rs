@@ -27,6 +27,15 @@ fn state() -> WalletV2State {
 #[test]
 fn wallet_state_and_full_backup_round_trip_public_api() {
     let dir = TempDir::new().unwrap();
+    // The envelope audit refuses a parent directory that is not owner-only,
+    // and a fresh tempdir inherits the process umask (0o755 under the usual
+    // 022).
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        dir.path(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .unwrap();
     let wallet_path = dir.path().join("wallet.dat");
     let backup_path = dir.path().join("wallet.dombak");
     let state = state();

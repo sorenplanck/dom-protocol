@@ -532,6 +532,9 @@ mod tests {
             }
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    stream
+                        .set_nonblocking(false)
+                        .expect("mock rpc stream restores blocking mode");
                     let req = read_http_request(&mut stream);
                     let (from, to) = parse_from_to(&req);
                     let (status, body) = handler(from, to);

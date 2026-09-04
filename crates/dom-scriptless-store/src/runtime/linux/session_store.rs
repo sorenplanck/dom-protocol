@@ -42019,8 +42019,8 @@ mod tests {
     /// adopts the parent's tree through `DOM_F7_SESSION_STORE_PARENT` — so
     /// their skipped destructors leak nothing.
     ///
-    /// **Both conditions are required, and the second is not decoration.** A
-    /// dead pid alone is not enough: pids are recycled, and a directory whose
+    /// **Both conditions are required, and the second is not decoration.**
+    /// A dead pid alone is not enough: pids are recycled, and a directory whose
     /// number now belongs to an innocent live process would be deleted out
     /// from under it. Requiring an hour of age as well means the reaper only
     /// ever touches a tree that no plausible run is still using. Absence of
@@ -51561,8 +51561,8 @@ mod tests {
 
         // Keep the DOMSPPS1 codec internally self-consistent while changing
         // both copies of the reveal transcript. Reopen must catch the semantic
-        // mismatch against the real retained ClaimAdaptor round, not merely a
-        // stale checksum.
+        // mismatch against the real retained ClaimAdaptor round, not merely
+        // a stale checksum.
         let artifact_path = temporary
             .path()
             .join("sessions")
