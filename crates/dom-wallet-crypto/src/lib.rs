@@ -276,6 +276,9 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), EnvelopeError> {
         .map_err(|error| EnvelopeError::Io(format!("failed to fsync temp file: {error}")))?;
     #[cfg(unix)]
     audit_named_file(temporary.as_file(), temporary.path())?;
+    // Consumed only by the unix permission audit below; other targets have no
+    // mode bits to audit, so the handle is deliberately unused there.
+    #[cfg_attr(not(unix), allow(unused_variables))]
     let persisted = temporary.persist(path).map_err(|error| {
         EnvelopeError::Io(format!(
             "failed to persist file atomically: {}",
@@ -473,9 +476,23 @@ mod tests {
         }
     }
 
+    /// The envelope audit refuses a parent directory that is not owner-only,
+    /// and a fresh tempdir inherits the process umask (0o755 under the usual
+    /// 022) — the same pinning dom-wallet's `owner_only_tempdir` applies.
+    fn owner_only_tempdir() -> tempfile::TempDir {
+        let dir = tempfile::TempDir::new().unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            dir.path(),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
+        dir
+    }
+
     #[test]
     fn envelope_round_trips() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("env.dat");
         save_envelope(&path, TEST_MAGIC, 1, &sample(), "pw").unwrap();
         let back: Payload = load_envelope(&path, TEST_MAGIC, 1, "pw").unwrap();
@@ -484,7 +501,7 @@ mod tests {
 
     #[test]
     fn wrong_password_is_decryption_error() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("env.dat");
         save_envelope(&path, TEST_MAGIC, 1, &sample(), "pw").unwrap();
         let err = load_envelope::<Payload>(&path, TEST_MAGIC, 1, "wrong").unwrap_err();
@@ -493,7 +510,7 @@ mod tests {
 
     #[test]
     fn tampered_ciphertext_is_decryption_error() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("env.dat");
         save_envelope(&path, TEST_MAGIC, 1, &sample(), "pw").unwrap();
         let mut data = std::fs::read(&path).unwrap();
@@ -506,7 +523,7 @@ mod tests {
 
     #[test]
     fn bad_magic_is_rejected() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("env.dat");
         save_envelope(&path, TEST_MAGIC, 1, &sample(), "pw").unwrap();
         let other_magic = b"DOM-OTHER-ENV\0";
@@ -516,7 +533,7 @@ mod tests {
 
     #[test]
     fn unknown_version_is_rejected_not_reinterpreted() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("env.dat");
         save_envelope(&path, TEST_MAGIC, 1, &sample(), "pw").unwrap();
         let err = load_envelope::<Payload>(&path, TEST_MAGIC, 2, "pw").unwrap_err();
@@ -528,7 +545,7 @@ mod tests {
 
     #[test]
     fn too_short_file_is_rejected() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("env.dat");
         std::fs::write(&path, [0u8; 10]).unwrap();
         let err = load_envelope::<Payload>(&path, TEST_MAGIC, 1, "pw").unwrap_err();

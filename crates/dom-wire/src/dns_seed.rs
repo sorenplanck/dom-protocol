@@ -18,9 +18,23 @@ const TESTNET_DNS_SEEDS: &[&str] = &[
 
 /// Hardcoded fallback IPs (in case DNS is unavailable).
 /// These are long-running foundation nodes.
-const MAINNET_SEED_IPS: &[&str] = &[
-    // To be filled after genesis
-];
+///
+/// DNS is otherwise a single point of failure for onboarding: an expired
+/// domain, an outage at the DNS provider, or a resolver that is blocked or
+/// hijacked — routine on corporate and some residential networks — leaves a
+/// FRESH install with no way into the network at all. Nodes that are already
+/// running survive on their PEX pool; new ones do not. A literal address also
+/// removes DNS resolution latency from the boot path.
+///
+/// This list is NOT a replacement for DNS. It is only consulted when DNS
+/// returned nothing (see the fallback at the end of `resolve_seeds`), because
+/// baked-in addresses are a censorship point and they go stale: a rebuilt VPS
+/// changes IP and the literal becomes dead weight inside everyone's binary.
+/// Treat it as part of the release checklist — review it every version.
+///
+/// IPv6 literals (`[2001:db8::1]:33369`) belong here too, but only once the
+/// hubs actually have global IPv6; today they do not.
+const MAINNET_SEED_IPS: &[&str] = &["66.42.127.141:33369", "64.177.121.62:33369"];
 
 const DNS_SUCCESS_TTL: Duration = Duration::from_secs(10 * 60);
 const DNS_TEMPORARY_BACKOFF_INITIAL: Duration = Duration::from_secs(30);
@@ -210,6 +224,47 @@ mod tests {
                 "seed2.dom-protocol.org",
                 "seed3.dom-protocol.org",
             ]
+        );
+    }
+
+    /// A9: the fallback exists so that a fresh install can still enter the
+    /// network when DNS returns nothing. An empty list makes the whole fallback
+    /// branch inert, which is what shipped before.
+    #[test]
+    fn mainnet_seed_ip_fallback_is_populated() {
+        assert!(
+            !MAINNET_SEED_IPS.is_empty(),
+            "the DNS-unavailable fallback must not be empty, or DNS is a single \
+             point of failure for onboarding"
+        );
+    }
+
+    /// Each fallback entry is dialed directly, so it must already carry a port
+    /// and parse as a socket address — a bare IP would be dialed as-is and fail.
+    #[test]
+    fn mainnet_seed_ips_are_dialable_socket_addrs() {
+        use std::net::SocketAddr;
+        for entry in MAINNET_SEED_IPS {
+            let addr: SocketAddr = entry
+                .parse()
+                .unwrap_or_else(|e| panic!("fallback seed {entry} is not a socket address: {e}"));
+            assert_ne!(addr.port(), 0, "fallback seed {entry} has no port");
+        }
+    }
+
+    /// The fallback must span more than one host, for the same reason the
+    /// wallet's factory bootstrap must: one address is one point of failure.
+    #[test]
+    fn mainnet_seed_ips_span_multiple_hosts() {
+        use std::collections::BTreeSet;
+        use std::net::SocketAddr;
+        let hosts: BTreeSet<_> = MAINNET_SEED_IPS
+            .iter()
+            .map(|e| e.parse::<SocketAddr>().expect("socket addr").ip())
+            .collect();
+        assert!(
+            hosts.len() >= 2,
+            "fallback must cover >=2 distinct hosts, got {hosts:?}"
         );
     }
 

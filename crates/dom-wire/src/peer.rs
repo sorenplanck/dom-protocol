@@ -54,8 +54,20 @@ pub struct PeerInfo {
     pub outbound: bool,
     /// Current connection state.
     pub state: PeerState,
-    /// Time of connection establishment.
+    /// Time of connection establishment. Monotonic — use it for durations.
     pub connected_at: Instant,
+    /// Time of connection establishment as a Unix timestamp, for reporting.
+    ///
+    /// `connected_at` is an `Instant`: monotonic, with no epoch, so it cannot
+    /// be turned into a wall-clock time without anchoring it against
+    /// `SystemTime::now()` at every read. Recording the wall clock once, here,
+    /// keeps the reported value stable across repeated RPC queries instead of
+    /// drifting with each one.
+    ///
+    /// This is the start of the current SESSION, not of the relationship with
+    /// the peer: after a node restart a long-standing peer reports an age no
+    /// greater than the process uptime.
+    pub connected_at_unix: u64,
     /// Best height the peer claims.
     pub best_height: u64,
     /// Best hash the peer claims.
@@ -80,6 +92,10 @@ impl PeerInfo {
             outbound,
             state: PeerState::Handshaking,
             connected_at: Instant::now(),
+            connected_at_unix: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
             best_height: 0,
             best_hash: [0u8; 32],
             user_agent: String::new(),

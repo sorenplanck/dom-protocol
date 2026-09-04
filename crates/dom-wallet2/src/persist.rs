@@ -19,7 +19,9 @@
 use crate::store::StoreError;
 use crate::wallet_state::{WalletV2State, LEGACY_SCHEMA_VERSION_V2, SCHEMA_VERSION};
 use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 use thiserror::Error;
 
 /// v2 wallet-file magic. 14 bytes, distinct from v1's `DOM-WALLET-V1\0`, so a
@@ -163,6 +165,9 @@ fn acquire_and_validate_migration_owner_lock(
     Err(PersistError::InvalidOwnerLock)
 }
 
+// Reached from the unix validation path and from the tests; the non-unix
+// production path refuses before ever needing the lock's name.
+#[cfg(unix)]
 fn migration_owner_lock_path(path: &Path) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(".interop.lock");
@@ -198,11 +203,6 @@ fn validate_migration_owner_lock(path: &Path, owner_lock: &File) -> Result<(), P
     Ok(())
 }
 
-#[cfg(not(unix))]
-fn validate_migration_owner_lock(_path: &Path, _owner_lock: &File) -> Result<(), PersistError> {
-    Err(PersistError::InvalidOwnerLock)
-}
-
 /// Decrypt and reconstruct the wallet state from `path`.
 ///
 /// Verifies the v2 magic and envelope version (rejecting v1 files and unknown
@@ -230,6 +230,20 @@ mod tests {
     use crate::types::{
         BlockRef, DerivIndex, Network, OutputOrigin, OutputStatus, PayoutForV1, StoredOutput,
     };
+
+    /// The envelope audit refuses a parent directory that is not owner-only,
+    /// and a fresh tempdir inherits the process umask (0o755 under the usual
+    /// 022) — the same pinning dom-wallet's `owner_only_tempdir` applies.
+    fn owner_only_tempdir() -> tempfile::TempDir {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            dir.path(),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .expect("owner-only tempdir");
+        dir
+    }
     use zeroize::Zeroizing;
 
     /// Distinctive 64-byte seed pattern, so the "not in plaintext" scan is exact.
@@ -353,7 +367,7 @@ mod tests {
 
     #[test]
     fn round_trip_preserves_every_field() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet.dat");
         let state = populated_state();
 
@@ -426,7 +440,7 @@ mod tests {
     fn slate_secrets_persist_encrypted_never_plaintext() {
         // The same rigor as the seed: in-flight slate secrets must never appear
         // in plaintext on disk, yet round-trip identically after decryption.
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet.dat");
         save_wallet_state(&populated_state(), &path, "pw").unwrap();
 
@@ -476,7 +490,7 @@ mod tests {
 
     #[test]
     fn seed_and_blinding_persist_encrypted_never_plaintext() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet.dat");
         save_wallet_state(&populated_state(), &path, "pw").unwrap();
 
@@ -517,7 +531,7 @@ mod tests {
 
     #[test]
     fn wrong_password_is_rejected_without_panic() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet.dat");
         save_wallet_state(&populated_state(), &path, "pw").unwrap();
 
@@ -533,7 +547,7 @@ mod tests {
 
     #[test]
     fn v1_magic_file_is_rejected() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet.dat");
         dom_wallet_crypto::save_envelope(
             &path,
@@ -556,7 +570,7 @@ mod tests {
 
     #[test]
     fn unknown_envelope_version_is_rejected() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet.dat");
         dom_wallet_crypto::save_envelope(
             &path,
@@ -580,7 +594,7 @@ mod tests {
 
     #[test]
     fn unknown_payload_schema_is_rejected() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet.dat");
         let mut future = WalletV2State::new(Network::Regtest, [0u8; 32]);
         future.schema_version = SCHEMA_VERSION + 7;
@@ -621,7 +635,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn legacy_v2_golden_requires_owner_locked_atomic_migration() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet.dat");
         let mut legacy = WalletV2State::new(Network::Regtest, [0x7E; 32]);
         legacy
@@ -673,7 +687,7 @@ mod tests {
         use std::fs::OpenOptions;
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet.dat");
         save_wallet_state(&populated_state(), &path, "pw").unwrap();
         let before = std::fs::read(&path).unwrap();
@@ -699,7 +713,7 @@ mod tests {
     fn migration_acquires_and_retains_lock_on_an_unlocked_exact_handle() {
         use std::fs::OpenOptions;
 
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet.dat");
         save_wallet_state(&populated_state(), &path, "pw").unwrap();
         let mut owner = open_migration_lock(&path);
@@ -723,7 +737,7 @@ mod tests {
     fn migration_rejects_second_handle_lock_without_decrypt_or_mutation() {
         use std::fs::OpenOptions;
 
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet.dat");
         let mut legacy = WalletV2State::new(Network::Regtest, [0x73; 32]);
         legacy.schema_version = LEGACY_SCHEMA_VERSION_V2;
@@ -748,7 +762,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn migration_rejects_a_v3_pin_disguised_as_legacy_without_mutation() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet.dat");
         let mut disguised = populated_state();
         disguised.schema_version = LEGACY_SCHEMA_VERSION_V2;
@@ -771,7 +785,7 @@ mod tests {
 
     #[test]
     fn ordinary_save_refuses_a_legacy_schema() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet.dat");
         let mut state = WalletV2State::new(Network::Regtest, [1; 32]);
         state.schema_version = LEGACY_SCHEMA_VERSION_V2;
@@ -784,7 +798,7 @@ mod tests {
 
     #[test]
     fn tampered_file_is_rejected_without_panic() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet.dat");
         save_wallet_state(&populated_state(), &path, "pw").unwrap();
 

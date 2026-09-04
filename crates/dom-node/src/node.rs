@@ -1513,18 +1513,18 @@ impl dom_rpc::NodeHandle for DomNode {
         })
     }
 
+    /// See `node_handle::peer_dto`. This site used to mirror the same defect
+    /// with the opposite constant (`"inbound"` for every peer, and a
+    /// `connected_since` of 0), so the two `/peers` implementations disagreed
+    /// with each other as well as with `/metrics`.
     fn get_peers(&self) -> Vec<dom_rpc::PeerInfo> {
         let Ok(peers) = self.peers.try_lock() else {
             return Vec::new();
         };
         peers
-            .connected_peers()
+            .connected_peer_infos()
             .into_iter()
-            .map(|addr| dom_rpc::PeerInfo {
-                addr,
-                direction: "inbound".into(),
-                connected_since: 0,
-            })
+            .map(crate::node_handle::peer_dto)
             .collect()
     }
 }

@@ -29,7 +29,18 @@ fn foreign_output() -> StoredOutput {
 
 #[test]
 fn fix026_foreign_chain_backup_is_rejected_on_import() {
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = {
+        let dir = tempfile::TempDir::new().unwrap();
+        // The envelope audit refuses a parent that is not owner-only, and
+        // a fresh tempdir inherits the process umask (0o755 under 022).
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            dir.path(),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
+        dir
+    };
     let path = dir.path().join("foreign.dombak");
 
     let mut foreign_src = OutputStore::new();
@@ -60,7 +71,18 @@ fn fix026_foreign_chain_backup_is_rejected_on_import() {
 
 #[test]
 fn fix026_backup_payload_is_chain_bound() {
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = {
+        let dir = tempfile::TempDir::new().unwrap();
+        // The envelope audit refuses a parent that is not owner-only, and
+        // a fresh tempdir inherits the process umask (0o755 under 022).
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            dir.path(),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
+        dir
+    };
     let path = dir.path().join("our.dombak");
     let mut src = OutputStore::new();
     src.insert(foreign_output()).unwrap();

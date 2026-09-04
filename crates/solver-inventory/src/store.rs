@@ -1364,8 +1364,8 @@ impl DurableInventoryStoreV1 {
         Ok(capability)
     }
 
-    /// Recovers a move-only committed V2 execution authority. V1 records and
-    /// stale fencing generations are refused.
+    /// Recovers a move-only committed V2 execution authority. V1 records
+    /// and stale fencing generations are refused.
     pub fn committed_capability_v2(
         &mut self,
         lease: InventoryLeaseV1,

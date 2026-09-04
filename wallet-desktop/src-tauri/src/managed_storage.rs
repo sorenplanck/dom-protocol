@@ -470,6 +470,36 @@ pub fn load_wallet_node_layout(
             settings
         }
     };
+
+    // Migrate the persisted bootstrap set to the effective one (R-A0.1).
+    //
+    // `to_node_config` normalizes before dialing, so without this the node
+    // dials the factory hubs while `seed_peers` on disk — and therefore the
+    // Settings UI and the next `managed_settings_save` — still shows the
+    // obsolete sole bootstrap or an empty list. Persisting here makes the
+    // migration real and keeps the displayed configuration the active one.
+    //
+    // Best-effort by design: a read-only or full disk must not stop a wallet
+    // from opening, and the in-memory value is already correct for this run.
+    let settings = {
+        let effective = settings.normalized_seed_peers();
+        if effective == settings.seed_peers {
+            settings
+        } else {
+            let migrated = NodeSettings {
+                seed_peers: effective,
+                ..settings
+            };
+            if let Err(error) = save_node_settings(&layout, &migrated) {
+                tracing::warn!(
+                    "could not persist the migrated bootstrap peers for {:?}: {error}",
+                    layout.display_name
+                );
+            }
+            migrated
+        }
+    };
+
     Ok((layout, settings))
 }
 

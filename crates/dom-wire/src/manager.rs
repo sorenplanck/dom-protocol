@@ -1056,6 +1056,27 @@ impl PeerManager {
         out
     }
 
+    /// Like [`Self::connected_peers`], but preserves each peer's metadata.
+    ///
+    /// `connected_peers` returns only address strings, so every caller that
+    /// needs direction or connection time has to invent it — which is how
+    /// `/peers` came to report a hardcoded direction and the clock at the
+    /// moment of the query. The counts behind `dom_inbound_peers` /
+    /// `dom_outbound_peers` read `PeerInfo::outbound` directly and have always
+    /// been right; this accessor gives the RPC the same source.
+    ///
+    /// Ordering matches `connected_peers` (by address string) so the two stay
+    /// interchangeable for callers that only need the addresses.
+    pub fn connected_peer_infos(&self) -> Vec<&PeerInfo> {
+        let mut out: Vec<(&String, &PeerInfo)> = self
+            .peers
+            .iter()
+            .filter(|(_, p)| p.state == PeerState::Connected)
+            .collect();
+        out.sort_by_key(|(addr, _)| *addr);
+        out.into_iter().map(|(_, p)| p).collect()
+    }
+
     /// Record a duplicate block relay from a connected peer.
     ///
     /// Returns true when the current relay exceeds the duplicate quota and
@@ -1265,6 +1286,101 @@ mod tests {
         let mut p = PeerInfo::new(addr, outbound);
         p.state = PeerState::Connected;
         p
+    }
+
+    /// B1: the metadata `/peers` needs is already in the peer table. This is
+    /// the accessor that stops it being thrown away — direction must come from
+    /// `outbound`, not from a constant, and must be per-peer.
+    #[test]
+    fn connected_peer_infos_preserve_direction_per_peer() {
+        let mut mgr = PeerManager::new(125, 8);
+        mgr.register_peer(make_peer([10, 0, 0, 1], 33369, true))
+            .unwrap();
+        mgr.register_peer(make_peer([10, 1, 0, 2], 33369, false))
+            .unwrap();
+        mgr.register_peer(make_peer([10, 2, 0, 3], 33369, false))
+            .unwrap();
+
+        let infos = mgr.connected_peer_infos();
+        assert_eq!(infos.len(), 3);
+        assert_eq!(
+            infos.iter().filter(|p| p.outbound).count(),
+            1,
+            "outbound count must match the peers actually registered as outbound"
+        );
+        assert_eq!(
+            infos.iter().filter(|p| !p.outbound).count(),
+            2,
+            "inbound count must match the peers actually registered as inbound"
+        );
+        // The same numbers the /metrics gauges publish.
+        assert_eq!(mgr.outbound_count(), 1);
+        assert_eq!(mgr.inbound_count(), 2);
+    }
+
+    /// The new accessor must stay interchangeable with `connected_peers`:
+    /// same peers, same order.
+    #[test]
+    fn connected_peer_infos_match_connected_peers_order() {
+        let mut mgr = PeerManager::new(125, 8);
+        mgr.register_peer(make_peer([10, 0, 0, 9], 33369, true))
+            .unwrap();
+        mgr.register_peer(make_peer([10, 0, 0, 2], 33369, false))
+            .unwrap();
+        mgr.register_peer(make_peer([10, 0, 0, 20], 33369, true))
+            .unwrap();
+
+        let addrs: Vec<String> = mgr
+            .connected_peer_infos()
+            .iter()
+            .map(|p| p.addr.to_string())
+            .collect();
+        assert_eq!(addrs, mgr.connected_peers());
+    }
+
+    /// Peers that are not fully connected must not appear, exactly as with
+    /// `connected_peers`.
+    #[test]
+    fn connected_peer_infos_exclude_unconnected_peers() {
+        let mut mgr = PeerManager::new(125, 8);
+        mgr.register_peer(make_peer([10, 0, 0, 1], 33369, true))
+            .unwrap();
+        let mut handshaking = PeerInfo::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 5, 0, 1)), 33369),
+            false,
+        );
+        handshaking.state = PeerState::Handshaking;
+        mgr.register_peer(handshaking).unwrap();
+
+        assert_eq!(mgr.connected_peer_infos().len(), 1);
+        assert_eq!(
+            mgr.connected_peer_infos().len(),
+            mgr.connected_peers().len()
+        );
+    }
+
+    /// B1: `connected_at_unix` is recorded once, when the connection is made.
+    /// The bug it replaces read the clock while serving the request, so the
+    /// value moved forward by the polling interval on every query and was
+    /// identical across all peers.
+    #[test]
+    fn connected_at_unix_is_fixed_at_connection_time() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let peer = make_peer([10, 0, 0, 1], 33369, true);
+        let recorded = peer.connected_at_unix;
+        assert!(
+            recorded >= now.saturating_sub(5) && recorded <= now + 5,
+            "connected_at_unix {recorded} must be the wall clock at construction (~{now})"
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(
+            peer.connected_at_unix, recorded,
+            "the value must not move once the connection exists"
+        );
     }
 
     #[test]

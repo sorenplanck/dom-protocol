@@ -42,6 +42,15 @@ fn finalized_payment_can_submit_after_state_round_trip() {
     let (_tx, slate_hash) = finalize_tracked(&mut sender, answered, 4000).unwrap();
 
     let dir = tempfile::TempDir::new().unwrap();
+    // The envelope audit refuses a parent directory that is not owner-only,
+    // and a fresh tempdir inherits the process umask (0o755 under the usual
+    // 022).
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        dir.path(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .unwrap();
     let path = dir.path().join("wallet.dombak");
     dom_wallet2::export_full_backup(&sender, &path, "pw", 5000).unwrap();
     let mut restored = dom_wallet2::import_full_backup(&path, "pw", CHAIN_ID).unwrap();

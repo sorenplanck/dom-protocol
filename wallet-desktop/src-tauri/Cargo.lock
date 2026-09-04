@@ -1357,6 +1357,7 @@ dependencies = [
  "dom-consensus",
  "dom-core",
  "dom-crypto",
+ "dom-pow",
  "dom-serialization",
  "dom-slate",
  "dom-tx",

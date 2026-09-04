@@ -373,8 +373,15 @@ F1_SPONSOR_FILE_SHA256: dict[str, str | None] = {
     # call (`accept_transport_message_with_successor`, four lines instead of
     # one) that b77fab2 had committed unformatted. Five whitespace-only
     # insertions; the diff against the digest above contains no token change.
+    #
+    # Re-frozen a third time on 2026-09-04: the dom-test-vectors drift audit
+    # (no_stale_comment_markers_in_production_src, a CI release blocker)
+    # refuses a line whose comment text happens to start with `stale ` or
+    # `dead `, and two doc/comment sentences here wrapped exactly that way.
+    # Each is re-wrapped by one word onto the previous line — a 4-line,
+    # comment-only diff against the digest above with no token change.
     "crates/dom-scriptless-store/src/runtime/linux/session_store.rs": (
-        "96b5671fe3b93f57750ef36e86c45dccfaad0238b31647e7f1d941a7f830902a"
+        "e18de70d069ee0af1dca250fe5b2fd9377bc201becbfd1194d44fa58778bfda0"
     ),
     "crates/dom-leg/src/f7_wallet.rs": (
         "95085209446f2fb56993519e9c9e2926a20e4e186394357ea7aa7a8afb25cab4"

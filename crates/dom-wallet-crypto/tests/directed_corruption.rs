@@ -35,6 +35,14 @@ fn sample() -> Payload {
 
 fn written() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::TempDir::new().unwrap();
+    // The envelope audit refuses a parent that is not owner-only, and a fresh
+    // tempdir inherits the process umask (0o755 under the usual 022).
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        dir.path(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .unwrap();
     let path = dir.path().join("env.dat");
     save_envelope(&path, TEST_MAGIC, 1, &sample(), "pw").unwrap();
     (dir, path)

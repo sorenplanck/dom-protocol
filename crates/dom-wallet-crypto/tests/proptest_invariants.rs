@@ -23,6 +23,19 @@ struct Payload {
     secret: Vec<u8>,
 }
 
+/// The envelope audit refuses a parent directory that is not owner-only, and a
+/// fresh tempdir inherits the process umask (0o755 under the usual 022).
+fn owner_only_tempdir() -> tempfile::TempDir {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        dir.path(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .expect("owner-only tempdir");
+    dir
+}
+
 proptest! {
     // Argon2id at 64 MiB is slow (each save/load is one full 64 MiB stretch);
     // keep case count small so the suite stays within the seconds-sanity budget.
@@ -38,7 +51,7 @@ proptest! {
         secret in proptest::collection::vec(any::<u8>(), 0..128),
         password in ".{0,32}",
     ) {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("env.dat");
         let value = Payload { a, b, secret };
         save_envelope(&path, TEST_MAGIC, 1, &value, &password).unwrap();
@@ -54,7 +67,7 @@ proptest! {
         a in any::<u64>(),
         password in ".{0,32}",
     ) {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let p1 = dir.path().join("a.dat");
         let p2 = dir.path().join("b.dat");
         let value = Payload { a, b: "x".into(), secret: vec![9u8; 16] };
@@ -91,7 +104,7 @@ proptest! {
 /// nonce's own collision odds.
 #[test]
 fn nonce_reuse_neutralised_by_fresh_salt() {
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = owner_only_tempdir();
     let value = Payload {
         a: 1,
         b: "k".into(),
