@@ -284,6 +284,20 @@ mod tests {
         BlockRef, DerivIndex, KeychainV2, Network, OutputOrigin, OutputStatus, PayoutForV1,
         StoreMeta,
     };
+
+    /// The envelope audit refuses a parent directory that is not owner-only,
+    /// and a fresh tempdir inherits the process umask (0o755 under the usual
+    /// 022) — the same pinning dom-wallet's `owner_only_tempdir` applies.
+    fn owner_only_tempdir() -> tempfile::TempDir {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            dir.path(),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .expect("owner-only tempdir");
+        dir
+    }
     use crate::{create_send, receive, submit_finalized};
     use dom_crypto::pedersen::{BlindingFactor, Commitment};
     use zeroize::Zeroizing;
@@ -488,7 +502,7 @@ mod tests {
 
     #[test]
     fn export_import_round_trip_into_empty_store_restores_all() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet.dombak");
 
         let mut source = OutputStore::new();
@@ -524,7 +538,7 @@ mod tests {
 
     #[test]
     fn full_backup_round_trip_preserves_wallet_v2_state() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet-full.dombak");
         let state = populated_full_state();
 
@@ -536,7 +550,7 @@ mod tests {
 
     #[test]
     fn full_backup_wrong_passphrase_rejected_without_mutation() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet-full.dombak");
         let state = populated_full_state();
 
@@ -554,7 +568,7 @@ mod tests {
 
     #[test]
     fn full_backup_rejects_foreign_chain_id() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet-full.dombak");
         let state = populated_full_state();
 
@@ -566,7 +580,7 @@ mod tests {
 
     #[test]
     fn legacy_output_backup_still_imports_after_full_backup_schema_added() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("legacy-output.dombak");
         let mut src = OutputStore::new();
         src.insert(unconfirmed_output(7, 700, OutputOrigin::Change))
@@ -596,7 +610,7 @@ mod tests {
 
     #[test]
     fn legacy_full_backup_explicitly_migrates_inner_wallet_v2() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("legacy-full.dombak");
         let mut legacy = WalletV2State::new(Network::Regtest, FULL_CHAIN_ID);
         legacy.schema_version = LEGACY_SCHEMA_VERSION_V2;
@@ -627,7 +641,7 @@ mod tests {
 
     #[test]
     fn legacy_output_backup_with_a_v3_pin_is_rejected_without_merge() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("disguised-legacy.dombak");
         let mut disguised = unconfirmed_output(7, 700, OutputOrigin::ReceiveSlate);
         disguised
@@ -653,7 +667,7 @@ mod tests {
 
     #[test]
     fn full_backup_file_not_loadable_as_wallet_dat() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet-full.dombak");
         let state = populated_full_state();
 
@@ -671,7 +685,7 @@ mod tests {
 
     #[test]
     fn wallet_dat_not_importable_as_full_backup() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet.dat");
         let state = populated_full_state();
 
@@ -689,7 +703,7 @@ mod tests {
 
     #[test]
     fn full_backup_pending_sender_slate_survives_restore_and_can_submit_finalized_tx() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("sender-full.dombak");
         let mut sender = WalletV2State::new(Network::Regtest, FULL_CHAIN_ID);
         sender.meta.last_reconciled_tip = 100;
@@ -714,7 +728,7 @@ mod tests {
 
     #[test]
     fn full_backup_receiver_slate_preserves_output_blinding() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("receiver-full.dombak");
         let mut sender = WalletV2State::new(Network::Regtest, FULL_CHAIN_ID);
         sender.meta.last_reconciled_tip = 100;
@@ -742,7 +756,7 @@ mod tests {
 
     #[test]
     fn full_backup_does_not_debug_or_log_secret_material() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet-full.dombak");
         let state = populated_full_state();
 
@@ -769,7 +783,7 @@ mod tests {
 
     #[test]
     fn import_is_non_destructive_recovers_missing_only() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet.dombak");
 
         // Backup holds outputs 1 (coinbase) and 2 (receive).
@@ -807,7 +821,7 @@ mod tests {
     #[test]
     fn stale_backup_never_downgrades_a_spent_output() {
         // Backup (stale) has output 1 as Confirmed; the store has since spent it.
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet.dombak");
         let mut backup_src = OutputStore::new();
         backup_src
@@ -834,7 +848,7 @@ mod tests {
     fn backup_advances_a_more_stale_store_status() {
         // The reverse: the store has output 1 Unconfirmed; a (newer) backup has
         // it Confirmed. The merge adopts the more advanced status.
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet.dombak");
         let mut backup_src = OutputStore::new();
         backup_src
@@ -856,7 +870,7 @@ mod tests {
 
     #[test]
     fn wrong_passphrase_is_rejected_without_panic() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet.dombak");
         let mut src = OutputStore::new();
         src.insert(unconfirmed_output(1, 1, OutputOrigin::Change))
@@ -878,7 +892,7 @@ mod tests {
     #[test]
     fn store_file_is_rejected_by_backup_loader() {
         // A v2 store file (wallet.dat) must NOT be importable as a backup.
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet.dat");
         let mut state = crate::WalletV2State::new(crate::Network::Regtest, [0u8; 32]);
         state
@@ -900,7 +914,7 @@ mod tests {
 
     #[test]
     fn v1_magic_file_is_rejected_by_backup_loader() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("legacy");
         dom_wallet_crypto::save_envelope(
             &path,
@@ -931,7 +945,7 @@ mod tests {
     #[test]
     fn backup_file_is_rejected_by_the_store_loader() {
         // Symmetry: a backup must NOT load as a store.
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet.dombak");
         let mut src = OutputStore::new();
         src.insert(unconfirmed_output(1, 1, OutputOrigin::Change))
@@ -950,7 +964,7 @@ mod tests {
 
     #[test]
     fn unknown_backup_schema_is_rejected() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet.dombak");
         dom_wallet_crypto::save_envelope(
             &path,

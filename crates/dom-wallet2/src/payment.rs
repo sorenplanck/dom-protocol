@@ -450,6 +450,20 @@ mod tests {
     use crate::types::{BlockRef, Network, PayoutForV1};
     use dom_crypto::pedersen::{BlindingFactor, Commitment};
 
+    /// The envelope audit refuses a parent directory that is not owner-only,
+    /// and a fresh tempdir inherits the process umask (0o755 under the usual
+    /// 022) — the same pinning dom-wallet's `owner_only_tempdir` applies.
+    fn owner_only_tempdir() -> tempfile::TempDir {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            dir.path(),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .expect("owner-only tempdir");
+        dir
+    }
+
     /// A confirmed, mature, non-coinbase output with a real (commitment,blinding)
     /// pair, so `build_send` can do real crypto over it.
     fn funded_output(value: u64, now: u64) -> StoredOutput {
@@ -999,7 +1013,7 @@ mod tests {
 
         // Persist (encrypted) and reload — simulating a crash after finalize but
         // before submit. The secrets are gone; only the public tx remains.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = owner_only_tempdir();
         let path = dir.path().join("wallet.dom");
         save_wallet_state(&sender, &path, "pw").unwrap();
         let mut reloaded = load_wallet_state(&path, "pw").unwrap();

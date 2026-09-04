@@ -41,7 +41,18 @@ fn block_with_output(height: u64, hash_byte: u8, commitment: [u8; 33]) -> ScanBl
 /// reloaded → re-mined → re-confirmed from on-disk material.
 #[test]
 fn reorg_remine_survives_a_persistence_restart() {
-    let dir = TempDir::new().unwrap();
+    let dir = {
+        let dir = TempDir::new().unwrap();
+        // The envelope audit refuses a parent that is not owner-only, and
+        // a fresh tempdir inherits the process umask (0o755 under 022).
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            dir.path(),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
+        dir
+    };
     let amount: u64 = 900;
 
     let mut store = OutputStore::new();
@@ -95,7 +106,18 @@ fn reorg_remine_survives_a_persistence_restart() {
 /// subsequent Repair-style reconcile.
 #[test]
 fn confirmed_receive_survives_persistence_then_repair() {
-    let dir = TempDir::new().unwrap();
+    let dir = {
+        let dir = TempDir::new().unwrap();
+        // The envelope audit refuses a parent that is not owner-only, and
+        // a fresh tempdir inherits the process umask (0o755 under 022).
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            dir.path(),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
+        dir
+    };
     let amount: u64 = 900;
 
     let mut store = OutputStore::new();
@@ -151,7 +173,18 @@ fn confirmed_receive_survives_persistence_then_repair() {
 /// persistence cycle and a subsequent Repair-style reconcile.
 #[test]
 fn confirmed_change_survives_persistence_then_repair() {
-    let dir = TempDir::new().unwrap();
+    let dir = {
+        let dir = TempDir::new().unwrap();
+        // The envelope audit refuses a parent that is not owner-only, and
+        // a fresh tempdir inherits the process umask (0o755 under 022).
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            dir.path(),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
+        dir
+    };
     let reward: u64 = 1000;
     let change_value: u64 = 400;
 

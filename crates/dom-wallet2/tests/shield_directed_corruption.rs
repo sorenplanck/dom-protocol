@@ -183,7 +183,18 @@ fn saved_state(path: &std::path::Path) {
 
 #[test]
 fn truncated_wallet_file_is_rejected_without_panic() {
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = {
+        let dir = tempfile::TempDir::new().unwrap();
+        // The envelope audit refuses a parent that is not owner-only, and
+        // a fresh tempdir inherits the process umask (0o755 under 022).
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            dir.path(),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
+        dir
+    };
     let path = dir.path().join("wallet.dat");
     saved_state(&path);
 
@@ -220,7 +231,18 @@ fn header_byte_flips_are_rejected_without_panic() {
     // loadable file (documented below). Every flip must, regardless, be
     // PANIC-FREE. One representative byte per region keeps the Argon2id KDF cost
     // to ~6 derivations (seconds), not 64.
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = {
+        let dir = tempfile::TempDir::new().unwrap();
+        // The envelope audit refuses a parent that is not owner-only, and
+        // a fresh tempdir inherits the process umask (0o755 under 022).
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            dir.path(),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
+        dir
+    };
     let path = dir.path().join("wallet.dat");
 
     // (byte index, must-be-rejected?) — padding bytes are NOT rejected.
@@ -264,7 +286,18 @@ fn header_byte_flips_are_rejected_without_panic() {
 
 #[test]
 fn random_garbage_file_is_rejected_without_panic() {
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = {
+        let dir = tempfile::TempDir::new().unwrap();
+        // The envelope audit refuses a parent that is not owner-only, and
+        // a fresh tempdir inherits the process umask (0o755 under 022).
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            dir.path(),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
+        dir
+    };
     let path = dir.path().join("garbage.dat");
     for len in [0usize, 1, 63, 64, 65, 200] {
         let bytes: Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(31)).collect();
