@@ -117,6 +117,19 @@ for bin in "$ANVIL" "$FORGE" "$CAST"; do
   fi
 done
 
+# The gate's cargo runs are `--offline` on purpose (see below): a network
+# resolve in the middle of a run is a source of unrelated failures. That only
+# works when the locked dependencies are already in the local cargo cache —
+# true on a warmed developer machine, false on a cold CI runner, where the
+# first `cargo test --offline` dies unable to check out the secp256k1-zkp git
+# pin. So do ALL the network work here, up front, before the node even
+# starts: fetch exactly what the lockfile pins, and fail loudly while failing
+# is still cheap. The gate itself stays offline.
+if ! cargo fetch --locked; then
+  echo "cargo fetch --locked failed; the offline gate below cannot run without the pinned dependencies" >&2
+  exit 1
+fi
+
 ANVIL_PID=""
 # Reached only through the EXIT/INT/TERM trap below, which shellcheck cannot see.
 # shellcheck disable=SC2317
