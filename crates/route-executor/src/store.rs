@@ -1802,8 +1802,8 @@ impl DurableRouteStoreV1 {
     ///
     /// Timers are internal wakeups, not signer/broadcast capabilities. A new
     /// owner may therefore consume a timer created by an older epoch. The
-    /// resulting route event is still committed under the new fence, while a
-    /// stale owner cannot claim or complete the timer.
+    /// resulting route event is still committed under the new fence, while
+    /// a stale owner cannot claim or complete the timer.
     pub fn claim_due_timers(
         &mut self,
         lease: RouteLeaseV1,

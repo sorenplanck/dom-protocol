@@ -32,6 +32,19 @@ struct Payload {
 /// decision, NOT a crash: an empty-password wallet is only as strong as
 /// Argon2id over a known-plaintext-password. Surfacing it makes the choice
 /// visible. PRECISA DECISÃO HUMANA if a min-strength gate is ever wanted.
+/// The envelope audit refuses a parent directory that is not owner-only, and a
+/// fresh tempdir inherits the process umask (0o755 under the usual 022).
+fn owner_only_tempdir() -> tempfile::TempDir {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        dir.path(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .expect("owner-only tempdir");
+    dir
+}
+
 #[test]
 fn empty_password_is_accepted_policy() {
     let salt = [0x11u8; 32];
@@ -42,7 +55,7 @@ fn empty_password_is_accepted_policy() {
     );
 
     // And a full envelope round-trips under an empty password.
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = owner_only_tempdir();
     let path = dir.path().join("env.dat");
     save_envelope(&path, TEST_MAGIC, 1, &Payload { a: 5 }, "").unwrap();
     let back: Payload = dom_wallet_crypto::load_envelope(&path, TEST_MAGIC, 1, "").unwrap();
@@ -55,7 +68,7 @@ fn empty_password_is_accepted_policy() {
 /// the success path. This is the observable part of DOM-SEC-007.
 #[test]
 fn atomic_write_leaves_no_tmp_on_success() {
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = owner_only_tempdir();
     let path = dir.path().join("env.dat");
     save_envelope(&path, TEST_MAGIC, 1, &Payload { a: 1 }, "pw").unwrap();
     let tmp = path.with_extension("tmp");
@@ -77,7 +90,7 @@ fn atomic_write_leaves_no_tmp_on_success() {
 /// test on every platform.
 #[test]
 fn stale_deterministic_tmp_is_not_reused() {
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = owner_only_tempdir();
     let path = dir.path().join("env.dat");
     let retired = path.with_extension("tmp");
     std::fs::write(&retired, b"do-not-touch").unwrap();
@@ -92,7 +105,7 @@ fn stale_deterministic_tmp_is_not_reused() {
 fn retired_tmp_symlink_cannot_redirect_the_write() {
     use std::os::unix::fs::symlink;
 
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = owner_only_tempdir();
     let path = dir.path().join("env.dat");
     let sentinel = dir.path().join("sentinel");
     let retired = path.with_extension("tmp");
@@ -111,7 +124,7 @@ fn retired_tmp_symlink_cannot_redirect_the_write() {
 fn target_symlink_is_replaced_and_never_followed() {
     use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = owner_only_tempdir();
     let path = dir.path().join("env.dat");
     let sentinel = dir.path().join("sentinel");
     std::fs::write(&sentinel, b"sentinel").unwrap();
@@ -129,7 +142,7 @@ fn target_symlink_is_replaced_and_never_followed() {
 fn concurrent_saves_publish_only_complete_envelopes_and_clean_staging() {
     use std::sync::{Arc, Barrier};
 
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = owner_only_tempdir();
     let path = dir.path().join("env.dat");
     let barrier = Arc::new(Barrier::new(2));
     let results = std::thread::scope(|scope| {

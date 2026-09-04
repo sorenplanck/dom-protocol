@@ -1714,6 +1714,15 @@ mod tests {
 
     fn production_store(seed: u8) -> (tempfile::TempDir, store::Store) {
         let dir = tempfile::tempdir().expect("production tempdir");
+        // The strict authority refuses a parent that is not owner-only, and a
+        // fresh tempdir inherits the process umask (0o755 under the usual
+        // 022). Pin it, the same way store's own f2_schema fixtures and
+        // dom-wallet's owner_only_tempdir do.
+        std::fs::set_permissions(
+            dir.path(),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .expect("owner-only production tempdir");
         let binding =
             store::ProductionStoreBindingV1::new([seed; 32]).expect("nonzero production binding");
         let store = store::Store::create_production(&dir.path().join("vault.db"), binding)
@@ -1840,12 +1849,12 @@ mod tests {
         assert_production_semantic_rejection(sealed_store);
 
         let (_artifact_dir, mut artifact_store) = complete_reserved_production_store(0xc4);
-        let artifact = artifact(2);
+        let persisted = artifact(2);
         artifact_store
             .put_opaque(
                 namespace::PERSISTED_ARTIFACT,
-                &artifact_key(&artifact.reservation_id, artifact.kind),
-                &artifact.encode().expect("artifact frame"),
+                &artifact_key(&persisted.reservation_id, persisted.kind),
+                &persisted.encode().expect("artifact frame"),
             )
             .expect("plant incoherent artifact");
         assert_production_semantic_rejection(artifact_store);

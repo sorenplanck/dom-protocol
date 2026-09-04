@@ -78,6 +78,19 @@ fn hkdf_domain_raw_key_kav() {
     unreachable!("documented dissolution — see note");
 }
 
+/// The envelope audit refuses a parent directory that is not owner-only, and a
+/// fresh tempdir inherits the process umask (0o755 under the usual 022).
+fn owner_only_tempdir() -> tempfile::TempDir {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        dir.path(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .expect("owner-only tempdir");
+    dir
+}
+
 /// [x][w] KDF-drives-decryption pin: a payload encrypted by `save_envelope`
 /// (which derives the key from the password + fresh salt) MUST decrypt with the
 /// same password via `load_envelope`. This is the publicly-observable proof
@@ -85,7 +98,7 @@ fn hkdf_domain_raw_key_kav() {
 /// params, HKDF salt) are identical. Any one-sided drift breaks this.
 #[test]
 fn kdf_drives_decryption_pin() {
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = owner_only_tempdir();
     let path = dir.path().join("env.dat");
     save_envelope(&path, TEST_MAGIC, 1, &sample(), "pw").unwrap();
     let back: Payload = load_envelope(&path, TEST_MAGIC, 1, "pw").unwrap();
@@ -127,7 +140,7 @@ fn header_layout_byte_freeze() {
     assert_eq!(SALT_SIZE, 32, "salt length frozen at 32");
     assert_eq!(NONCE_SIZE, 12, "nonce length frozen at 12");
 
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = owner_only_tempdir();
     let path = dir.path().join("env.dat");
     save_envelope(&path, TEST_MAGIC, 0x0102, &sample(), "pw").unwrap();
     let data = std::fs::read(&path).unwrap();
@@ -160,7 +173,7 @@ fn header_layout_byte_freeze() {
 /// [x][w] Bad magic is rejected with BadMagic (never decrypted).
 #[test]
 fn negative_bad_magic_rejected() {
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = owner_only_tempdir();
     let path = dir.path().join("env.dat");
     save_envelope(&path, TEST_MAGIC, 1, &sample(), "pw").unwrap();
     let err = load_envelope::<Payload>(&path, b"DOM-OTHER-ENV\0", 1, "pw").unwrap_err();
@@ -170,7 +183,7 @@ fn negative_bad_magic_rejected() {
 /// [x][w] Downgrade/unknown version is rejected, never reinterpreted.
 #[test]
 fn negative_wrong_version_rejected_no_reinterpret() {
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = owner_only_tempdir();
     let path = dir.path().join("env.dat");
     save_envelope(&path, TEST_MAGIC, 1, &sample(), "pw").unwrap();
     let err = load_envelope::<Payload>(&path, TEST_MAGIC, 2, "pw").unwrap_err();
@@ -183,7 +196,7 @@ fn negative_wrong_version_rejected_no_reinterpret() {
 /// [x] File shorter than the fixed header is rejected before any crypto.
 #[test]
 fn negative_short_file_rejected() {
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = owner_only_tempdir();
     let path = dir.path().join("env.dat");
     std::fs::write(&path, [0u8; HEADER_SIZE - 1]).unwrap();
     let err = load_envelope::<Payload>(&path, TEST_MAGIC, 1, "pw").unwrap_err();
@@ -194,7 +207,7 @@ fn negative_short_file_rejected() {
 /// by the AEAD as Decryption — the tag cannot verify.
 #[test]
 fn negative_truncated_payload_rejected() {
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = owner_only_tempdir();
     let path = dir.path().join("env.dat");
     save_envelope(&path, TEST_MAGIC, 1, &sample(), "pw").unwrap();
     let data = std::fs::read(&path).unwrap();
@@ -210,7 +223,7 @@ fn negative_truncated_payload_rejected() {
 /// distinguish "wrong password" from "modified file" from the error alone.
 #[test]
 fn negative_wrong_password_and_tamper_indistinguishable() {
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = owner_only_tempdir();
     let path = dir.path().join("env.dat");
     save_envelope(&path, TEST_MAGIC, 1, &sample(), "pw").unwrap();
 
