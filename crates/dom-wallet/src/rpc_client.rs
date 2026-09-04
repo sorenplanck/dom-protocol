@@ -879,6 +879,14 @@ fn parse_hash_hex(s: &str, url: &str) -> Result<[u8; 32], RpcClientError> {
 /// encoding with a block hash. The node exposes the canonical four-byte
 /// compact target, while older RPC producers may expose a 32-byte target.
 /// Normalize both forms to the public fixed-width representation.
+///
+/// The four-byte form is an ENCODING, not the number. `0x1e146a2b` means
+/// "mantissa `0x146a2b`, shifted by exponent `0x1e`" — roughly `9.9e70`, not
+/// `505_382_158`. Copying those four bytes into the low bytes of a 256-bit
+/// target treats the encoding as if it were the value and lands about 63 orders
+/// of magnitude away from the truth, which is exactly what this function used
+/// to do. Expanding it is `CompactTarget::to_target`, the same conversion the
+/// node itself applies.
 fn parse_target_hex(s: &str, url: &str) -> Result<[u8; 32], RpcClientError> {
     let bytes = hex::decode(s).map_err(|e| RpcClientError::Decode {
         url: url.to_string(),
@@ -893,9 +901,15 @@ fn parse_target_hex(s: &str, url: &str) -> Result<[u8; 32], RpcClientError> {
                 reason: format!("target must be 4 or 32 bytes (got {})", v.len()),
             }),
         4 => {
-            let mut target = [0u8; 32];
-            target[28..].copy_from_slice(&bytes);
-            Ok(target)
+            // Big-endian: the compact target's printed form is exponent byte
+            // first. See the RPC's `compact_target_hex`, which produces it.
+            let bits = u32::from_be_bytes(bytes.try_into().expect("4 bytes"));
+            dom_pow::CompactTarget(bits)
+                .to_target()
+                .map_err(|e| RpcClientError::Decode {
+                    url: url.to_string(),
+                    reason: format!("invalid compact target {bits:08x}: {e}"),
+                })
         }
         len => Err(RpcClientError::Decode {
             url: url.to_string(),
@@ -956,6 +970,107 @@ mod tests {
         match err {
             RpcClientError::Config { reason } => assert!(reason.contains("connect_timeout")),
             other => panic!("expected Config, got {other:?}"),
+        }
+    }
+
+    /// B2: the four-byte form is an encoding and must be EXPANDED. The bug it
+    /// replaces stuffed those four bytes into the low bytes of the 256-bit
+    /// target, reading `1e21470e` as `505_382_158` instead of ~`9.9e70`.
+    #[test]
+    fn four_byte_compact_target_is_expanded_not_copied() {
+        let target = parse_target_hex("1e21470e", "http://node/").expect("valid compact target");
+
+        let expected = dom_pow::CompactTarget(0x1e21_470e)
+            .to_target()
+            .expect("expandable");
+        assert_eq!(target, expected);
+
+        // The old behaviour, spelled out so a regression is unmistakable: the
+        // raw bytes parked in the last four positions, everything else zero.
+        let mut copied = [0u8; 32];
+        copied[28..].copy_from_slice(&hex::decode("1e21470e").unwrap());
+        assert_ne!(
+            target, copied,
+            "the compact encoding must not be copied in as if it were the value"
+        );
+
+        // The magnitude is the point. Exponent 0x1e places the mantissa near
+        // the top of the 256-bit word, so the significant bytes sit at offsets
+        // 2..5 and everything below is zero — a number around 1e70. The copied
+        // form is zero everywhere except the last four bytes: about 5e8.
+        assert!(
+            target[..2].iter().all(|b| *b == 0) && target[2..5].iter().any(|b| *b != 0),
+            "expanded target must carry its magnitude near the top, got {}",
+            hex::encode(target)
+        );
+        assert!(
+            target[5..].iter().all(|b| *b == 0),
+            "expanded target must be zero below the mantissa, got {}",
+            hex::encode(target)
+        );
+
+        // The exact byte layout is `CompactTarget::to_target`'s to define. What
+        // matters here is that the wallet expands the way the node does — this
+        // function must never grow its own arithmetic.
+        assert_eq!(
+            hex::encode(target),
+            hex::encode(expected),
+            "the wallet must expand exactly as the node does"
+        );
+    }
+
+    /// The 32-byte form is already the number and must pass through untouched.
+    #[test]
+    fn thirty_two_byte_target_is_passed_through() {
+        let hex_target = format!("00{}", "ff".repeat(31));
+        let target = parse_target_hex(&hex_target, "http://node/").expect("valid 32-byte target");
+        assert_eq!(hex::encode(target), hex_target);
+    }
+
+    /// B2/B3 together: what the RPC emits must expand back to the target the
+    /// node holds. This is the round-trip that catches either side flipping
+    /// byte order on its own.
+    #[test]
+    fn compact_target_round_trips_from_the_rpc_encoding() {
+        for bits in [0x1e21_470eu32, 0x1e14_6a2b, 0x1d00_ffff] {
+            // Exactly the RPC's `compact_target_hex`.
+            let emitted = format!("{bits:08x}");
+            let parsed = parse_target_hex(&emitted, "http://node/").expect("expandable");
+            let expected = dom_pow::CompactTarget(bits)
+                .to_target()
+                .expect("expandable");
+            assert_eq!(
+                parsed, expected,
+                "{emitted} must expand to the node's own target"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_target_lengths_are_rejected() {
+        for bad in ["1e2147", "1e21470e00", ""] {
+            assert!(
+                parse_target_hex(bad, "http://node/").is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    /// A compact target outside the consensus envelope must be an error, not a
+    /// silently accepted number. The byte-copy this replaces validated nothing
+    /// at all — every four-byte string produced a "valid" target.
+    #[test]
+    fn out_of_range_compact_target_is_rejected() {
+        let err = parse_target_hex("20000001", "http://node/")
+            .expect_err("a target above MAX_TARGET must not be accepted");
+        match err {
+            RpcClientError::Decode { reason, .. } => {
+                assert!(
+                    reason.contains("compact target"),
+                    "error should name the compact target, got {reason}"
+                );
+            }
+            other => panic!("expected Decode, got {other:?}"),
         }
     }
 

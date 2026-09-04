@@ -310,8 +310,24 @@ fn block_at_height_accepts_node_compact_target() {
     });
     let client = fast_client(&server);
     let block = client.block_at_height(0).unwrap().unwrap();
-    assert_eq!(&block.target[..28], &[0u8; 28]);
-    assert_eq!(&block.target[28..], &[0x1e, 0x7f, 0xff, 0xff]);
+
+    // The four-byte form is an ENCODING and must be expanded, not copied in.
+    // This assertion used to read `target[28..] == [0x1e, 0x7f, 0xff, 0xff]`,
+    // which locked in the defect: it parked the compact bytes in the low bytes
+    // of the 256-bit target, reading a number around 5e8 where the encoding
+    // means ~1e70. Exponent 0x1e places the mantissa near the top of the word.
+    let expected = dom_pow::CompactTarget(0x1e7f_ffff)
+        .to_target()
+        .expect("the node's own expansion");
+    assert_eq!(
+        block.target, expected,
+        "the wallet must expand the compact target exactly as the node does"
+    );
+    assert_ne!(
+        &block.target[28..],
+        &[0x1e, 0x7f, 0xff, 0xff],
+        "the compact encoding must not be copied in as if it were the value"
+    );
 }
 
 #[test]

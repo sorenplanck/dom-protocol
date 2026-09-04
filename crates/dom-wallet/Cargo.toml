@@ -13,6 +13,10 @@ bip39.workspace = true
 dom-core.workspace          = true
 dom-crypto.workspace        = true
 dom-consensus.workspace     = true
+# CompactTarget::to_target — expanding the four-byte compact target the RPC
+# reports into the 256-bit number it encodes. Already in the tree via
+# dom-consensus; named here because this crate uses it directly.
+dom-pow.workspace           = true
 dom-tx.workspace            = true
 dom-slate.workspace         = true
 dom-serialization.workspace = true

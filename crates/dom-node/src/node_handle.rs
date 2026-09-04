@@ -13,6 +13,22 @@ use dom_rpc::{
 use dom_serialization::DomDeserialize;
 use std::sync::Arc;
 
+/// Map the peer table's own record onto the RPC DTO.
+///
+/// There are two `PeerInfo` types in play: `dom_wire::PeerInfo`, the peer
+/// table's internal record (it has `outbound` and `connected_at`), and
+/// `dom_rpc::PeerInfo`, the JSON DTO (it has `direction` and
+/// `connected_since`). They share a name, so the wrong `use` compiles and
+/// returns nonsense. This is the single conversion between them, so both
+/// `/peers` construction sites report the same thing.
+pub(crate) fn peer_dto(p: &dom_wire::peer::PeerInfo) -> PeerInfo {
+    PeerInfo {
+        addr: p.addr.to_string(),
+        direction: if p.outbound { "outbound" } else { "inbound" }.into(),
+        connected_since: p.connected_at_unix,
+    }
+}
+
 /// Newtype so we can impl the foreign `NodeHandle` trait for `Arc<DomNode>`.
 pub struct NodeHandleImpl(pub Arc<DomNode>);
 
@@ -343,21 +359,22 @@ impl NodeHandle for NodeHandleImpl {
         })
     }
 
+    /// Report the connected peers with their REAL direction and session start.
+    ///
+    /// Both fields used to be fabricated here: `direction` was the constant
+    /// `"outbound"` and `connected_since` was `SystemTime::now()` evaluated
+    /// while serving the request, so every peer shared one value and that value
+    /// advanced by exactly the polling interval between two queries. The
+    /// resulting `/peers` disagreed with `/metrics`, which reads the same peer
+    /// table correctly, and that made every peer-facing change unverifiable in
+    /// production. `PeerManager` has carried both values all along — see
+    /// `connected_peer_infos`.
     fn get_peers(&self) -> Vec<PeerInfo> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
         match self.0.peers.try_lock() {
-            Ok(p) => p
-                .connected_peers()
-                .into_iter()
-                .map(|addr| PeerInfo {
-                    addr,
-                    direction: "outbound".into(),
-                    connected_since: now,
-                })
-                .collect(),
+            Ok(p) => p.connected_peer_infos().into_iter().map(peer_dto).collect(),
+            // NOTE (reported separately, deliberately not fixed here): this
+            // returns an empty list with HTTP 200 when the peer mutex is held,
+            // which a caller cannot tell apart from "no peers connected".
             Err(_) => Vec::new(),
         }
     }
@@ -638,6 +655,61 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     const TEST_LMDB_MAP_SIZE: usize = 64 << 20; // 64 MiB
+
+    /// B1: the DTO must carry the peer table's own direction, not a constant.
+    /// Before this, one `/peers` site reported every peer as `outbound` and the
+    /// other reported every peer as `inbound`.
+    #[test]
+    fn peer_dto_reports_the_real_direction() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 33369);
+
+        let outbound = dom_wire::peer::PeerInfo::new(addr, true);
+        let dto = super::peer_dto(&outbound);
+        assert_eq!(dto.direction, "outbound");
+        assert_eq!(dto.addr, "203.0.113.7:33369");
+
+        let inbound = dom_wire::peer::PeerInfo::new(addr, false);
+        assert_eq!(super::peer_dto(&inbound).direction, "inbound");
+    }
+
+    /// B1: `connected_since` must be the connection's own timestamp, so it does
+    /// not change between two queries. It used to be `SystemTime::now()` read
+    /// while serving the request, which advanced by the polling interval and
+    /// was identical for every peer.
+    #[test]
+    fn peer_dto_connected_since_is_stable_across_queries() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 8)), 33369);
+        let peer = dom_wire::peer::PeerInfo::new(addr, true);
+
+        let first = super::peer_dto(&peer).connected_since;
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        let second = super::peer_dto(&peer).connected_since;
+
+        assert_eq!(
+            first, second,
+            "connected_since must not move when the peer has not reconnected"
+        );
+        assert_eq!(first, peer.connected_at_unix);
+        assert_ne!(first, 0, "the other site used to hardcode 0");
+    }
+
+    /// Two peers connected at different times must not report the same
+    /// `connected_since` — the old code gave every peer one shared value.
+    #[test]
+    fn peer_dto_connected_since_differs_between_sessions() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)), 33369);
+        let older = dom_wire::peer::PeerInfo::new(addr, true);
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        let newer = dom_wire::peer::PeerInfo::new(addr, true);
+
+        assert!(
+            super::peer_dto(&older).connected_since < super::peer_dto(&newer).connected_since,
+            "a peer connected earlier must report an earlier connected_since"
+        );
+    }
 
     fn make_output(value: u64, height: u64, is_coinbase: bool) -> OwnedOutput {
         let bf = BlindingFactor::random();

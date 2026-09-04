@@ -14,8 +14,14 @@ use dom_wallet::{Network as WalletNetwork, WalletDir};
 use dom_wallet_keys::seed::Bip39Seed;
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_BOOTSTRAP_SEED_PEER: &str = "192.153.57.211:8443";
-const LEGACY_BOOTSTRAP_SEED_PEER: &str = "192.153.57.211:33370";
+/// Bootstrap endpoints that shipped as the factory default before this change.
+///
+/// Both are the SAME host, and that host no longer answers on any DOM port
+/// (verified 2026-09-04: ICMP replies, 8443/33370/33369 all refused). A wallet
+/// whose persisted `seed_peers` still holds only these values has exactly one
+/// way into the network and it is closed, so we treat that value as "never
+/// configured" and fall back to the factory list — see `normalized_seed_peers`.
+const OBSOLETE_SOLE_BOOTSTRAP: &[&str] = &["192.153.57.211:8443", "192.153.57.211:33370"];
 
 /// Mirrors the `DOM_NETWORK` values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,9 +75,10 @@ pub struct NodeSettings {
 impl Default for NodeSettings {
     fn default() -> Self {
         let data_dir = default_data_dir();
+        let network = NetworkKind::Testnet;
         Self {
-            network: NetworkKind::Testnet,
-            seed_peers: vec![DEFAULT_BOOTSTRAP_SEED_PEER.to_string()],
+            network,
+            seed_peers: NodeSettings::default_seed_peers(network),
             p2p_listen_addr: "0.0.0.0:33370".to_string(),
             rpc_listen_addr: "127.0.0.1:33372".to_string(),
             data_dir,
@@ -183,6 +190,8 @@ impl NodeSettings {
         let seed_peers = self.normalized_seed_peers();
         if !seed_peers.is_empty() {
             let seed_peer_count = seed_peers.len();
+            let is_factory_default =
+                same_peer_set(&seed_peers, &Self::default_seed_peers(self.network));
             config.seed_peers = seed_peers;
             // When the user supplies explicit seed peers we treat them as the
             // authoritative bootstrap set and DISABLE DNS-seed discovery. Note
@@ -193,9 +202,17 @@ impl NodeSettings {
             // which would then be dialed on the default P2P port (33370). The
             // explicit flag makes the connector skip DNS resolution entirely,
             // so a custom seed (e.g. a local tunnel `127.0.0.1:18443`) is the
-            // only bootstrap source. Scoped to "seed peers present" so the
-            // public mainnet/testnet defaults keep DNS discovery.
-            config.disable_dns_seeds = true;
+            // only bootstrap source.
+            //
+            // The trigger is "the USER overrode the bootstrap set", not "a value
+            // exists". The factory default is non-empty, so keying off
+            // `!seed_peers.is_empty()` alone made this branch run on every
+            // install and silently disabled DNS discovery for everyone, leaving
+            // a single hardcoded IP as the only way into the network. Comparing
+            // against the factory list restores the intent: an operator-chosen
+            // bootstrap (a local tunnel, a private hub) still gets exclusive
+            // control, the shipped default does not.
+            config.disable_dns_seeds = !is_factory_default;
             // Defense-in-depth for the P2P "peers stays 0" bug. The peer
             // connector only dials while `PeerManager::needs_outbound()` is
             // true, and that is `outbound+pending < min(min_outbound,
@@ -238,17 +255,49 @@ impl NodeSettings {
         self.miner_throttle_ms
     }
 
+    /// Factory bootstrap peers for a network.
+    ///
+    /// PLURAL by construction for any network that has public hubs: a single
+    /// host is a single point of failure for onboarding, and that failure has
+    /// already happened once (see `OBSOLETE_SOLE_BOOTSTRAP`). Add every new hub
+    /// here.
+    ///
+    /// Testnet and regtest return an EMPTY list on purpose. No public hub is
+    /// known to be reachable on either, and shipping one dead address is worse
+    /// than shipping none: an empty list keeps `disable_dns_seeds` false, so
+    /// DNS-seed discovery still runs, while a dead address would be the sole
+    /// bootstrap and discovery would be switched off to honour it.
+    pub fn default_seed_peers(network: NetworkKind) -> Vec<String> {
+        match network {
+            NetworkKind::Mainnet => vec![
+                "66.42.127.141:33369".to_string(),
+                "64.177.121.62:33369".to_string(),
+            ],
+            NetworkKind::Testnet | NetworkKind::Regtest => Vec::new(),
+        }
+    }
+
+    /// Trim, de-duplicate, drop the obsolete sole bootstrap, and fall back to
+    /// the factory list when nothing usable is left.
+    ///
+    /// The fallback is the migration path for EXISTING installs (R-A0.1).
+    /// Settings are persisted, so an install made before this change still has
+    /// `["192.153.57.211:8443"]` on disk. Without the fallback that value would
+    /// differ from the factory list, `disable_dns_seeds` would stay true, and
+    /// the fix would only ever reach fresh installs.
     fn normalized_seed_peers(&self) -> Vec<String> {
         let mut peers = Vec::new();
         for peer in &self.seed_peers {
-            let peer = match peer.trim() {
-                "" => continue,
-                LEGACY_BOOTSTRAP_SEED_PEER => DEFAULT_BOOTSTRAP_SEED_PEER,
-                peer => peer,
-            };
+            let peer = peer.trim();
+            if peer.is_empty() || OBSOLETE_SOLE_BOOTSTRAP.contains(&peer) {
+                continue;
+            }
             if !peers.iter().any(|existing| existing == peer) {
                 peers.push(peer.to_string());
             }
+        }
+        if peers.is_empty() {
+            return Self::default_seed_peers(self.network);
         }
         peers
     }
@@ -557,6 +606,21 @@ fn restrict_permissions(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Compare two bootstrap lists as SETS of trimmed addresses.
+///
+/// Order and surrounding whitespace are not meaningful for a bootstrap list, so
+/// comparing raw `Vec`s would classify a reordered factory list as a user
+/// override and silently disable DNS discovery (R-A0.3).
+fn same_peer_set(a: &[String], b: &[String]) -> bool {
+    let normalize = |list: &[String]| -> std::collections::BTreeSet<String> {
+        list.iter()
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .collect()
+    };
+    normalize(a) == normalize(b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,6 +667,27 @@ mod tests {
             miner_throttle_ms: 10,
             metrics_listen_addr: Some("127.0.0.1:33371".into()),
             log_level: "debug".into(),
+            auto_backup_enabled: false,
+            auto_backup_external_path: None,
+        }
+    }
+
+    fn mainnet_settings_with_seed(seed: Vec<String>) -> NodeSettings {
+        NodeSettings {
+            network: NetworkKind::Mainnet,
+            seed_peers: seed,
+            p2p_listen_addr: "0.0.0.0:33369".into(),
+            rpc_listen_addr: "127.0.0.1:33372".into(),
+            data_dir: std::env::temp_dir()
+                .join("dom-settings-test-mainnet")
+                .to_string_lossy()
+                .into_owned(),
+            miner_wallet_path: None,
+            mine: false,
+            miner_threads: 1,
+            miner_throttle_ms: 10,
+            metrics_listen_addr: Some("127.0.0.1:33371".into()),
+            log_level: "info".into(),
             auto_backup_enabled: false,
             auto_backup_external_path: None,
         }
@@ -666,7 +751,10 @@ mod tests {
         assert!(!settings.mine);
         assert_eq!(settings.miner_threads, 1);
         assert_eq!(settings.miner_throttle_ms, 10);
-        assert_eq!(settings.seed_peers, vec!["192.153.57.211:8443"]);
+        assert_eq!(
+            settings.seed_peers,
+            NodeSettings::default_seed_peers(NetworkKind::Testnet)
+        );
         let config = settings.to_node_config(None).expect("default config");
         assert!(!config.mine);
         assert_eq!(config.rpc_listen_addr.as_deref(), Some("127.0.0.1:33372"));
@@ -799,26 +887,158 @@ mod tests {
         assert_eq!(config.miner_threads, 1, "zero clamps to one worker");
     }
 
+    /// Every factory bootstrap address must parse as a socket address, on every
+    /// network. A typo here bricks onboarding for fresh installs.
     #[test]
-    fn bootstrap_seed_peer_is_valid_socket() {
-        let settings = regtest_settings_with_seed(vec!["192.153.57.211:8443".into()]);
-        let config = settings
-            .to_node_config(None)
-            .expect("bootstrap peer accepted");
-        assert_eq!(config.seed_peers, vec!["192.153.57.211:8443"]);
+    fn factory_seed_peers_are_valid_sockets() {
+        for network in [
+            NetworkKind::Mainnet,
+            NetworkKind::Testnet,
+            NetworkKind::Regtest,
+        ] {
+            for peer in NodeSettings::default_seed_peers(network) {
+                parse_socket_addr("seed peer", &peer)
+                    .unwrap_or_else(|e| panic!("{network:?} factory seed {peer} invalid: {e}"));
+            }
+        }
     }
 
+    /// A0/R-A0.2: the factory bootstrap set for a network with public hubs must
+    /// never be a single host. Onboarding through one address is exactly the
+    /// failure this change exists to remove.
     #[test]
-    fn legacy_bootstrap_seed_peer_is_migrated_and_deduplicated() {
-        let settings = regtest_settings_with_seed(vec![
-            "192.153.57.211:33370".into(),
-            "192.153.57.211:8443".into(),
-            " 192.153.57.211:33370 ".into(),
-        ]);
-        let config = settings
+    fn mainnet_factory_bootstrap_is_never_a_single_host() {
+        let peers = NodeSettings::default_seed_peers(NetworkKind::Mainnet);
+        assert!(
+            peers.len() >= 2,
+            "mainnet bootstrap must not be a single point of failure, got {peers:?}"
+        );
+        let hosts: std::collections::BTreeSet<&str> = peers
+            .iter()
+            .map(|p| p.rsplit_once(':').expect("host:port").0)
+            .collect();
+        assert!(
+            hosts.len() >= 2,
+            "bootstrap addresses must span >=2 distinct hosts, got {hosts:?}"
+        );
+    }
+
+    /// A0/R-A0.4: a factory seed must be on the P2P port of the network it is
+    /// configured for, or the node dials the wrong network and fails handshake
+    /// in a loop. The pre-change default (`192.153.57.211:8443`) matched no
+    /// network's port at all.
+    #[test]
+    fn factory_seed_defaults_match_configured_network_port() {
+        for (network, config_network) in [
+            (NetworkKind::Mainnet, dom_config::Network::Mainnet),
+            (NetworkKind::Testnet, dom_config::Network::Testnet),
+            (NetworkKind::Regtest, dom_config::Network::Regtest),
+        ] {
+            for peer in NodeSettings::default_seed_peers(network) {
+                let addr = parse_socket_addr("seed peer", &peer).expect("valid socket");
+                assert_eq!(
+                    addr.port(),
+                    config_network.default_port(),
+                    "{network:?} factory seed {peer} is not on the network's P2P port"
+                );
+            }
+        }
+    }
+
+    /// A0: the factory default must NOT disable DNS-seed discovery. Before this
+    /// change `disable_dns_seeds = true` ran on every install because the
+    /// default list was non-empty, so DNS discovery never happened for anyone.
+    #[test]
+    fn factory_default_keeps_dns_discovery() {
+        for settings in [
+            NodeSettings::default(),
+            mainnet_settings_with_seed(NodeSettings::default_seed_peers(NetworkKind::Mainnet)),
+        ] {
+            let config = settings.to_node_config(None).expect("config");
+            assert!(
+                !config.disable_dns_seeds,
+                "the factory default must never disable DNS-seed discovery"
+            );
+        }
+    }
+
+    /// A0/R-A0.3: a user-chosen bootstrap still takes exclusive control, so
+    /// someone pointing the node at a local tunnel keeps their isolation.
+    #[test]
+    fn explicit_user_seed_disables_dns() {
+        let settings = mainnet_settings_with_seed(vec!["127.0.0.1:18443".into()]);
+        let config = settings.to_node_config(None).expect("config");
+        assert_eq!(config.seed_peers, vec!["127.0.0.1:18443".to_string()]);
+        assert!(
+            config.disable_dns_seeds,
+            "an operator-chosen bootstrap must still disable DNS discovery"
+        );
+    }
+
+    /// R-A0.3: reordering or padding the factory list is not a user override.
+    #[test]
+    fn reordered_or_padded_factory_list_is_still_the_factory_default() {
+        let mut peers = NodeSettings::default_seed_peers(NetworkKind::Mainnet);
+        peers.reverse();
+        let peers = peers.into_iter().map(|p| format!("  {p} ")).collect();
+        let config = mainnet_settings_with_seed(peers)
             .to_node_config(None)
-            .expect("legacy bootstrap peer migrated");
-        assert_eq!(config.seed_peers, vec!["192.153.57.211:8443"]);
+            .expect("config");
+        assert!(
+            !config.disable_dns_seeds,
+            "order and whitespace must not turn the factory list into an override"
+        );
+    }
+
+    /// R-A0.1 — the migration that is easiest to forget. An install made before
+    /// this change has the dead sole bootstrap persisted on disk; it must be
+    /// treated as "never configured" and replaced by the factory list, or the
+    /// fix reaches only fresh installs.
+    #[test]
+    fn persisted_obsolete_sole_bootstrap_is_migrated() {
+        for persisted in [
+            vec!["192.153.57.211:8443".to_string()],
+            vec!["192.153.57.211:33370".to_string()],
+            vec![
+                "192.153.57.211:33370".to_string(),
+                " 192.153.57.211:8443 ".to_string(),
+            ],
+        ] {
+            let config = mainnet_settings_with_seed(persisted.clone())
+                .to_node_config(None)
+                .expect("obsolete bootstrap migrated");
+            assert!(
+                !config.disable_dns_seeds,
+                "an existing install must be migrated, not left on the dead host: {persisted:?}"
+            );
+            assert_eq!(
+                config.seed_peers,
+                NodeSettings::default_seed_peers(NetworkKind::Mainnet),
+                "the dead sole bootstrap must be replaced by the factory list"
+            );
+            assert!(
+                !config
+                    .seed_peers
+                    .iter()
+                    .any(|p| p.starts_with("192.153.57.211")),
+                "the dead host must not survive migration"
+            );
+        }
+    }
+
+    /// The obsolete bootstrap must also be dropped when it is mixed with a real
+    /// user entry — it is a dead address either way — without disturbing the
+    /// user's own choice.
+    #[test]
+    fn obsolete_bootstrap_is_dropped_next_to_a_user_entry() {
+        let config = mainnet_settings_with_seed(vec![
+            "192.153.57.211:8443".into(),
+            "127.0.0.1:18443".into(),
+        ])
+        .to_node_config(None)
+        .expect("config");
+        assert_eq!(config.seed_peers, vec!["127.0.0.1:18443".to_string()]);
+        assert!(config.disable_dns_seeds);
     }
 
     #[test]

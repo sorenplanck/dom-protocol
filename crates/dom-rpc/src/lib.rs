@@ -419,6 +419,22 @@ struct TxNotFoundResponse {
     found: bool,
 }
 
+/// Render a compact target for the JSON API.
+///
+/// The compact target is a `u32` whose printed form is its BIG-ENDIAN byte
+/// order: one exponent byte followed by the three mantissa bytes, so
+/// `0x1e146a2b` prints as `"1e146a2b"`. Emitting the mantissa little-endian
+/// (`"1e2b6a14"`) yields a value a client will happily expand into a number
+/// that is wrong by orders of magnitude while still looking plausible.
+///
+/// This is the JSON layer ONLY. The byte order of the target inside
+/// `pow_preimage` is consensus: it is little-endian, it is self-consistent
+/// between miner and validator, and it must never be changed. The two live in
+/// the same quantity and are easy to confuse — they are not the same thing.
+fn compact_target_hex(target: u32) -> String {
+    format!("{target:08x}")
+}
+
 #[derive(Debug, Serialize)]
 struct BlockHeaderResponse {
     height: u64,
@@ -832,7 +848,7 @@ async fn get_block(
                     hash: hex::encode(hash),
                     prev_hash: hex::encode(header.prev_hash.as_bytes()),
                     timestamp: header.timestamp.0,
-                    target: hex::encode(header.target.0.to_be_bytes()),
+                    target: compact_target_hex(header.target.0),
                     kernels: handle.get_block_kernels(&hash).unwrap_or_default(),
                 }),
             )
@@ -1747,6 +1763,49 @@ mod tests {
             mempool_body["transactions"][0]["kernels"],
             tx_body["kernels"]
         );
+    }
+
+    /// B3: the JSON target must be the compact value in big-endian order.
+    ///
+    /// The failure this guards against is a mantissa emitted little-endian
+    /// (assembling the string from `exponent + mantissa.to_le_bytes()[..3]`),
+    /// which turns `1e146a2b` into `1e2b6a14`. A client expands that without
+    /// complaint and gets a difficulty off by orders of magnitude — wrong, but
+    /// plausible enough not to be noticed.
+    #[test]
+    fn compact_target_hex_is_big_endian() {
+        assert_eq!(compact_target_hex(0x1e14_6a2b), "1e146a2b");
+        assert_ne!(
+            compact_target_hex(0x1e14_6a2b),
+            "1e2b6a14",
+            "the mantissa must not be emitted little-endian"
+        );
+        assert_eq!(compact_target_hex(0x1f00_ffff), "1f00ffff");
+        // Leading zeroes are significant: the string is always 8 hex digits.
+        assert_eq!(compact_target_hex(0x0000_00ff), "000000ff");
+        assert_eq!(compact_target_hex(u32::MAX), "ffffffff");
+    }
+
+    /// The emitted string must parse back to the exact compact value, so a
+    /// client that decodes it big-endian recovers the header's own target.
+    #[test]
+    fn compact_target_hex_round_trips() {
+        for target in [
+            0x1e14_6a2bu32,
+            0x1f00_ffff,
+            0x2000_0001,
+            0x0000_0001,
+            u32::MAX,
+        ] {
+            let hex = compact_target_hex(target);
+            let bytes = hex::decode(&hex).expect("valid hex");
+            assert_eq!(bytes.len(), 4, "{hex} must be exactly 4 bytes");
+            assert_eq!(
+                u32::from_be_bytes(bytes.try_into().unwrap()),
+                target,
+                "{hex} must decode big-endian back to the original compact target"
+            );
+        }
     }
 
     #[test]
