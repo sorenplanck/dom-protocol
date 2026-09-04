@@ -2384,6 +2384,7 @@ mod tests {
     // inherits the process umask, so every on-disk fixture pins the mode.
     fn owner_only_tempdir() -> tempfile::TempDir {
         let directory = tempdir().unwrap();
+        #[cfg(unix)]
         std::fs::set_permissions(
             directory.path(),
             <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),

@@ -19,7 +19,9 @@
 use crate::store::StoreError;
 use crate::wallet_state::{WalletV2State, LEGACY_SCHEMA_VERSION_V2, SCHEMA_VERSION};
 use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 use thiserror::Error;
 
 /// v2 wallet-file magic. 14 bytes, distinct from v1's `DOM-WALLET-V1\0`, so a
@@ -165,7 +167,7 @@ fn acquire_and_validate_migration_owner_lock(
 
 // Reached from the unix validation path and from the tests; the non-unix
 // production path refuses before ever needing the lock's name.
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 fn migration_owner_lock_path(path: &Path) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(".interop.lock");

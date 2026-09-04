@@ -14,6 +14,7 @@ fn test_genesis() -> Hash256 {
 /// a raw `TempDir` inherits the process umask and is refused on purpose.
 fn owner_only_tempdir() -> TempDir {
     let directory = TempDir::new().unwrap();
+    #[cfg(unix)]
     std::fs::set_permissions(
         directory.path(),
         <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
