@@ -5,8 +5,8 @@ use dom_consensus::{
     ValidationContext,
 };
 use dom_core::{
-    Amount, BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
-    PROTOCOL_VERSION, TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
+    Amount, BlockHeight, Hash256, Timestamp, BLOCK_VERSION_LEGACY, KERNEL_FEAT_COINBASE,
+    KERNEL_FEAT_PLAIN, TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
 };
 use dom_crypto::{
     hash::blake2b_256_tagged,
@@ -152,7 +152,7 @@ fn valid_block_with_transactions(transactions: Vec<Transaction>) -> Block {
         compute_block_pmmr_roots(BlockHeight(1), &coinbase, &transactions).expect("pmmr roots");
     Block {
         header: BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: BLOCK_VERSION_LEGACY,
             height: BlockHeight(1),
             prev_hash: Hash256::from_bytes([0x55; 32]),
             timestamp: Timestamp(1_704_067_260),
@@ -215,7 +215,7 @@ fn consensus_rejects_invalid_reward_fee_equation() {
             .expect("pmmr roots");
     let block = Block {
         header: BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: BLOCK_VERSION_LEGACY,
             height: BlockHeight(1),
             prev_hash: Hash256::from_bytes([0x55; 32]),
             timestamp: Timestamp(1_704_067_260),

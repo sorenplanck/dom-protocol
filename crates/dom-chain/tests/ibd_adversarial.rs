@@ -34,7 +34,7 @@ mod common;
 use dom_chain::ibd::{IbdAction, IbdPhase, IbdState};
 use dom_chain::ChainState;
 use dom_consensus::block::{BlockHeader, ProofOfWork};
-use dom_core::{BlockHeight, Hash256, Timestamp, PROTOCOL_VERSION};
+use dom_core::{BlockHeight, Hash256, Timestamp, BLOCK_VERSION_LEGACY};
 use dom_pow::CompactTarget;
 use primitive_types::U256;
 use tempfile::TempDir;
@@ -44,7 +44,7 @@ use dom_store::DomStore;
 
 fn synth_header(height: u64) -> BlockHeader {
     BlockHeader {
-        version: PROTOCOL_VERSION,
+        version: BLOCK_VERSION_LEGACY,
         height: BlockHeight(height),
         prev_hash: Hash256::ZERO,
         timestamp: Timestamp(1_704_067_200 + height),

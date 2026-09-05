@@ -5,9 +5,9 @@ use dom_consensus::{
     TransactionOutput, ValidationContext,
 };
 use dom_core::{
-    block_reward, Amount, BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE,
-    KERNEL_FEAT_PLAIN, MAX_BLOCK_TXS, MAX_BLOCK_WEIGHT, MAX_INPUTS_PER_TX, MAX_KERNELS_PER_TX,
-    MAX_OUTPUTS_PER_TX, MAX_TX_WEIGHT, PROTOCOL_VERSION, TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
+    block_reward, Amount, BlockHeight, DomError, Hash256, Timestamp, BLOCK_VERSION_LEGACY,
+    KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN, MAX_BLOCK_TXS, MAX_BLOCK_WEIGHT, MAX_INPUTS_PER_TX,
+    MAX_KERNELS_PER_TX, MAX_OUTPUTS_PER_TX, MAX_TX_WEIGHT, TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
     WEIGHT_COINBASE_KERNEL, WEIGHT_INPUT, WEIGHT_KERNEL, WEIGHT_OUTPUT,
 };
 use dom_crypto::hash::blake2b_256_tagged;
@@ -285,7 +285,7 @@ fn block_with_transactions(transactions: Vec<Transaction>) -> Block {
         compute_block_pmmr_roots(BlockHeight(1), &coinbase, &transactions).expect("pmmr roots");
     Block {
         header: BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: BLOCK_VERSION_LEGACY,
             height: BlockHeight(1),
             prev_hash: Hash256::from_bytes([0x55; 32]),
             timestamp: Timestamp(1_704_067_260),

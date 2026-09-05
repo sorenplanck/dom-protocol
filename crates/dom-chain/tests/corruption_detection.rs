@@ -33,7 +33,7 @@ use common::{open_test_chain, open_test_store};
 use dom_chain::{ChainState, CHAIN_CORRUPT_SENTINEL};
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction, TransactionOutput};
-use dom_core::{BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, PROTOCOL_VERSION};
+use dom_core::{BlockHeight, Hash256, Timestamp, BLOCK_VERSION_LEGACY, KERNEL_FEAT_COINBASE};
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
 use dom_pow::CompactTarget;
 use dom_serialization::DomSerialize;
@@ -140,7 +140,7 @@ fn deterministic_commitment(seed: u8, value: u64) -> Commitment {
 
 fn synthetic_header_struct(height: u64, nonce: u64) -> BlockHeader {
     BlockHeader {
-        version: PROTOCOL_VERSION,
+        version: BLOCK_VERSION_LEGACY,
         height: BlockHeight(height),
         prev_hash: Hash256::ZERO,
         timestamp: Timestamp(1_704_067_200 + height),

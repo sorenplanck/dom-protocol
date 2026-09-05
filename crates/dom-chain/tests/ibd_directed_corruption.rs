@@ -28,8 +28,8 @@ use dom_chain::{ChainState, PersistedIbdState, CHAIN_CORRUPT_SENTINEL};
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction, TransactionOutput};
 use dom_core::{
-    BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE, MAX_HEADERS_PER_MSG,
-    PROTOCOL_VERSION,
+    BlockHeight, DomError, Hash256, Timestamp, BLOCK_VERSION_LEGACY, KERNEL_FEAT_COINBASE,
+    MAX_HEADERS_PER_MSG,
 };
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
 use dom_pow::CompactTarget;
@@ -171,7 +171,7 @@ fn synthetic_genesis() -> SyntheticGenesis {
     let excess = Commitment::commit(0, &BlindingFactor::from_bytes(kblind).expect("kblind"));
 
     let header = BlockHeader {
-        version: PROTOCOL_VERSION,
+        version: BLOCK_VERSION_LEGACY,
         height: BlockHeight(0),
         prev_hash: Hash256::ZERO,
         timestamp: Timestamp(1_704_067_200),

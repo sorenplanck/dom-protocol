@@ -18,7 +18,7 @@ use dom_consensus::{
     TransactionOutput, ValidationContext,
 };
 use dom_core::{
-    BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, PROTOCOL_VERSION,
+    BlockHeight, Hash256, Timestamp, BLOCK_VERSION_LEGACY, KERNEL_FEAT_COINBASE,
     TAG_KERNEL_MSG_COINBASE,
 };
 use dom_crypto::{
@@ -69,7 +69,7 @@ fn make_header(coinbase: &CoinbaseTransaction, total_kernel_offset: [u8; 32]) ->
     let (output_root, kernel_root, rangeproof_root) =
         compute_block_pmmr_roots(BlockHeight(1), coinbase, &[]).expect("pmmr roots");
     BlockHeader {
-        version: PROTOCOL_VERSION,
+        version: BLOCK_VERSION_LEGACY,
         height: BlockHeight(1),
         prev_hash: Hash256::from_bytes([0x77; 32]),
         timestamp: Timestamp(1_704_067_260),

@@ -21,9 +21,9 @@
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::derive_chain_id;
 use dom_core::{
-    BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
-    NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST, NETWORK_MAGIC_TESTNET, PROTOCOL_VERSION,
-    TAG_CHAIN_ID, TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
+    BlockHeight, Hash256, Timestamp, BLOCK_VERSION_LEGACY, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
+    NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST, NETWORK_MAGIC_TESTNET, TAG_CHAIN_ID,
+    TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
 };
 use dom_crypto::hash::blake2b_256_tagged;
 use dom_pow::CompactTarget;
@@ -200,7 +200,7 @@ fn kav_derive_chain_id_depends_on_genesis() {
 
 fn fixed_header() -> BlockHeader {
     BlockHeader {
-        version: PROTOCOL_VERSION,
+        version: BLOCK_VERSION_LEGACY,
         height: BlockHeight(0x0102_0304_0506_0708),
         prev_hash: Hash256::from_bytes([0x11u8; 32]),
         timestamp: Timestamp(0x1112_1314_1516_1718),
