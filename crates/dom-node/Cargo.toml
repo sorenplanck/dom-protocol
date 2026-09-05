@@ -11,6 +11,7 @@ name = "dom-node"
 path = "src/main.rs"
 
 [dependencies]
+socket2.workspace     = true
 thiserror.workspace = true
 dom-core.workspace      = true
 dom-consensus.workspace = true

@@ -40,6 +40,21 @@ pub struct Metrics {
     /// Total relayed txs already in the mempool, skipped before chain lock /
     /// validation (FABLE5-001 replay short-circuit).
     pub suppressed_duplicate_tx_relays: Arc<AtomicU64>,
+
+    // Peer autodiscovery metrics (spec A5). Deliberately unlabeled per peer:
+    // R-A5.1 — a small network today is a series explosion tomorrow.
+    /// Port this node advertises in its Hello (0 = declared unreachable).
+    pub advertised_port: Arc<AtomicU64>,
+    /// PEX entries confirmed by a successful outbound dial.
+    pub pex_confirmed_peers: Arc<AtomicU64>,
+    /// PEX entries not yet confirmed (dial candidates, never gossiped).
+    pub pex_unconfirmed_peers: Arc<AtomicU64>,
+    /// Inbound peers that announced no usable listening port (R-A2.2).
+    pub pex_unreachable_peers: Arc<AtomicU64>,
+    /// Dial-back reachability probes attempted (A4).
+    pub dialback_attempts: Arc<AtomicU64>,
+    /// Dial-back reachability probes that connected (A4).
+    pub dialback_success: Arc<AtomicU64>,
 }
 
 impl Metrics {
@@ -70,6 +85,12 @@ impl Metrics {
             malformed_block_relays: Arc::new(AtomicU64::new(0)),
             duplicate_block_relay_quota_exceeded: Arc::new(AtomicU64::new(0)),
             suppressed_duplicate_tx_relays: Arc::new(AtomicU64::new(0)),
+            advertised_port: Arc::new(AtomicU64::new(0)),
+            pex_confirmed_peers: Arc::new(AtomicU64::new(0)),
+            pex_unconfirmed_peers: Arc::new(AtomicU64::new(0)),
+            pex_unreachable_peers: Arc::new(AtomicU64::new(0)),
+            dialback_attempts: Arc::new(AtomicU64::new(0)),
+            dialback_success: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -105,6 +126,42 @@ impl Metrics {
                 "Outbound peer connections",
                 "gauge",
                 &self.outbound_peers,
+            ),
+            (
+                "dom_advertised_port",
+                "Port this node advertises for inbound connections (0 = unreachable)",
+                "gauge",
+                &self.advertised_port,
+            ),
+            (
+                "dom_pex_confirmed_peers",
+                "PEX entries confirmed by a successful outbound dial",
+                "gauge",
+                &self.pex_confirmed_peers,
+            ),
+            (
+                "dom_pex_unconfirmed_peers",
+                "PEX dial candidates not yet confirmed",
+                "gauge",
+                &self.pex_unconfirmed_peers,
+            ),
+            (
+                "dom_pex_unreachable_peers",
+                "Inbound peers that announced no usable listening port",
+                "gauge",
+                &self.pex_unreachable_peers,
+            ),
+            (
+                "dom_dialback_attempts_total",
+                "Dial-back reachability probes attempted",
+                "counter",
+                &self.dialback_attempts,
+            ),
+            (
+                "dom_dialback_success_total",
+                "Dial-back reachability probes that connected",
+                "counter",
+                &self.dialback_success,
             ),
             (
                 "dom_blocks_mined",

@@ -159,6 +159,11 @@ impl PexManager {
         true
     }
 
+    /// How many pool entries a successful outbound dial has confirmed.
+    pub fn confirmed_count(&self) -> usize {
+        self.confirmed.len()
+    }
+
     /// Whether a candidate has been confirmed by a successful outbound dial.
     pub fn is_confirmed(&self, addr: &str) -> bool {
         self.confirmed.contains(addr)

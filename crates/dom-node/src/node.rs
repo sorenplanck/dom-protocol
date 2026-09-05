@@ -261,6 +261,61 @@ const LEGACY_PEER_REPUTATION_METADATA_KEY: &[u8] = b"dom/peer_reputation_state/v
 const MEMPOOL_METADATA_KEY: &[u8] = b"dom/mempool_state/v1";
 const NOISE_STATIC_KEY_METADATA_KEY: &[u8] = b"dom/noise_static_key/v1";
 
+/// Bind the P2P listener, dual-stack when the configured address is IPv6
+/// (spec A8).
+///
+/// The single-socket scheme was chosen deliberately over two sockets
+/// (R-A8.2): an IPv6 bind gets `IPV6_V6ONLY` set to `false` EXPLICITLY, so
+/// `[::]:port` accepts both families on every OS instead of inheriting
+/// Linux's `bindv6only` sysctl or the differing defaults elsewhere — and
+/// nothing else may then also bind `0.0.0.0` on the same port, which is
+/// exactly the double-bind `EADDRINUSE` the risk note warns about. Platforms
+/// that refuse dual-stack sockets get a warning and a v6-only listener
+/// rather than a dead node (§1.4: nothing may stop the boot).
+///
+/// An IPv4 address keeps the plain tokio bind: nothing about v4-only
+/// behaviour changes, and the default configs still ship `0.0.0.0`, so
+/// enabling v6 remains an explicit operator action via
+/// `DOM_P2P_LISTEN_ADDR="[::]:33369"` until the hubs have AAAA records and
+/// firewall rules to make it useful (§5.3).
+async fn bind_p2p_listener(p2p_addr: &str) -> Result<tokio::net::TcpListener, DomError> {
+    let parsed: std::net::SocketAddr = p2p_addr
+        .parse()
+        .map_err(|e| DomError::Internal(format!("Invalid P2P listen addr {p2p_addr}: {e}")))?;
+    if parsed.is_ipv4() {
+        return tokio::net::TcpListener::bind(parsed)
+            .await
+            .map_err(|e| DomError::Internal(format!("P2P bind {p2p_addr}: {e}")));
+    }
+
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV6,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )
+    .map_err(|e| DomError::Internal(format!("P2P socket for {p2p_addr}: {e}")))?;
+    if let Err(e) = socket.set_only_v6(false) {
+        warn!("dual-stack unavailable for {p2p_addr}; listening on IPv6 only: {e}");
+    }
+    // Match tokio's own bind behaviour so a quick restart does not fail on
+    // TIME_WAIT remnants of our previous listener.
+    #[cfg(unix)]
+    socket
+        .set_reuse_address(true)
+        .map_err(|e| DomError::Internal(format!("P2P SO_REUSEADDR for {p2p_addr}: {e}")))?;
+    socket
+        .set_nonblocking(true)
+        .map_err(|e| DomError::Internal(format!("P2P nonblocking for {p2p_addr}: {e}")))?;
+    socket
+        .bind(&parsed.into())
+        .map_err(|e| DomError::Internal(format!("P2P bind {p2p_addr}: {e}")))?;
+    socket
+        .listen(1024)
+        .map_err(|e| DomError::Internal(format!("P2P listen {p2p_addr}: {e}")))?;
+    tokio::net::TcpListener::from_std(socket.into())
+        .map_err(|e| DomError::Internal(format!("P2P listener registration {p2p_addr}: {e}")))
+}
+
 async fn bind_metrics_listener(
     config: &NodeConfig,
 ) -> Result<Option<tokio::net::TcpListener>, DomError> {
@@ -499,6 +554,13 @@ impl DomNode {
 
         // NTP health check (Doc 4.5 mitigation 2)
         let metrics = Arc::new(Metrics::new());
+        // dom_advertised_port (spec A5): what this node will announce in its
+        // Hello. Published once — the value is fixed for the process lifetime
+        // until A3 introduces runtime port mappings.
+        metrics.advertised_port.store(
+            u64::from(advertised_port(&config)),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         match check_clock_health() {
             Ok(DriftStatus::Critical { drift_secs }) => {
                 warn!(
@@ -682,9 +744,7 @@ impl DomNode {
         // RPC server — making readiness checks lie and external tooling
         // (curl/CLI/scripts) see ConnectionRefused with no explanation.
         let p2p_addr = self.config.p2p_listen_addr.clone();
-        let p2p_listener = tokio::net::TcpListener::bind(&p2p_addr)
-            .await
-            .map_err(|e| DomError::Internal(format!("P2P bind {p2p_addr}: {e}")))?;
+        let p2p_listener = bind_p2p_listener(&p2p_addr).await?;
         info!("P2P listening on {p2p_addr}");
 
         let rpc_pair = if let Some(rpc_addr) = self.config.rpc_listen_addr.clone() {
@@ -1657,6 +1717,7 @@ async fn handle_inbound(
             {
                 let mut pex = trace_lock("pex", &svc.pex).await;
                 pex.learn_inbound_peer(addr.ip(), peer_hello.advertised_port);
+                refresh_pex_metrics(&pex, &svc.metrics);
             }
             refresh_peer_metrics(&svc.peers, &svc.metrics, Some(&svc.state_events)).await;
             // An inbound peer with a taller chain is a normal IBD source.
@@ -1905,6 +1966,7 @@ async fn connect_outbound(
             {
                 let mut pex = trace_lock("pex", &svc.pex).await;
                 pex.mark_connected(&canonical_addr);
+                refresh_pex_metrics(&pex, &svc.metrics);
             }
             if let Err(e) = persist_peer_rotation_state(&chain, &svc.peers).await {
                 warn!("Persisting peer rotation state after outbound registration failed: {e}");
@@ -3056,6 +3118,26 @@ async fn record_duplicate_block_relay(
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     exceeded
+}
+
+/// Publish the PEX pool composition gauges (spec A5).
+///
+/// Called from the paths that mutate the pool rather than on a timer, so the
+/// gauges are exact at every scrape without a dedicated task. All three are
+/// unlabeled totals (R-A5.1).
+fn refresh_pex_metrics(pex: &crate::pex::PexManager, metrics: &Metrics) {
+    use std::sync::atomic::Ordering;
+    let confirmed = pex.confirmed_count() as u64;
+    let known = pex.known_count() as u64;
+    metrics
+        .pex_confirmed_peers
+        .store(confirmed, Ordering::Relaxed);
+    metrics
+        .pex_unconfirmed_peers
+        .store(known.saturating_sub(confirmed), Ordering::Relaxed);
+    metrics
+        .pex_unreachable_peers
+        .store(pex.unreachable_peers_seen(), Ordering::Relaxed);
 }
 
 async fn refresh_peer_metrics(
@@ -5302,7 +5384,9 @@ async fn message_loop(
                         } else {
                             let added = {
                                 let mut px = trace_lock("pex", &svc.pex).await;
-                                px.process_addr_message(payload.entries)
+                                let added = px.process_addr_message(payload.entries);
+                                refresh_pex_metrics(&px, &svc.metrics);
+                                added
                             };
                             tracing::debug!(
                                 "PEX: learned {added} new peer address(es) from {peer_addr}"
@@ -5321,7 +5405,7 @@ async fn message_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        annotate_send_err, bind_metrics_listener, catchup_interval,
+        annotate_send_err, bind_metrics_listener, bind_p2p_listener, catchup_interval,
         clear_persisted_mempool_snapshot, clear_persisted_peer_reputation,
         continue_ibd_header_sync, decode_deferred_block_bytes, decode_ibd_block_response,
         decode_relay_block, deferred_replay_action, getblockdata_hashes_to_serve, ibd_now,
@@ -5338,6 +5422,46 @@ mod tests {
         LEGACY_PEER_ROTATION_METADATA_KEY, MEMPOOL_METADATA_KEY, METRICS_CONTENT_TYPE,
         NOISE_STATIC_KEY_METADATA_KEY, PEER_REPUTATION_METADATA_KEY, PEER_ROTATION_METADATA_KEY,
     };
+
+    /// A8: the v4-only path is untouched — plain bind, accepts v4.
+    #[tokio::test]
+    async fn v4_p2p_listener_binds_and_accepts() {
+        let listener = bind_p2p_listener("127.0.0.1:0").await.expect("v4 bind");
+        let port = listener.local_addr().expect("addr").port();
+        let client = tokio::net::TcpStream::connect(("127.0.0.1", port));
+        let (accepted, connected) = tokio::join!(listener.accept(), client);
+        accepted.expect("accept v4");
+        connected.expect("connect v4");
+    }
+
+    /// A8: one IPv6 socket with IPV6_V6ONLY=false serves both families —
+    /// the single-socket scheme that avoids the double-bind EADDRINUSE
+    /// (R-A8.2).
+    ///
+    /// Environment-gated, not platform-gated: a container with no ::1 (this
+    /// repo's sandboxes included) cannot exercise dual-stack at all, and a
+    /// hard failure there would misreport infra as a regression. CI's runners
+    /// have loopback IPv6 and run the real assertion.
+    #[tokio::test]
+    async fn dual_stack_p2p_listener_accepts_both_families() {
+        if tokio::net::TcpListener::bind("[::1]:0").await.is_err() {
+            eprintln!("skipping dual-stack assertion: environment has no IPv6 loopback");
+            return;
+        }
+        let listener = bind_p2p_listener("[::]:0").await.expect("dual-stack bind");
+        let port = listener.local_addr().expect("addr").port();
+
+        let v6 = tokio::net::TcpStream::connect(("::1", port));
+        let (accepted, connected) = tokio::join!(listener.accept(), v6);
+        accepted.expect("accept v6");
+        connected.expect("connect v6");
+
+        let v4 = tokio::net::TcpStream::connect(("127.0.0.1", port));
+        let (accepted, connected) = tokio::join!(listener.accept(), v4);
+        accepted.expect("accept v4 through the v6 socket");
+        connected.expect("connect v4 through the v6 socket");
+    }
+
     use crate::future_block_queue::DeferredBlock;
     use crate::metrics::Metrics;
     use crate::orphan_pool::OrphanBlock;
