@@ -551,6 +551,19 @@ const MAX_PRODUCTION_SECRET_STREAM_BYTES_V3: usize = PRODUCTION_SECRET_STREAM_HE
     + 2
     + MAX_PRODUCTION_F6_HSM_CREDENTIALS_PER_LEG_V3 * (1 + RELAY_SIGNING_SECRET_HEX_BYTES_V1);
 
+/// V4 appends exactly one 32-byte route derivation seed — the single
+/// secret both endpoint daemons expand locally into the per-leg witnesses
+/// and the leg offset δ of the Level-1 blinded route family (DR-PRIV-001
+/// L1 package §5: δ is derived, never transported). Promote-vN: V3 is
+/// never widened to accept the seed, and V4 never sniffs or falls back to
+/// an older family.
+const PRODUCTION_SECRET_STREAM_HEADER_V4: &[u8] = b"DOM-INTEROPD-SECRETS-V4";
+const MAX_PRODUCTION_SECRET_STREAM_BYTES_V4: usize = MAX_PRODUCTION_SECRET_STREAM_BYTES_V3
+    - PRODUCTION_SECRET_STREAM_HEADER_V3.len()
+    + PRODUCTION_SECRET_STREAM_HEADER_V4.len()
+    + 1
+    + RELAY_SIGNING_SECRET_HEX_BYTES_V1;
+
 /// The eight out-of-band secrets, still as bytes.
 ///
 /// Separate from the credential type on purpose: this half compiles without
@@ -576,6 +589,11 @@ struct ProductionSecretFieldsV3 {
     common: ProductionSecretFieldsV2,
     upstream_f6_hsm_credentials: Vec<Zeroizing<[u8; 32]>>,
     downstream_f6_hsm_credentials: Vec<Zeroizing<[u8; 32]>>,
+}
+
+struct ProductionSecretFieldsV4 {
+    common: ProductionSecretFieldsV3,
+    route_derivation_seed: Zeroizing<[u8; 32]>,
 }
 
 struct ProductionSecretFieldSlicesV1<'a> {
@@ -947,42 +965,173 @@ fn parse_production_secret_fields_v3(
     if fields.next() != Some(PRODUCTION_SECRET_STREAM_HEADER_V3) {
         return Err(ProductionSecretsV3ErrorV1::WrongVersion);
     }
-    let common_slices = ProductionSecretFieldSlicesV1 {
-        bearer: take_secret_stream_field_v3(&mut fields)?,
-        upstream_relay_secret: take_secret_stream_field_v3(&mut fields)?,
-        downstream_relay_secret: take_secret_stream_field_v3(&mut fields)?,
-        identity_passphrase: take_secret_stream_field_v3(&mut fields)?,
-        dom_wallet_passphrase: take_secret_stream_field_v3(&mut fields)?,
-        bitcoin_participant_secret: take_secret_stream_field_v3(&mut fields)?,
-        seal_key: take_secret_stream_field_v3(&mut fields)?,
-        refund_credential: take_secret_stream_field_v3(&mut fields)?,
-    };
-    let evm_signing_secret = take_secret_stream_field_v3(&mut fields)?;
-    let common = parse_production_secret_field_slices_v2(common_slices, evm_signing_secret)
-        .map_err(ProductionSecretsV3ErrorV1::Common)?;
-    let upstream_count = parse_hsm_count_v3(
-        take_secret_stream_field_v3(&mut fields)?,
-        UPSTREAM_F6_HSM_COUNT_PREFIX_V3,
-    )?;
-    let upstream_f6_hsm_credentials = decode_hsm_credentials_v3(&mut fields, upstream_count)?;
-    let downstream_count = parse_hsm_count_v3(
-        take_secret_stream_field_v3(&mut fields)?,
-        DOWNSTREAM_F6_HSM_COUNT_PREFIX_V3,
-    )?;
-    let downstream_f6_hsm_credentials = decode_hsm_credentials_v3(&mut fields, downstream_count)?;
+    let parsed = parse_production_secret_body_v3(&mut fields)?;
     if fields.next().is_some() {
         return Err(ProductionSecretsV3ErrorV1::FieldCount);
     }
     validate_hsm_credential_independence_v3(
-        &common,
-        &upstream_f6_hsm_credentials,
-        &downstream_f6_hsm_credentials,
+        &parsed.common,
+        &parsed.upstream_f6_hsm_credentials,
+        &parsed.downstream_f6_hsm_credentials,
     )?;
+    Ok(parsed)
+}
+
+/// Parses the V3 field body — everything after the version header and
+/// before the end-of-stream check. Shared verbatim by the V3 and V4
+/// parsers so the older fields can never drift between families; each
+/// version's parser keeps its own header literal, end-of-input rule and
+/// independence checks.
+fn parse_production_secret_body_v3<'a, I>(
+    fields: &mut I,
+) -> Result<ProductionSecretFieldsV3, ProductionSecretsV3ErrorV1>
+where
+    I: Iterator<Item = &'a [u8]>,
+{
+    let common_slices = ProductionSecretFieldSlicesV1 {
+        bearer: take_secret_stream_field_v3(fields)?,
+        upstream_relay_secret: take_secret_stream_field_v3(fields)?,
+        downstream_relay_secret: take_secret_stream_field_v3(fields)?,
+        identity_passphrase: take_secret_stream_field_v3(fields)?,
+        dom_wallet_passphrase: take_secret_stream_field_v3(fields)?,
+        bitcoin_participant_secret: take_secret_stream_field_v3(fields)?,
+        seal_key: take_secret_stream_field_v3(fields)?,
+        refund_credential: take_secret_stream_field_v3(fields)?,
+    };
+    let evm_signing_secret = take_secret_stream_field_v3(fields)?;
+    let common = parse_production_secret_field_slices_v2(common_slices, evm_signing_secret)
+        .map_err(ProductionSecretsV3ErrorV1::Common)?;
+    let upstream_count = parse_hsm_count_v3(
+        take_secret_stream_field_v3(fields)?,
+        UPSTREAM_F6_HSM_COUNT_PREFIX_V3,
+    )?;
+    let upstream_f6_hsm_credentials = decode_hsm_credentials_v3(fields, upstream_count)?;
+    let downstream_count = parse_hsm_count_v3(
+        take_secret_stream_field_v3(fields)?,
+        DOWNSTREAM_F6_HSM_COUNT_PREFIX_V3,
+    )?;
+    let downstream_f6_hsm_credentials = decode_hsm_credentials_v3(fields, downstream_count)?;
     Ok(ProductionSecretFieldsV3 {
         common,
         upstream_f6_hsm_credentials,
         downstream_f6_hsm_credentials,
     })
+}
+
+fn read_production_secret_fields_v4(
+    mut reader: impl std::io::Read,
+) -> Result<ProductionSecretFieldsV4, ProductionSecretsV4ErrorV1> {
+    use std::io::Read as _;
+    use zeroize::Zeroize as _;
+
+    let mut stream = Vec::with_capacity(MAX_PRODUCTION_SECRET_STREAM_BYTES_V4 + 1);
+    let read = match (&mut reader)
+        .take(MAX_PRODUCTION_SECRET_STREAM_BYTES_V4 as u64 + 1)
+        .read_to_end(&mut stream)
+    {
+        Ok(read) => read,
+        Err(_) => {
+            stream.zeroize();
+            return Err(ProductionSecretsV4ErrorV1::Common(
+                ProductionSecretsV3ErrorV1::Common(ProductionSecretsV2ErrorV1::Common(
+                    ProductionConfigErrorV1::SecretStreamUnavailable,
+                )),
+            ));
+        }
+    };
+    if read > MAX_PRODUCTION_SECRET_STREAM_BYTES_V4 {
+        stream.zeroize();
+        return Err(ProductionSecretsV4ErrorV1::Common(
+            ProductionSecretsV3ErrorV1::Common(ProductionSecretsV2ErrorV1::Common(
+                ProductionConfigErrorV1::SecretStreamOversized,
+            )),
+        ));
+    }
+    let parsed = parse_production_secret_fields_v4(&stream);
+    stream.zeroize();
+    parsed
+}
+
+fn parse_production_secret_fields_v4(
+    stream: &[u8],
+) -> Result<ProductionSecretFieldsV4, ProductionSecretsV4ErrorV1> {
+    if stream.is_empty() {
+        return Err(ProductionSecretsV4ErrorV1::Common(
+            ProductionSecretsV3ErrorV1::Common(ProductionSecretsV2ErrorV1::Common(
+                ProductionConfigErrorV1::SecretStreamUnavailable,
+            )),
+        ));
+    }
+    let mut fields = stream.split(|byte| *byte == b'\n');
+    if fields.next() != Some(PRODUCTION_SECRET_STREAM_HEADER_V4) {
+        return Err(ProductionSecretsV4ErrorV1::WrongVersion);
+    }
+    let common =
+        parse_production_secret_body_v3(&mut fields).map_err(ProductionSecretsV4ErrorV1::Common)?;
+    let seed_field = fields
+        .next()
+        .ok_or(ProductionSecretsV4ErrorV1::FieldCount)?;
+    if fields.next().is_some() {
+        return Err(ProductionSecretsV4ErrorV1::FieldCount);
+    }
+    validate_hsm_credential_independence_v3(
+        &common.common,
+        &common.upstream_f6_hsm_credentials,
+        &common.downstream_f6_hsm_credentials,
+    )
+    .map_err(ProductionSecretsV4ErrorV1::Common)?;
+    let route_derivation_seed = decode_exact_secret_v1(
+        seed_field,
+        ProductionConfigErrorV1::RouteSecretSealKeyMalformed,
+        true,
+    )
+    .map_err(|_| ProductionSecretsV4ErrorV1::RouteDerivationSeedMalformed)?;
+    validate_route_derivation_seed_independence_v4(&common, &route_derivation_seed)?;
+    Ok(ProductionSecretFieldsV4 {
+        common,
+        route_derivation_seed,
+    })
+}
+
+/// The seed is one MORE independent authority: reusing any fixed
+/// credential, any HSM credential, or any variable-length authority as
+/// the seed collapses two unrelated powers into one secret and refuses.
+fn validate_route_derivation_seed_independence_v4(
+    common: &ProductionSecretFieldsV3,
+    seed: &Zeroizing<[u8; 32]>,
+) -> Result<(), ProductionSecretsV4ErrorV1> {
+    let reserved = [
+        common
+            .common
+            .common
+            .upstream_relay_signing_secret
+            .as_slice(),
+        common
+            .common
+            .common
+            .downstream_relay_signing_secret
+            .as_slice(),
+        common.common.common.bitcoin_participant_secret.as_slice(),
+        common.common.common.route_secret_seal_key.as_slice(),
+        common.common.common.refund_arming_credential.as_slice(),
+        common.common.evm_signing_secret.as_slice(),
+    ];
+    let variable_authorities = [
+        common.common.common.bearer.as_slice(),
+        common.common.common.identity_passphrase.as_slice(),
+        common.common.common.dom_wallet_passphrase.as_slice(),
+    ];
+    if reserved.iter().any(|value| *value == seed.as_slice())
+        || variable_authorities.contains(&seed.as_slice())
+        || common
+            .upstream_f6_hsm_credentials
+            .iter()
+            .chain(&common.downstream_f6_hsm_credentials)
+            .any(|credential| credential.as_slice() == seed.as_slice())
+    {
+        return Err(ProductionSecretsV4ErrorV1::RouteDerivationSeedReused);
+    }
+    Ok(())
 }
 
 fn take_secret_stream_field_v3<'a, I>(
@@ -1185,6 +1334,26 @@ pub enum ProductionSecretsV3ErrorV1 {
     HsmCredentialReused,
 }
 
+/// Redacted refusal from the explicitly versioned Level-1 seed stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ProductionSecretsV4ErrorV1 {
+    /// A V1/V2/V3 common authority was refused.
+    #[error("production secret stream V4 common authority refused")]
+    Common(ProductionSecretsV3ErrorV1),
+    /// The literal V4 header was absent or belonged to another family.
+    #[error("production secret stream V4 version is invalid")]
+    WrongVersion,
+    /// The stream ended early or carried trailing fields/newline.
+    #[error("production secret stream V4 field count is invalid")]
+    FieldCount,
+    /// The seed was not one nonzero 64-char lowercase-hex value.
+    #[error("production route derivation seed is malformed")]
+    RouteDerivationSeedMalformed,
+    /// The seed reused another authority's credential bytes.
+    #[error("production route derivation seed was reused")]
+    RouteDerivationSeedReused,
+}
+
 /// The eight out-of-band production secrets, each in its own owner.
 ///
 /// There is no accessor that hands back a copy: the parts leave together, once,
@@ -1221,6 +1390,16 @@ pub struct ProductionSecretsV3 {
     downstream_f6_hsm_credentials: Vec<Zeroizing<[u8; 32]>>,
 }
 
+/// V4 live-run secrets: the V3 authorities plus the route derivation seed
+/// both endpoint daemons expand locally into the per-leg witnesses and
+/// the leg offset δ (Level 1; δ is derived, never transported). No
+/// `Debug`, codec, clone or copy surface, like V3.
+#[cfg(feature = "production")]
+pub struct ProductionSecretsV4 {
+    common: ProductionSecretsV3,
+    route_derivation_seed: Zeroizing<[u8; 32]>,
+}
+
 /// Single-use handoff from the secret reader into the production composition
 /// root. Fields remain crate-private so no external caller can selectively
 /// extract or duplicate one authority.
@@ -1249,6 +1428,18 @@ pub(crate) struct ProductionSecretPartsV3 {
     pub(crate) common: ProductionSecretPartsV2,
     pub(crate) upstream_f6_hsm_credentials: Vec<Zeroizing<[u8; 32]>>,
     pub(crate) downstream_f6_hsm_credentials: Vec<Zeroizing<[u8; 32]>>,
+}
+
+/// Single-use V4 handoff: V3 plus the zeroizing route derivation seed.
+#[cfg(feature = "production")]
+#[expect(
+    dead_code,
+    reason = "constructed when the V3-family composite loop is promoted; \
+              the seed's only reader is the Level-1 leg-witness authority"
+)]
+pub(crate) struct ProductionSecretPartsV4 {
+    pub(crate) common: ProductionSecretPartsV3,
+    pub(crate) route_derivation_seed: Zeroizing<[u8; 32]>,
 }
 
 #[cfg(feature = "production")]
@@ -1306,6 +1497,23 @@ impl ProductionSecretsV3 {
             common: self.common.into_parts(),
             upstream_f6_hsm_credentials: self.upstream_f6_hsm_credentials,
             downstream_f6_hsm_credentials: self.downstream_f6_hsm_credentials,
+        }
+    }
+}
+
+#[cfg(feature = "production")]
+impl ProductionSecretsV4 {
+    /// Moves every credential AND the seed into the composition root once.
+    #[must_use]
+    #[expect(
+        dead_code,
+        reason = "consumed when the V3-family composite loop is promoted; \
+                  the seed's only reader is the Level-1 leg-witness authority"
+    )]
+    pub(crate) fn into_parts(self) -> ProductionSecretPartsV4 {
+        ProductionSecretPartsV4 {
+            common: self.common.into_parts(),
+            route_derivation_seed: self.route_derivation_seed,
         }
     }
 }
@@ -1389,6 +1597,41 @@ pub fn read_production_secrets_v3_from_stdin(
         },
         upstream_f6_hsm_credentials: fields.upstream_f6_hsm_credentials,
         downstream_f6_hsm_credentials: fields.downstream_f6_hsm_credentials,
+    })
+}
+
+/// Reads the V4 secret-stream family: every V3 authority plus the
+/// Level-1 route derivation seed as the final field. The literal V4
+/// header, end-of-input and full independence set are mandatory; V1/V2/V3
+/// are never sniffed or used as fallback.
+#[cfg(feature = "production")]
+pub fn read_production_secrets_v4_from_stdin(
+) -> Result<ProductionSecretsV4, ProductionSecretsV4ErrorV1> {
+    use std::io::IsTerminal as _;
+
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return Err(ProductionSecretsV4ErrorV1::Common(
+            ProductionSecretsV3ErrorV1::Common(ProductionSecretsV2ErrorV1::Common(
+                ProductionConfigErrorV1::SecretStreamIsTerminal,
+            )),
+        ));
+    }
+    let fields = read_production_secret_fields_v4(stdin.lock())?;
+    let common = production_secrets_from_fields(fields.common.common.common)
+        .map_err(ProductionSecretsV2ErrorV1::Common)
+        .map_err(ProductionSecretsV3ErrorV1::Common)
+        .map_err(ProductionSecretsV4ErrorV1::Common)?;
+    Ok(ProductionSecretsV4 {
+        common: ProductionSecretsV3 {
+            common: ProductionSecretsV2 {
+                common,
+                evm_signing_secret: fields.common.common.evm_signing_secret,
+            },
+            upstream_f6_hsm_credentials: fields.common.upstream_f6_hsm_credentials,
+            downstream_f6_hsm_credentials: fields.common.downstream_f6_hsm_credentials,
+        },
+        route_derivation_seed: fields.route_derivation_seed,
     })
 }
 
@@ -1755,6 +1998,15 @@ mod tests {
         stream
     }
 
+    fn canonical_secret_stream_v4(upstream: &[u8], downstream: &[u8], seed_hex: u8) -> Vec<u8> {
+        let mut stream = canonical_secret_stream_v3(upstream, downstream);
+        stream[..PRODUCTION_SECRET_STREAM_HEADER_V3.len()]
+            .copy_from_slice(PRODUCTION_SECRET_STREAM_HEADER_V4);
+        stream.push(b'\n');
+        stream.extend_from_slice(&[seed_hex; RELAY_SIGNING_SECRET_HEX_BYTES_V1]);
+        stream
+    }
+
     fn canonical_secret_stream_v3(upstream: &[u8], downstream: &[u8]) -> Vec<u8> {
         let mut stream = PRODUCTION_SECRET_STREAM_HEADER_V3.to_vec();
         stream.push(b'\n');
@@ -1894,6 +2146,84 @@ mod tests {
             oversized_refusal,
             ProductionSecretsV3ErrorV1::Common(ProductionSecretsV2ErrorV1::Common(
                 ProductionConfigErrorV1::SecretStreamOversized
+            ))
+        );
+    }
+
+    #[test]
+    fn v4_seed_stream_is_versioned_exact_independent_and_never_falls_back() {
+        let canonical = canonical_secret_stream_v4(b"12", b"34", b'9');
+        let Ok(fields) = read_production_secret_fields_v4(canonical.as_slice()) else {
+            panic!("the exact V4 seed stream must be accepted");
+        };
+        assert_eq!(*fields.route_derivation_seed, [0x99; 32]);
+        assert_eq!(fields.common.upstream_f6_hsm_credentials.len(), 2);
+
+        // A V3 stream is a different family: refused on the header, never
+        // reinterpreted; and V3 never accepts the widened stream either.
+        let v3 = canonical_secret_stream_v3(b"12", b"34");
+        let Err(refusal) = read_production_secret_fields_v4(v3.as_slice()) else {
+            panic!("V4 must not fall back to V3");
+        };
+        assert_eq!(refusal, ProductionSecretsV4ErrorV1::WrongVersion);
+        let Err(refusal) = read_production_secret_fields_v3(canonical.as_slice()) else {
+            panic!("V3 must never be widened to accept the seed field");
+        };
+        assert_eq!(refusal, ProductionSecretsV3ErrorV1::WrongVersion);
+
+        // Missing seed, trailing bytes, malformed and zero seeds refuse.
+        let missing = &canonical[..canonical.len() - RELAY_SIGNING_SECRET_HEX_BYTES_V1 - 1];
+        let Err(refusal) = read_production_secret_fields_v4(missing) else {
+            panic!("a missing seed field must be refused");
+        };
+        assert_eq!(refusal, ProductionSecretsV4ErrorV1::FieldCount);
+        let mut trailing = canonical.clone();
+        trailing.push(b'\n');
+        let Err(refusal) = read_production_secret_fields_v4(trailing.as_slice()) else {
+            panic!("trailing bytes must be refused");
+        };
+        assert_eq!(refusal, ProductionSecretsV4ErrorV1::FieldCount);
+        let mut malformed = canonical.clone();
+        let last = malformed.len() - 1;
+        malformed[last] = b'Z';
+        let Err(refusal) = read_production_secret_fields_v4(malformed.as_slice()) else {
+            panic!("a non-lowercase-hex seed must be refused");
+        };
+        assert_eq!(
+            refusal,
+            ProductionSecretsV4ErrorV1::RouteDerivationSeedMalformed
+        );
+        let zero = canonical_secret_stream_v4(b"12", b"34", b'0');
+        let Err(refusal) = read_production_secret_fields_v4(zero.as_slice()) else {
+            panic!("an all-zero seed must be refused");
+        };
+        assert_eq!(
+            refusal,
+            ProductionSecretsV4ErrorV1::RouteDerivationSeedMalformed
+        );
+
+        // The seed is one MORE independent authority: reusing any fixed
+        // credential (here: an HSM credential, and the EVM key) refuses.
+        for reused in [b'1', b'f'] {
+            let stream = canonical_secret_stream_v4(b"12", b"34", reused);
+            let Err(refusal) = read_production_secret_fields_v4(stream.as_slice()) else {
+                panic!("a reused seed must be refused");
+            };
+            assert_eq!(
+                refusal,
+                ProductionSecretsV4ErrorV1::RouteDerivationSeedReused
+            );
+        }
+
+        // Oversized streams refuse before parsing.
+        let oversized = vec![b'x'; MAX_PRODUCTION_SECRET_STREAM_BYTES_V4 + 1];
+        let Err(refusal) = read_production_secret_fields_v4(oversized.as_slice()) else {
+            panic!("an oversized V4 stream must be refused before parsing");
+        };
+        assert_eq!(
+            refusal,
+            ProductionSecretsV4ErrorV1::Common(ProductionSecretsV3ErrorV1::Common(
+                ProductionSecretsV2ErrorV1::Common(ProductionConfigErrorV1::SecretStreamOversized)
             ))
         );
     }
