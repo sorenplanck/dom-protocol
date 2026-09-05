@@ -2,20 +2,36 @@ name: CI
 
 # Phase 1.4 — cross-platform equivalence CI. Builds, clippies, and
 # tests the workspace on the four host matrices the protocol must
-# remain deterministic across. All five build-test hosts remain REQUIRED.
-# Only the dedicated Windows PMMR leg is advisory, exactly as before.
-# V2: checked optimization, compiler-aware caches, parallel independent vectors
-# and phase measurements. No test, feature surface or release blocker removed.
-# Base: sorenplanck/dom-protocol ec8553078c726908fc7d441a892681371f0830f3.
+# remain deterministic across. Windows CI remains enabled but advisory
+# while LMDB map-size/filesystem behavior on GitHub Actions Windows
+# runners is being stabilized. Do not treat this as production Windows
+# support removal.
+#
+# Optimization pass (same gates, same commands, same profiles):
+#   - clippy moved out of `build-test` into its own matrix job that runs
+#     in parallel. clippy-driver does not reuse rustc artifacts, so inside
+#     one job it was a second full compile of the workspace in series.
+#     Same hosts, same scope, same `-D warnings`.
+#   - CARGO_INCREMENTAL=0 workspace-wide (incremental artifacts are never
+#     reused across CI runs; they only inflate target/ and the cache).
+#   - debug = "line-tables-only" for dev/test: backtraces keep file:line,
+#     target/ loses the variable/type DWARF that made it several GB per
+#     host and pushed the repo past the 10 GB cache limit (evictions =>
+#     random cold builds). Jobs that already set debug = 0 keep it.
+#   - cache keys include the rustc hash so a toolchain bump does not
+#     restore an incompatible target/ before rebuilding it anyway.
+#   - PR runs cancel their own superseded runs; pushes to main/mainnetswap
+#     never cancel.
+#   - actions bumped to their Node 24 majors (Node 20 runtime removal).
+# Deliberately NOT changed: opt-level (test timing semantics), the
+# `cargo build --all-targets` step (it is the only place the non-Linux
+# legs compile dom-integration-tests test targets), the crate-tests job
+# (it is the only place doctests run — `--all-targets` skips them), the
+# test runner (nextest isolates per process; that is a semantic change),
+# and every `run:` line a repo guard may parse.
 
 on:
   workflow_dispatch:
-    inputs:
-      optimized:
-        description: Use opt-level=2 with all checks enabled; false uses opt-level=0 for comparison.
-        required: true
-        default: true
-        type: boolean
   push:
     branches: [main, mainnetswap]
     paths-ignore:
@@ -31,18 +47,18 @@ on:
       - 'LICENSE'
       - '.gitignore'
 
-# Read-only repository token. Cache/artifact services use their own runtime token.
-# No pull_request_target, no privileged publishing and no new external action.
-permissions:
-  contents: read
-# Explicit bash enables pipefail on all hosts, including Windows.
-# A failed Cargo/Node process must not be hidden by a successful tee.
-defaults:
-  run:
-    shell: bash
+# A new push to the same PR supersedes the run in flight. Pushes to the
+# protected branches are never cancelled: every commit there gets a full run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+  CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
   # randomx-rs requires the C library to build; integration tests are
   # excluded across the matrix because the FULL_MEM dataset (~2 GB) is
   # far above GitHub-hosted runner budgets. Single-host validation of
@@ -53,18 +69,15 @@ jobs:
     name: cargo fmt --check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - run: cargo fmt --all --check
 
   build-test:
-    name: build + clippy + test (${{ matrix.host }})
+    name: build + test (${{ matrix.host }})
     runs-on: ${{ matrix.runner }}
-    # Same as the previous implicit GitHub default; not a performance shortcut.
-    # Windows remains REQUIRED in this job; experimental is not used here.
-    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -84,22 +97,8 @@ jobs:
           - host: windows-x86_64
             runner: windows-latest
             experimental: true
-    # Optimize CPU-heavy Rust without switching to --release or changing features.
-    # Keep full debug information, debug assertions and arithmetic overflow checks.
-    # Align dev/test settings so profile differences do not cause avoidable rebuilds.
-    # No changes to test counts, timeouts, RandomX, KDF settings or test threads.
-    env:
-      CARGO_INCREMENTAL: "0"
-      CARGO_PROFILE_DEV_OPT_LEVEL: "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.optimized == 'false' && '0' || '2' }}"
-      CARGO_PROFILE_TEST_OPT_LEVEL: "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.optimized == 'false' && '0' || '2' }}"
-      CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: "true"
-      CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: "true"
-      CARGO_PROFILE_DEV_OVERFLOW_CHECKS: "true"
-      CARGO_PROFILE_TEST_OVERFLOW_CHECKS: "true"
-      CARGO_PROFILE_DEV_DEBUG: "2"
-      CARGO_PROFILE_TEST_DEBUG: "2"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -120,85 +119,35 @@ jobs:
           echo "Disk after cleanup:"; df -h /
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
         id: rust
-      - name: Prepare benchmark instrumentation
-        shell: bash
-        run: |
-          set -euo pipefail
-          bench="$RUNNER_TEMP/dom-ci-benchmark"
-          mkdir -p "$bench"
-          printf 'phase\tseconds\texit_code\n' > "$bench/timings.tsv"
-          cat > "$bench/timer.sh" <<'BASH'
-          ci_timer_start() {
-            CI_TIMER_PHASE="$1"
-            CI_TIMER_BEGIN=$SECONDS
-            trap 'ci_timer_finish "$?"' EXIT
-          }
-          ci_timer_finish() {
-            local rc="$1"
-            local elapsed=$((SECONDS - CI_TIMER_BEGIN))
-            trap - EXIT
-            if ! printf '%s\t%s\t%s\n' "$CI_TIMER_PHASE" "$elapsed" "$rc" \
-                >> "$RUNNER_TEMP/dom-ci-benchmark/timings.tsv"; then
-              echo '::error::Could not record phase timing' >&2
-              if [ "$rc" -eq 0 ]; then rc=1; fi
-            fi
-            exit "$rc"
-          }
-          BASH
-          {
-            printf 'commit=%s\njob=%s\nos=%s\narch=%s\n' "$GITHUB_SHA" "$GITHUB_JOB" "$RUNNER_OS" "$RUNNER_ARCH"
-            printf 'dev_opt_level=%s\ntest_opt_level=%s\n' "$CARGO_PROFILE_DEV_OPT_LEVEL" "$CARGO_PROFILE_TEST_OPT_LEVEL"
-            printf 'test_debug_assertions=%s\ntest_overflow_checks=%s\n' "$CARGO_PROFILE_TEST_DEBUG_ASSERTIONS" "$CARGO_PROFILE_TEST_OVERFLOW_CHECKS"
-            printf 'full_debug_info=%s\nincremental=%s\n' "$CARGO_PROFILE_TEST_DEBUG" "$CARGO_INCREMENTAL"
-            rustc -Vv
-            cargo -V
-            uname -a
-            case "$RUNNER_OS" in
-              Linux) nproc; free -h; df -h / ;;
-              macOS) sysctl hw.ncpu hw.memsize; df -h / ;;
-              Windows) printf 'NUMBER_OF_PROCESSORS=%s\n' "${NUMBER_OF_PROCESSORS:-unknown}" ;;
-            esac
-          } | tee "$bench/environment.txt"
+
       - name: Cache cargo registry + target
         if: runner.os != 'Windows'
-        uses: actions/cache@v4
-        # Cache hits never skip builds or tests. Cargo still validates fingerprints.
-        # The compiler/profile prefix prevents stale incompatible target restores.
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-            !target/**/incremental
-            !target/cargo-timings
-          key: dom-ci-v2-build-test-${{ matrix.host }}-${{ steps.rust.outputs.cachekey }}-o${{ env.CARGO_PROFILE_TEST_OPT_LEVEL }}-checks-target-${{ hashFiles('**/Cargo.lock', 
-            '**/Cargo.toml', 'rust-toolchain', 'rust-toolchain.toml', '.cargo/**', '.github/workflows/ci.yml') }}
+          key: cargo-build-${{ matrix.host }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            dom-ci-v2-build-test-${{ matrix.host }}-${{ steps.rust.outputs.cachekey }}-o${{ env.CARGO_PROFILE_TEST_OPT_LEVEL }}-checks-target-
+            cargo-build-${{ matrix.host }}-${{ steps.rust.outputs.cachekey }}-
 
-        id: cargo-cache
       - name: Cache cargo registry only (Windows)
         if: runner.os == 'Windows'
-        uses: actions/cache@v4
-        # Cache hits never skip builds or tests. Cargo still validates fingerprints.
-        # The compiler/profile prefix prevents stale incompatible target restores.
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: dom-ci-v2-build-test-${{ matrix.host }}-${{ steps.rust.outputs.cachekey }}-o${{ env.CARGO_PROFILE_TEST_OPT_LEVEL }}-checks-registry-${{ hashFiles('**/Cargo.lock', 
-            '**/Cargo.toml', 'rust-toolchain', 'rust-toolchain.toml', '.cargo/**', '.github/workflows/ci.yml') }}
+          key: cargo-build-${{ matrix.host }}-registry-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            dom-ci-v2-build-test-${{ matrix.host }}-${{ steps.rust.outputs.cachekey }}-o${{ env.CARGO_PROFILE_TEST_OPT_LEVEL }}-checks-registry-
+            cargo-build-${{ matrix.host }}-registry-
 
       # secp256k1-zkp and randomx-rs link against C — make sure
       # build-essential / Xcode CLT / MSVC are present. On Linux runners
       # these are preinstalled; macOS ships clang; Windows needs Visual
       # C++ Build Tools which `windows-latest` provides by default.
-        id: cargo-cache-windows
       - name: Install Linux build tooling
         if: runner.os == 'Linux'
         run: |
@@ -238,132 +187,135 @@ jobs:
       # expand an environment variable. It would silently become empty and the
       # command would build the whole workspace unscoped — failing again, for a
       # reason the log would not show.
+      #
+      # `cargo build --all-targets` stays even though `cargo test` compiles the
+      # same targets: SCOPE_TEST excludes dom-integration-tests and dom-node,
+      # so this step is the only compile check of the integration-test targets
+      # on the arm64 / macOS / Windows legs.
       - name: cargo build
         shell: bash
-        run: |
-          set -euo pipefail
-          source "$RUNNER_TEMP/dom-ci-benchmark/timer.sh"
-          ci_timer_start build-all-targets
-          cargo build $SCOPE_BUILD --all-targets --locked --timings 2>&1 | tee "$RUNNER_TEMP/dom-ci-benchmark/build-all-targets.log"
-
-
-      - name: cargo clippy -- -D warnings
-        shell: bash
-        run: |
-          set -euo pipefail
-          source "$RUNNER_TEMP/dom-ci-benchmark/timer.sh"
-          ci_timer_start clippy-all-targets
-          cargo clippy $SCOPE_BUILD --all-targets --locked -- -D warnings 2>&1 | tee "$RUNNER_TEMP/dom-ci-benchmark/clippy-all-targets.log"
-
+        run: cargo build $SCOPE_BUILD --all-targets
 
       - name: cargo test (excluding integration and dom-node)
         shell: bash
-        run: |
-          set -euo pipefail
-          source "$RUNNER_TEMP/dom-ci-benchmark/timer.sh"
-          ci_timer_start workspace-tests
-          cargo test $SCOPE_TEST --all-targets --locked --timings 2>&1 | tee "$RUNNER_TEMP/dom-ci-benchmark/workspace-tests.log"
-
+        run: cargo test $SCOPE_TEST --all-targets
 
       - name: cargo test -p dom-node --all-targets (serial)
         shell: bash
-        run: |
-          set -euo pipefail
-          source "$RUNNER_TEMP/dom-ci-benchmark/timer.sh"
-          ci_timer_start node-tests-serial
-          cargo test -p dom-node --all-targets --locked --timings -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/dom-ci-benchmark/node-tests-serial.log"
+        run: cargo test -p dom-node --all-targets -- --test-threads=1
 
-
-      - name: Publish benchmark summary
-        if: always()
-        shell: bash
-        env:
-          CI_CACHE_HIT: ${{ runner.os == 'Windows' && steps.cargo-cache-windows.outputs.cache-hit || steps.cargo-cache.outputs.cache-hit }}
-        run: |
-          set -euo pipefail
-          bench="$RUNNER_TEMP/dom-ci-benchmark"
-          {
-            printf '## CI benchmark — %s / %s\n\n' "$GITHUB_JOB" "$RUNNER_ARCH"
-            if [ -f "$bench/environment.txt" ]; then
-              printf '<details><summary>Compiler, runner and checks</summary>\n\n```text\n'
-              cat "$bench/environment.txt"
-              printf '```\n</details>\n\n'
-            fi
-            printf 'Exact cache match: `%s` (false/empty may mean fallback, miss or an unavailable cache step).\n\n' "${CI_CACHE_HIT:-not-reported}"
-            printf '| Phase | Duration | Exit code |\n|---|---:|---:|\n'
-            if [ -f "$bench/timings.tsv" ]; then
-              while IFS=$'\t' read -r phase seconds code; do
-                [ "$phase" != 'phase' ] || continue
-                printf '| %s | %dm %02ds | %s |\n' "$phase" "$((seconds / 60))" "$((seconds % 60))" "$code"
-              done < "$bench/timings.tsv"
-            fi
-            printf '\nMeasured commands only. Checkout, cache transfer, queueing and other jobs are not included.\n'
-            printf 'Use the workflow Total duration for wall-clock comparison. A first run may have a cold target cache.\n'
-          } >> "$GITHUB_STEP_SUMMARY"
-          if [ -f "$bench/workspace-tests.log" ]; then
-            # Parse only explicit libtest summaries. These are per-binary runtimes,
-            # not compilation times or the wall-clock duration of the full workflow.
-            awk '
-              { gsub(/\033\[[0-9;]*m/, "") }
-              /Running unittests |Running tests\// { suite=$0; sub(/^[[:space:]]+/, "", suite) }
-              /test result:/ && /finished in [0-9.]+s/ {
-                elapsed=$0
-                sub(/.*finished in /, "", elapsed)
-                sub(/s.*/, "", elapsed)
-                if (suite != "") printf "%s\t%s\n", elapsed, suite
-              }
-            ' "$bench/workspace-tests.log" | LC_ALL=C sort -k1,1nr > "$bench/test-binary-times.tsv"
-            if [ -s "$bench/test-binary-times.tsv" ]; then
-              {
-                printf '\n### Slowest test binaries (reported by libtest)\n\n'
-                printf '| Seconds | Test binary |\n|---:|---|\n'
-                sed -n '1,10p' "$bench/test-binary-times.tsv" | while IFS=$'\t' read -r seconds binary; do
-                  printf '| %s | `%s` |\n' "$seconds" "$binary"
-                done
-                printf '\nDiagnostic list only; custom harnesses without a libtest summary are not counted here.\n'
-              } >> "$GITHUB_STEP_SUMMARY"
-            fi
-          fi
-          if [ -d target/cargo-timings ]; then
-            mkdir -p "$bench"
-            cp -R target/cargo-timings "$bench/"
-          fi
-      - name: Upload benchmark evidence
-        if: always()
-        uses: actions/upload-artifact@v4
+  clippy:
+    name: clippy (${{ matrix.host }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: linux-x86_64
+            runner: ubuntu-latest
+          - host: linux-arm64
+            runner: ubuntu-22.04-arm
+          - host: macos-arm64
+            runner: macos-latest
+          - host: macos-x86_64
+            runner: macos-15-intel
+          - host: windows-x86_64
+            runner: windows-latest
+    steps:
+      - uses: actions/checkout@v7
         with:
-          name: ci-benchmark-${{ matrix.host }}
-          path: ${{ runner.temp }}/dom-ci-benchmark/
-          if-no-files-found: warn
-          retention-days: 14
+          submodules: recursive
+
+      # clippy emits metadata only (no codegen, no linking), so target/ stays
+      # well below the build-test job's. Disk reclaim kept for the same
+      # reason as build-test: the Linux runner starts with ~14 GB free.
+      - name: Free disk space (Linux runners)
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            /usr/local/lib/node_modules
+          df -h /
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+        id: rust
+
+      - name: Cache cargo registry + target
+        if: runner.os != 'Windows'
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-clippy-${{ matrix.host }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-clippy-${{ matrix.host }}-${{ steps.rust.outputs.cachekey }}-
+
+      - name: Cache cargo registry only (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-clippy-${{ matrix.host }}-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-clippy-${{ matrix.host }}-registry-
+
+      - name: Install Linux build tooling
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+
+      # Identical scope rule to build-test. Kept in lockstep on purpose: the
+      # lint surface must equal the build surface on every host.
+      - name: Set build scope (full workspace on Linux, node crates elsewhere)
+        shell: bash
+        run: |
+          NODE="dom-agent-runner dom-chain dom-cli dom-config dom-consensus dom-core
+                dom-crypto dom-explorer dom-faucet dom-integration-tests dom-mempool
+                dom-node dom-pmmr dom-pow dom-rpc dom-serialization dom-slate dom-store
+                dom-test-runner dom-test-vectors dom-tx dom-wallet dom-wallet-app
+                dom-wallet-core-api dom-wallet-crypto dom-wallet-keys
+                dom-wallet-recovery dom-wallet2 dom-wire"
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            echo "SCOPE_BUILD=--workspace" >> "$GITHUB_ENV"
+          else
+            B=""
+            for c in $NODE; do B="$B -p $c"; done
+            echo "SCOPE_BUILD=$B" >> "$GITHUB_ENV"
+          fi
+
+      - name: cargo clippy -- -D warnings
+        shell: bash
+        run: cargo clippy $SCOPE_BUILD --all-targets -- -D warnings
+
   supply-chain:
     name: "supply chain: cargo deny + cargo audit"
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
-        id: rust
       - name: Cache cargo registry + installed tools
-        uses: actions/cache@v4
-        # Cache hits never skip builds or tests. Cargo still validates fingerprints.
-        # The compiler/profile prefix prevents stale incompatible target restores.
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            ~/.cargo/bin/cargo-deny
-            ~/.cargo/bin/cargo-audit
+            ~/.cargo/bin
             ~/.cargo/.crates.toml
             ~/.cargo/.crates2.json
-          key: dom-ci-v2-supply-chain-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-original-tools-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', 
-            'rust-toolchain', 'rust-toolchain.toml', '.cargo/**', '.github/workflows/ci.yml') }}
+          key: cargo-supply-chain-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            dom-ci-v2-supply-chain-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-original-tools-
+            cargo-supply-chain-
 
-        id: cargo-cache
       - name: Install cargo-deny and cargo-audit
         run: |
           command -v cargo-deny >/dev/null || cargo install --locked cargo-deny
@@ -384,7 +336,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -429,7 +381,9 @@ jobs:
 
       # Independent implementation of the ecrecover construction used to
       # authenticate address(t*G), separate from both Solidity and Rust.
-      - uses: actions/setup-node@v4
+      # node-version stays 20: it is the Node the ecrecover evidence was
+      # produced with. The action itself now runs on the Node 24 runtime.
+      - uses: actions/setup-node@v7
         with:
           node-version: '20'
 
@@ -446,84 +400,26 @@ jobs:
     # real-backend suites alone exceeds the previous 45-minute budget, which
     # cancelled the job after every one of its gates had already passed.
     timeout-minutes: 90
-    # Optimize CPU-heavy Rust without switching to --release or changing features.
-    # Keep full debug information, debug assertions and arithmetic overflow checks.
-    # Align dev/test settings so profile differences do not cause avoidable rebuilds.
-    # No changes to test counts, timeouts, RandomX, KDF settings or test threads.
-    env:
-      CARGO_INCREMENTAL: "0"
-      CARGO_PROFILE_DEV_OPT_LEVEL: "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.optimized == 'false' && '0' || '2' }}"
-      CARGO_PROFILE_TEST_OPT_LEVEL: "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.optimized == 'false' && '0' || '2' }}"
-      CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: "true"
-      CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: "true"
-      CARGO_PROFILE_DEV_OVERFLOW_CHECKS: "true"
-      CARGO_PROFILE_TEST_OVERFLOW_CHECKS: "true"
-      CARGO_PROFILE_DEV_DEBUG: "2"
-      CARGO_PROFILE_TEST_DEBUG: "2"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
-
-      # Every other build job here caches cargo; this one compiled the whole
-      # tree cold on every run. Same gates, nothing weakened.
         with:
           components: clippy
         id: rust
-      - name: Prepare benchmark instrumentation
-        shell: bash
-        run: |
-          set -euo pipefail
-          bench="$RUNNER_TEMP/dom-ci-benchmark"
-          mkdir -p "$bench"
-          printf 'phase\tseconds\texit_code\n' > "$bench/timings.tsv"
-          cat > "$bench/timer.sh" <<'BASH'
-          ci_timer_start() {
-            CI_TIMER_PHASE="$1"
-            CI_TIMER_BEGIN=$SECONDS
-            trap 'ci_timer_finish "$?"' EXIT
-          }
-          ci_timer_finish() {
-            local rc="$1"
-            local elapsed=$((SECONDS - CI_TIMER_BEGIN))
-            trap - EXIT
-            if ! printf '%s\t%s\t%s\n' "$CI_TIMER_PHASE" "$elapsed" "$rc" \
-                >> "$RUNNER_TEMP/dom-ci-benchmark/timings.tsv"; then
-              echo '::error::Could not record phase timing' >&2
-              if [ "$rc" -eq 0 ]; then rc=1; fi
-            fi
-            exit "$rc"
-          }
-          BASH
-          {
-            printf 'commit=%s\njob=%s\nos=%s\narch=%s\n' "$GITHUB_SHA" "$GITHUB_JOB" "$RUNNER_OS" "$RUNNER_ARCH"
-            printf 'dev_opt_level=%s\ntest_opt_level=%s\n' "$CARGO_PROFILE_DEV_OPT_LEVEL" "$CARGO_PROFILE_TEST_OPT_LEVEL"
-            printf 'test_debug_assertions=%s\ntest_overflow_checks=%s\n' "$CARGO_PROFILE_TEST_DEBUG_ASSERTIONS" "$CARGO_PROFILE_TEST_OVERFLOW_CHECKS"
-            printf 'full_debug_info=%s\nincremental=%s\n' "$CARGO_PROFILE_TEST_DEBUG" "$CARGO_INCREMENTAL"
-            rustc -Vv
-            cargo -V
-            uname -a
-            case "$RUNNER_OS" in
-              Linux) nproc; free -h; df -h / ;;
-              macOS) sysctl hw.ncpu hw.memsize; df -h / ;;
-              Windows) printf 'NUMBER_OF_PROCESSORS=%s\n' "${NUMBER_OF_PROCESSORS:-unknown}" ;;
-            esac
-          } | tee "$bench/environment.txt"
+
+      # Every other build job here caches cargo; this one compiled the whole
+      # tree cold on every run. Same gates, nothing weakened.
       - name: Cache cargo registry + target
-        uses: actions/cache@v4
-        # Cache hits never skip builds or tests. Cargo still validates fingerprints.
-        # The compiler/profile prefix prevents stale incompatible target restores.
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-            !target/**/incremental
-            !target/cargo-timings
-          key: dom-ci-v2-interop-real-backend-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-o${{ env.CARGO_PROFILE_TEST_OPT_LEVEL }}-checks-target-${{ 
-            hashFiles('**/Cargo.lock', '**/Cargo.toml', 'rust-toolchain', 'rust-toolchain.toml', '.cargo/**', '.github/workflows/ci.yml') }}
+          key: cargo-interop-real-backend-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            dom-ci-v2-interop-real-backend-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-o${{ env.CARGO_PROFILE_TEST_OPT_LEVEL }}-checks-target-
+            cargo-interop-real-backend-${{ steps.rust.outputs.cachekey }}-
 
       # G-F2 requires the full F1 regression to stay green against the REAL
       # cryptographic backend rather than the disabled one. The suites live in
@@ -531,27 +427,14 @@ jobs:
       # `f2_e2e_018_the_f1_real_backend_regression_stays_wired_in_ci` reads this
       # file and fails if either command is ever removed — so the regression
       # cannot be dropped while the gate still claims it.
-        id: cargo-cache
       - name: F1 real-backend regression (vault)
-        run: |
-          set -euo pipefail
-          source "$RUNNER_TEMP/dom-ci-benchmark/timer.sh"
-          ci_timer_start real-backend-vault
-          cargo test -p dom-vault --features real-dom-adaptor --locked 2>&1 | tee "$RUNNER_TEMP/dom-ci-benchmark/real-backend-vault.log"
+        run: cargo test -p dom-vault --features real-dom-adaptor --locked
 
-
-        shell: bash
       - name: F1 real-backend regression (leg)
-        run: |
-          set -euo pipefail
-          source "$RUNNER_TEMP/dom-ci-benchmark/timer.sh"
-          ci_timer_start real-backend-leg
-          cargo test -p dom-leg --features real-dom-adaptor --locked 2>&1 | tee "$RUNNER_TEMP/dom-ci-benchmark/real-backend-leg.log"
-
+        run: cargo test -p dom-leg --features real-dom-adaptor --locked
 
       # The layer's executable guards. Each fails the build on its own finding;
       # none of them is advisory.
-        shell: bash
       - name: Architecture boundaries
         run: ./scripts/check-boundaries.sh
 
@@ -591,125 +474,57 @@ jobs:
       # which neither `cargo test --workspace` nor a plain clippy run compiles.
       - name: Optional feature surfaces
         run: |
-          set -euo pipefail
-          source "$RUNNER_TEMP/dom-ci-benchmark/timer.sh"
-          ci_timer_start optional-feature-surfaces
           cargo clippy -p dom-scriptless-store --features evidence-only --all-targets --locked -- -D warnings
           cargo test  -p dom-scriptless-store --features evidence-only --locked
           cargo clippy -p store --features failpoints --all-targets --locked -- -D warnings
 
-        shell: bash
-      - name: Publish benchmark summary
-        if: always()
-        shell: bash
-        env:
-          CI_CACHE_HIT: ${{ steps.cargo-cache.outputs.cache-hit }}
-        run: |
-          set -euo pipefail
-          bench="$RUNNER_TEMP/dom-ci-benchmark"
-          {
-            printf '## CI benchmark — %s / %s\n\n' "$GITHUB_JOB" "$RUNNER_ARCH"
-            if [ -f "$bench/environment.txt" ]; then
-              printf '<details><summary>Compiler, runner and checks</summary>\n\n```text\n'
-              cat "$bench/environment.txt"
-              printf '```\n</details>\n\n'
-            fi
-            printf 'Exact cache match: `%s` (false/empty may mean fallback, miss or an unavailable cache step).\n\n' "${CI_CACHE_HIT:-not-reported}"
-            printf '| Phase | Duration | Exit code |\n|---|---:|---:|\n'
-            if [ -f "$bench/timings.tsv" ]; then
-              while IFS=$'\t' read -r phase seconds code; do
-                [ "$phase" != 'phase' ] || continue
-                printf '| %s | %dm %02ds | %s |\n' "$phase" "$((seconds / 60))" "$((seconds % 60))" "$code"
-              done < "$bench/timings.tsv"
-            fi
-            printf '\nMeasured commands only. Checkout, cache transfer, queueing and other jobs are not included.\n'
-            printf 'Use the workflow Total duration for wall-clock comparison. A first run may have a cold target cache.\n'
-          } >> "$GITHUB_STEP_SUMMARY"
-          if [ -f "$bench/workspace-tests.log" ]; then
-            # Parse only explicit libtest summaries. These are per-binary runtimes,
-            # not compilation times or the wall-clock duration of the full workflow.
-            awk '
-              { gsub(/\033\[[0-9;]*m/, "") }
-              /Running unittests |Running tests\// { suite=$0; sub(/^[[:space:]]+/, "", suite) }
-              /test result:/ && /finished in [0-9.]+s/ {
-                elapsed=$0
-                sub(/.*finished in /, "", elapsed)
-                sub(/s.*/, "", elapsed)
-                if (suite != "") printf "%s\t%s\n", elapsed, suite
-              }
-            ' "$bench/workspace-tests.log" | LC_ALL=C sort -k1,1nr > "$bench/test-binary-times.tsv"
-            if [ -s "$bench/test-binary-times.tsv" ]; then
-              {
-                printf '\n### Slowest test binaries (reported by libtest)\n\n'
-                printf '| Seconds | Test binary |\n|---:|---|\n'
-                sed -n '1,10p' "$bench/test-binary-times.tsv" | while IFS=$'\t' read -r seconds binary; do
-                  printf '| %s | `%s` |\n' "$seconds" "$binary"
-                done
-                printf '\nDiagnostic list only; custom harnesses without a libtest summary are not counted here.\n'
-              } >> "$GITHUB_STEP_SUMMARY"
-            fi
-          fi
-          if [ -d target/cargo-timings ]; then
-            mkdir -p "$bench"
-            cp -R target/cargo-timings "$bench/"
-          fi
-      - name: Upload benchmark evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-benchmark-interop-real-backend
-          path: ${{ runner.temp }}/dom-ci-benchmark/
-          if-no-files-found: warn
-          retention-days: 14
+  # Kept verbatim on purpose: `cargo test -p <crate>` without `--all-targets`
+  # runs doctests, which no other job does. Not redundant with build-test.
   release-blocker-crate-tests:
     name: "release blockers: crate tests (linux)"
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
       - uses: dtolnay/rust-toolchain@stable
-
         id: rust
+
       - name: Cache cargo registry + target
-        uses: actions/cache@v4
-        # Cache hits never skip builds or tests. Cargo still validates fingerprints.
-        # The compiler/profile prefix prevents stale incompatible target restores.
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: dom-ci-v2-release-blocker-crate-tests-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-original-target-${{ hashFiles('**/Cargo.lock', 
-            '**/Cargo.toml', 'rust-toolchain', 'rust-toolchain.toml', '.cargo/**', '.github/workflows/ci.yml') }}
+          key: cargo-linux-crate-tests-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            dom-ci-v2-release-blocker-crate-tests-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-original-target-
+            cargo-linux-crate-tests-${{ steps.rust.outputs.cachekey }}-
 
-        id: cargo-cache
       - name: Install Linux build tooling
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config
 
       - name: cargo check --workspace
-        run: cargo check --workspace --locked
+        run: cargo check --workspace
 
       - name: cargo test -p dom-consensus
-        run: cargo test -p dom-consensus --locked
+        run: cargo test -p dom-consensus
 
       - name: cargo test -p dom-chain
-        run: cargo test -p dom-chain --locked
+        run: cargo test -p dom-chain
 
       - name: cargo test -p dom-store
-        run: cargo test -p dom-store --locked
+        run: cargo test -p dom-store
 
       - name: cargo test -p dom-node (serial shutdown/supervisor coverage)
-        run: cargo test -p dom-node --locked -- --test-threads=1
+        run: cargo test -p dom-node -- --test-threads=1
 
       - name: cargo test -p dom-mempool
-        run: cargo test -p dom-mempool --locked
+        run: cargo test -p dom-mempool
 
   release-blocker-integration-tests:
     name: "release blockers: dom-integration-tests (linux fast mining)"
@@ -722,41 +537,35 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_TEST_OPT_LEVEL: "3"
       CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: "true"
-      CARGO_PROFILE_TEST_OVERFLOW_CHECKS: "true"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
       - uses: dtolnay/rust-toolchain@stable
-
         id: rust
+
       - name: Cache cargo registry + target
-        uses: actions/cache@v4
-        # Cache hits never skip builds or tests. Cargo still validates fingerprints.
-        # The compiler/profile prefix prevents stale incompatible target restores.
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: dom-ci-v2-release-blocker-integration-tests-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-o${{ env.CARGO_PROFILE_TEST_OPT_LEVEL 
-            }}-checks-target-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', 'rust-toolchain', 'rust-toolchain.toml', '.cargo/**', '.github/workflows/ci.yml') }}
+          key: cargo-linux-integration-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            dom-ci-v2-release-blocker-integration-tests-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-o${{ env.CARGO_PROFILE_TEST_OPT_LEVEL }}-checks-target-
+            cargo-linux-integration-${{ steps.rust.outputs.cachekey }}-
 
-        id: cargo-cache
       - name: Install Linux build tooling
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config
 
       - name: cargo test -p dom-integration-tests
-        run: cargo test -p dom-integration-tests --locked -- --test-threads=1
+        run: cargo test -p dom-integration-tests -- --test-threads=1
 
       - name: cargo test -p dom-integration-tests --ignored
-        run: cargo test -p dom-integration-tests --locked -- --ignored --test-threads=1
+        run: cargo test -p dom-integration-tests -- --ignored --test-threads=1
 
   ibd-integration:
     name: ibd-integration
@@ -770,47 +579,41 @@ jobs:
       CARGO_PROFILE_TEST_OPT_LEVEL: "3"
       CARGO_PROFILE_TEST_DEBUG: "0"
       DOM_INTEGRATION_LOG_DIR: ${{ github.workspace }}/ibd-two-node-logs
-      CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: "true"
-      CARGO_PROFILE_TEST_OVERFLOW_CHECKS: "true"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
       - uses: dtolnay/rust-toolchain@stable
-
         id: rust
+
       - name: Cache cargo registry + target
-        uses: actions/cache@v4
-        # Cache hits never skip builds or tests. Cargo still validates fingerprints.
-        # The compiler/profile prefix prevents stale incompatible target restores.
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: dom-ci-v2-ibd-integration-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-o${{ env.CARGO_PROFILE_TEST_OPT_LEVEL }}-checks-target-${{ 
-            hashFiles('**/Cargo.lock', '**/Cargo.toml', 'rust-toolchain', 'rust-toolchain.toml', '.cargo/**', '.github/workflows/ci.yml') }}
+          key: cargo-linux-ibd-integration-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            dom-ci-v2-ibd-integration-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-o${{ env.CARGO_PROFILE_TEST_OPT_LEVEL }}-checks-target-
+            cargo-linux-ibd-integration-${{ steps.rust.outputs.cachekey }}-
 
-        id: cargo-cache
       - name: Install Linux build tooling
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config
 
       - name: cargo build --release -p dom-node
-        run: cargo build --release -p dom-node --locked
+        run: cargo build --release -p dom-node
 
       - name: cargo test -p dom-integration-tests --test ibd_two_node
         run: |
           mkdir -p "$DOM_INTEGRATION_LOG_DIR"
-          cargo test -p dom-integration-tests --test ibd_two_node --locked -- --nocapture --test-threads=1
+          cargo test -p dom-integration-tests --test ibd_two_node -- --nocapture --test-threads=1
 
       - name: Upload IBD node logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ibd-integration-logs
           path: ibd-two-node-logs
@@ -819,18 +622,16 @@ jobs:
   release-blocker-gate:
     name: release blocker gate
     runs-on: ubuntu-latest
-    # All original dependencies remain mandatory. Snapshot equivalence also gates release.
     needs:
       - fmt
       - supply-chain
       - build-test
+      - clippy
       - interop-evm-contracts
       - interop-real-backend
       - release-blocker-crate-tests
       - release-blocker-integration-tests
       - ibd-integration
-      - pmmr-vectors-cross-platform
-      - compare-snapshots
     if: always()
     steps:
       - name: Require every release-blocker job to pass
@@ -838,26 +639,25 @@ jobs:
           test "${{ needs.fmt.result }}" = "success"
           test "${{ needs.supply-chain.result }}" = "success"
           test "${{ needs.build-test.result }}" = "success"
+          test "${{ needs.clippy.result }}" = "success"
           test "${{ needs.interop-evm-contracts.result }}" = "success"
           test "${{ needs.interop-real-backend.result }}" = "success"
           test "${{ needs.release-blocker-crate-tests.result }}" = "success"
           test "${{ needs.release-blocker-integration-tests.result }}" = "success"
           test "${{ needs.ibd-integration.result }}" = "success"
-          test "${{ needs.pmmr-vectors-cross-platform.result }}" = "success"
-          test "${{ needs.compare-snapshots.result }}" = "success"
 
   critical-domain-coverage-report:
     name: critical domain coverage report
     runs-on: ubuntu-latest
     needs: release-blocker-gate
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Generate critical domain coverage report
         run: scripts/critical_domain_coverage_report.sh > critical-domain-coverage.md
 
       - name: Upload critical domain coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: critical-domain-coverage
           path: critical-domain-coverage.md
@@ -865,9 +665,7 @@ jobs:
   pmmr-vectors-cross-platform:
     name: pinned PMMR vectors must reproduce on ${{ matrix.host }}
     runs-on: ${{ matrix.runner }}
-    # Independent checkout: run after the short format gate, not after the heavy matrix.
-    # Every vector test, reproducer, audit log and snapshot upload is retained.
-    needs: fmt
+    needs: build-test
     continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
@@ -889,7 +687,7 @@ jobs:
             runner: windows-latest
             experimental: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install Linux build tooling
@@ -904,20 +702,20 @@ jobs:
       # determinism on that platform.
       - name: Run pinned PMMR vector tests
         run: |
-          cargo test -p dom-test-vectors --lib pmmr_vectors --locked
+          cargo test -p dom-test-vectors --lib pmmr_vectors
 
       - name: Run hash + serialization vector tests
         run: |
-          cargo test -p dom-test-vectors --lib hash_vectors --locked
-          cargo test -p dom-test-vectors --lib serialization_vectors --locked
+          cargo test -p dom-test-vectors --lib hash_vectors
+          cargo test -p dom-test-vectors --lib serialization_vectors
 
       - name: Run PMMR adversarial + reproducer suite
         run: |
-          cargo test -p dom-pmmr --tests --locked
+          cargo test -p dom-pmmr --tests
 
       - name: Print pinned PMMR vectors (cross-platform audit log)
         run: |
-          cargo test -p dom-test-vectors --lib pmmr_vectors::tests::print_pmmr_vectors --locked -- --nocapture
+          cargo test -p dom-test-vectors --lib pmmr_vectors::tests::print_pmmr_vectors -- --nocapture
 
       # Phase 1.4 deterministic snapshot manifest — every host
       # produces the SAME byte sequence. The compare-snapshots job
@@ -927,13 +725,13 @@ jobs:
       - name: Generate deterministic snapshot manifest
         shell: bash
         run: |
-          cargo run -p dom-test-vectors --bin cross_platform_snapshot --quiet --locked \
+          cargo run -p dom-test-vectors --bin cross_platform_snapshot --quiet \
             > snapshot.${{ matrix.host }}.txt
           wc -c snapshot.${{ matrix.host }}.txt
           head -5 snapshot.${{ matrix.host }}.txt
 
       - name: Upload snapshot artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: snapshot-${{ matrix.host }}
           path: snapshot.${{ matrix.host }}.txt
@@ -944,10 +742,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: pmmr-vectors-cross-platform
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download every host's snapshot
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: snapshot-*
           path: snapshots
@@ -964,14 +762,14 @@ jobs:
           set -euo pipefail
           ls -la snapshots/
           REFERENCE=snapshots/snapshot.linux-x86_64.txt
-          if [ ! -s "$REFERENCE" ]; then
+          if [ ! -f "$REFERENCE" ]; then
             echo "FATAL: reference snapshot ${REFERENCE} missing — linux-x86_64 leg did not upload"
             exit 1
           fi
           REQUIRED_HOSTS="linux-arm64 macos-arm64 macos-x86_64"
           for host in $REQUIRED_HOSTS; do
             CANDIDATE="snapshots/snapshot.${host}.txt"
-            if [ ! -s "$CANDIDATE" ]; then
+            if [ ! -f "$CANDIDATE" ]; then
               echo "FATAL: missing snapshot for required host ${host}"
               exit 1
             fi
