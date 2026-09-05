@@ -81,6 +81,12 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // DOM_MIN_OUTBOUND / DOM_MAX_INBOUND (spec A6): let an operator adjust
+    // peer topology without recompiling. Out-of-range values clamp with a
+    // warning and garbage keeps the network default — never a boot failure
+    // (§1.4, R-A6.1).
+    config.apply_peer_topology_env();
+
     // Allow override of seed peers via DOM_SEED_PEERS env var (CSV of host:port).
     // Useful for private Testnet deployments where DNS seeds do not exist.
     if let Ok(seeds_csv) = std::env::var("DOM_SEED_PEERS") {

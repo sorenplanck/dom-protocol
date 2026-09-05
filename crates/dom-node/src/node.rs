@@ -1643,16 +1643,20 @@ async fn handle_inbound(
                 warn!("Persisting peer reputation state after inbound registration failed: {e}");
             }
             // The source port of an inbound TCP connection is ephemeral. Learn
-            // the peer's IP on the standard network port as an *unconfirmed*
-            // candidate; only a later successful outbound dial makes it PEX
-            // shareable. This is deliberately compatible with the existing
-            // Hello payload, whose strict length parser cannot be extended
-            // without a protocol-version change. A future protocol revision
-            // may add an explicitly advertised listening endpoint to Hello as
-            // part of a coordinated version/handshake migration.
+            // the peer's IP on the port it ADVERTISED in its Hello as an
+            // *unconfirmed* candidate; only a later successful outbound dial
+            // makes it PEX shareable. This is the "coordinated
+            // version/handshake migration" the previous comment here promised:
+            // PROTOCOL_VERSION 3 carries the field (spec A1), and a v2 peer
+            // decodes as advertised_port 0 — declared unreachable — which
+            // learn_inbound_peer counts but keeps out of the dial pool, in
+            // place of the old guess of the default network port that filled
+            // every pool with ip:33369 entries nobody was listening on
+            // (spec A2). The IP is the connection's source address, never one
+            // taken from the payload.
             {
                 let mut pex = trace_lock("pex", &svc.pex).await;
-                pex.learn_inbound_peer(addr.ip(), config.network.default_port());
+                pex.learn_inbound_peer(addr.ip(), peer_hello.advertised_port);
             }
             refresh_peer_metrics(&svc.peers, &svc.metrics, Some(&svc.state_events)).await;
             // An inbound peer with a taller chain is a normal IBD source.

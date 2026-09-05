@@ -33,6 +33,8 @@ const MIN_GETADDR_TRACKED: usize = 128;
 pub struct PexManager {
     /// Known peers by address string.
     known: HashMap<String, PeerAddr>,
+    /// Inbound peers that announced no usable listening port (R-A2.2).
+    unreachable_peers_seen: u64,
     /// Addresses confirmed by a successful outbound connection.  Unconfirmed
     /// addresses are candidates to dial, but are never re-advertised.
     confirmed: HashSet<String>,
@@ -65,6 +67,7 @@ impl PexManager {
     fn with_policy(max_peers: usize, allow_non_public_addrs: bool) -> Self {
         Self {
             known: HashMap::new(),
+            unreachable_peers_seen: 0,
             confirmed: HashSet::new(),
             last_getaddr: HashMap::new(),
             getaddr_order: VecDeque::new(),
@@ -93,13 +96,39 @@ impl PexManager {
             .count()
     }
 
-    /// Learn the likely listening endpoint of an authenticated inbound peer.
+    /// Learn the listening endpoint an authenticated inbound peer advertised
+    /// in its Hello (spec A2).
     ///
-    /// The TCP source port is ephemeral, so the standard network P2P port is
-    /// used as an unconfirmed dial candidate. It is never shared until an
-    /// outbound connection succeeds.
-    pub fn learn_inbound_peer(&mut self, ip: IpAddr, p2p_port: u16) -> bool {
-        self.add_unconfirmed(SocketAddr::new(ip, p2p_port).to_string(), 0)
+    /// The TCP source port is ephemeral and says nothing about where the peer
+    /// listens, so only the port the peer itself announced is usable. Before
+    /// this field existed the default network port was guessed instead, which
+    /// filled the pool with ip:33369 entries for peers not listening there —
+    /// every node then burned outbound dial budget on dead addresses, and a
+    /// peer on any other port was undiscoverable.
+    ///
+    /// A port of 0 is the peer declaring itself unreachable (behind NAT, no
+    /// mapping): it is counted, not pooled — a declared-unreachable leaf must
+    /// not pollute the dial pool, but losing all record of its existence would
+    /// silently break anything that watches network composition (R-A2.2). An
+    /// insane port (privileged, per [`dom_wire::message::sane_advertised_port`])
+    /// is refused the same way: the peer said something, but nothing usable.
+    ///
+    /// Never shared until an outbound connection to it succeeds, as before.
+    pub fn learn_inbound_peer(&mut self, ip: IpAddr, advertised_port: u16) -> bool {
+        if advertised_port == 0 || !dom_wire::message::sane_advertised_port(advertised_port) {
+            self.unreachable_peers_seen = self.unreachable_peers_seen.saturating_add(1);
+            return false;
+        }
+        self.add_unconfirmed(SocketAddr::new(ip, advertised_port).to_string(), 0)
+    }
+
+    /// How many inbound peers announced no usable listening port (R-A2.2).
+    ///
+    /// Monotonic count of sightings, not a live set: its purpose is to keep
+    /// declared-unreachable peers visible to metrics after they stopped
+    /// entering the dial pool.
+    pub fn unreachable_peers_seen(&self) -> u64 {
+        self.unreachable_peers_seen
     }
 
     /// Record a successful outbound connection and make the endpoint shareable.
@@ -440,6 +469,63 @@ fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // §7, A2 — the advertised port, never the guessed one.
+
+    /// §7: `unreachable_peer_never_enters_pex`. A peer that declares port 0
+    /// (or a v2 peer, which decodes as 0) is counted but never pooled: dial
+    /// budget must not be burned on an address nobody is listening on.
+    #[test]
+    fn unreachable_peer_never_enters_pex() {
+        let mut pex = PexManager::new(64);
+        assert!(!pex.learn_inbound_peer("203.0.113.7".parse().unwrap(), 0));
+        assert_eq!(pex.known_count(), 0);
+        assert_eq!(
+            pex.unreachable_peers_seen(),
+            1,
+            "R-A2.2: the sighting stays visible even though nothing is pooled"
+        );
+    }
+
+    /// §7: `advertised_port_is_used_not_default_port`. The pool entry must be
+    /// the peer's announced endpoint, not ip:default — the guessed default is
+    /// exactly the bug A2 removes.
+    #[test]
+    fn advertised_port_is_used_not_default_port() {
+        // 203.0.113.0/24 is RFC 5737 documentation space, which the mainnet
+        // policy refuses as non-public — a real routable IP is needed here.
+        let mut pex = PexManager::new(64);
+        assert!(pex.learn_inbound_peer("8.8.8.8".parse().unwrap(), 45_123));
+        let addrs: Vec<&str> = pex
+            .connectable_peers()
+            .iter()
+            .map(|p| p.addr.as_str())
+            .collect();
+        assert!(addrs.iter().any(|a| a.ends_with(":45123")), "{addrs:?}");
+        assert!(!addrs.iter().any(|a| a.ends_with(":33369")), "{addrs:?}");
+    }
+
+    /// A privileged advertised port is as unusable as no port (R-A1.2 reaches
+    /// PEX through the same gate).
+    #[test]
+    fn privileged_advertised_port_never_enters_pex() {
+        let mut pex = PexManager::new(64);
+        assert!(!pex.learn_inbound_peer("203.0.113.7".parse().unwrap(), 80));
+        assert_eq!(pex.known_count(), 0);
+        assert_eq!(pex.unreachable_peers_seen(), 1);
+    }
+
+    /// §7, A4 half already enforced here: what an inbound peer announces is a
+    /// dial candidate, never gossip, until an outbound dial to it succeeds.
+    #[test]
+    fn unconfirmed_addr_is_not_gossiped() {
+        let mut pex = PexManager::new(64);
+        assert!(pex.learn_inbound_peer("8.8.8.8".parse().unwrap(), 45_123));
+        assert!(
+            pex.peers_for_sharing().is_empty(),
+            "an unconfirmed inbound announcement must not be re-advertised"
+        );
+    }
 
     #[test]
     fn add_and_retrieve_peer() {

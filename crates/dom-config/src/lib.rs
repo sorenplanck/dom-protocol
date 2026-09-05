@@ -316,6 +316,109 @@ impl NodeConfig {
             metrics_listen_addr: None,
         }
     }
+
+    /// Apply `DOM_MIN_OUTBOUND` / `DOM_MAX_INBOUND` overrides (spec A6).
+    ///
+    /// Until these existed, both values were compile-time constants and an
+    /// operator could not compensate for a bad topology without rebuilding.
+    /// The per-network defaults stay authoritative when a variable is unset.
+    ///
+    /// Deliberately NOT a way to "fix" the unreachable `min_outbound = 8` on
+    /// mainnet by lowering it: the right number of outbound peers is the
+    /// number of dialable nodes, and it is Part A of the autodiscovery work
+    /// that raises that, not this knob.
+    pub fn apply_peer_topology_env(&mut self) {
+        self.min_outbound = env_usize_clamped(
+            "DOM_MIN_OUTBOUND",
+            std::env::var("DOM_MIN_OUTBOUND").ok().as_deref(),
+            self.min_outbound,
+            MIN_OUTBOUND_CEILING,
+        );
+        self.max_inbound = env_usize_clamped(
+            "DOM_MAX_INBOUND",
+            std::env::var("DOM_MAX_INBOUND").ok().as_deref(),
+            self.max_inbound,
+            MAX_INBOUND_CEILING,
+        );
+    }
+}
+
+/// R-A6.1 ceilings. An absurd value does not fail the boot (§1.4) — it clamps
+/// with a warning. `DOM_MIN_OUTBOUND=1000` on a 12-node network would dial in
+/// a loop, spam the log and burn descriptors; `DOM_MAX_INBOUND` beyond the
+/// low thousands runs into fd limits before it runs into peers.
+const MIN_OUTBOUND_CEILING: usize = 64;
+const MAX_INBOUND_CEILING: usize = 1024;
+
+/// Parse one topology override: unset keeps the default, unparseable keeps
+/// the default with a warning, out-of-range clamps with a warning (R-A6.1).
+fn env_usize_clamped(name: &str, raw: Option<&str>, default: usize, ceiling: usize) -> usize {
+    let Some(raw) = raw else {
+        return default;
+    };
+    match raw.trim().parse::<usize>() {
+        Ok(value) if value <= ceiling => value,
+        Ok(value) => {
+            tracing::warn!(%name, value, ceiling, "value above ceiling; clamping");
+            ceiling
+        }
+        Err(_) => {
+            tracing::warn!(%name, value = %raw, "not a number; keeping the default {default}");
+            default
+        }
+    }
+}
+
+#[cfg(test)]
+mod env_topology_tests {
+    use super::*;
+
+    // R-A6.1 — driven through the parameterised core so tests never touch
+    // process-global env state.
+
+    #[test]
+    fn unset_keeps_the_network_default() {
+        assert_eq!(env_usize_clamped("DOM_MIN_OUTBOUND", None, 8, 64), 8);
+    }
+
+    #[test]
+    fn in_range_value_is_used() {
+        assert_eq!(env_usize_clamped("DOM_MIN_OUTBOUND", Some("12"), 8, 64), 12);
+        assert_eq!(
+            env_usize_clamped("DOM_MAX_INBOUND", Some(" 200 "), 125, 1024),
+            200
+        );
+        assert_eq!(env_usize_clamped("DOM_MIN_OUTBOUND", Some("0"), 8, 64), 0);
+    }
+
+    #[test]
+    fn absurd_value_clamps_to_the_ceiling_instead_of_dialing_in_a_loop() {
+        assert_eq!(
+            env_usize_clamped("DOM_MIN_OUTBOUND", Some("1000"), 8, 64),
+            64
+        );
+        assert_eq!(
+            env_usize_clamped("DOM_MAX_INBOUND", Some("999999"), 125, 1024),
+            1024
+        );
+    }
+
+    #[test]
+    fn garbage_keeps_the_default_and_never_kills_the_boot() {
+        // §1.4: no change may prevent the node from starting.
+        assert_eq!(
+            env_usize_clamped("DOM_MIN_OUTBOUND", Some("many"), 8, 64),
+            8
+        );
+        assert_eq!(
+            env_usize_clamped("DOM_MAX_INBOUND", Some("-3"), 125, 1024),
+            125
+        );
+        assert_eq!(
+            env_usize_clamped("DOM_MAX_INBOUND", Some(""), 125, 1024),
+            125
+        );
+    }
 }
 
 #[cfg(test)]
