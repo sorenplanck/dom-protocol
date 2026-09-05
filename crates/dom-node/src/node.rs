@@ -87,6 +87,10 @@ pub struct DomNode {
     /// Peer Exchange state: known peer addresses learned from seeds and Addr
     /// gossip, plus GetAddr cooldown tracking (RFC-0005 §6).
     pub pex: Arc<Mutex<crate::pex::PexManager>>,
+    /// Which Noise prologue version to lead with per peer (spec A1,
+    /// Strategy B). Shared by the dial loop and the inbound acceptor so a
+    /// version learned in one direction serves the other.
+    pub(crate) prologue_prefs: Arc<crate::prologue_prefs::ProloguePreferences>,
 }
 
 /// Per-connection I/O context passed into message_loop.
@@ -111,6 +115,7 @@ struct NodeServices {
     state_events: Arc<Notify>,
     ibd_active_sessions: Arc<AtomicU64>,
     pex: Arc<Mutex<crate::pex::PexManager>>,
+    prologue_prefs: Arc<crate::prologue_prefs::ProloguePreferences>,
 }
 
 /// Broadcast channels shared across connection tasks.
@@ -554,6 +559,7 @@ impl DomNode {
                 PEX_MAX_KNOWN_PEERS,
                 config.network,
             ))),
+            prologue_prefs: Arc::new(crate::prologue_prefs::ProloguePreferences::default()),
         })
     }
 
@@ -1111,6 +1117,7 @@ impl DomNode {
                         state_events: self.state_events.clone(),
                         ibd_active_sessions: self.ibd_active_sessions.clone(),
                         pex: self.pex.clone(),
+                        prologue_prefs: self.prologue_prefs.clone(),
                     };
                     let peers = svc.peers.clone();
                     let metrics = svc.metrics.clone();
@@ -1176,6 +1183,7 @@ impl DomNode {
             state_events: self.state_events.clone(),
             ibd_active_sessions: self.ibd_active_sessions.clone(),
             pex: self.pex.clone(),
+            prologue_prefs: self.prologue_prefs.clone(),
         };
         let mut configured_seed_ip_cache = HashMap::<String, HashSet<std::net::IpAddr>>::new();
         loop {
@@ -1553,23 +1561,46 @@ async fn handle_inbound(
     };
     let chain_id =
         *derive_chain_id(config.network.magic(), &Hash256::from_bytes(genesis_hash)).as_bytes();
+    // Strategy B (spec A1): lead with what per-peer memory says. The prologue
+    // cannot be probed — a mismatch only surfaces after message 2 is written —
+    // so a wrong guess costs this connection, and recovery happens when the
+    // peer redials (its dial loop treats handshake failure as retryable).
+    let prologue_version = svc.prologue_prefs.version_for(addr.ip());
     let transport = match tokio::select! {
         _ = shutdown.wait() => return None,
-        result = dom_wire::handshake::perform_handshake_responder(
+        result = dom_wire::handshake::perform_handshake_responder_versioned(
             &mut stream,
             &privkey,
+            prologue_version,
             config.network.magic(),
             &chain_id,
         ) => result,
     } {
-        Ok(t) => t,
+        Ok(t) => {
+            svc.prologue_prefs
+                .record_success(addr.ip(), prologue_version);
+            t
+        }
         Err(e) => {
-            let _ = record_pending_peer_violation(&chain, &svc.peers, addr, &e).await;
-            warn!("Handshake failed with {addr}: {e}");
+            if let Some(next) = svc
+                .prologue_prefs
+                .demote_after_failure(addr.ip(), prologue_version)
+            {
+                // Expected during the version transition, so it must not feed
+                // the ban machinery: penalising it would cool down exactly the
+                // peer whose reconnection completes the negotiation.
+                info!(
+                    "Handshake with {addr} failed on prologue v{prologue_version}; \
+                     will offer v{next} when this peer reconnects: {e}"
+                );
+            } else {
+                let _ = record_pending_peer_violation(&chain, &svc.peers, addr, &e).await;
+                warn!("Handshake failed with {addr} on every supported version: {e}");
+            }
             return None;
         }
     };
-    info!("Noise handshake complete with {addr}");
+    info!("Noise handshake complete with {addr} (prologue v{prologue_version})");
 
     let mut codec = dom_wire::codec::NoiseCodec::new(transport, config.network.magic());
     match tokio::select! {
@@ -1728,24 +1759,6 @@ async fn connect_outbound(
         tx_fluff_tx,
         tx_stem_tx,
     } = channels.clone();
-    let mut stream = match tokio::select! {
-        _ = shutdown.wait() => return OutboundAttemptOutcome::Shutdown,
-        result = tokio::net::TcpStream::connect(addr) => result,
-    } {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(
-                event = "session_closed_reason",
-                peer_addr = %addr,
-                direction = "outbound",
-                reason = %e,
-                failure_class = "operational_network",
-                "outbound connection failed"
-            );
-            warn!("Connection to {addr} failed: {e}");
-            return OutboundAttemptOutcome::RetryableFailure;
-        }
-    };
     let genesis_hash = match config.network {
         dom_config::Network::Mainnet => dom_core::GENESIS_HASH_MAINNET,
         dom_config::Network::Testnet => dom_core::GENESIS_HASH_TESTNET,
@@ -1753,25 +1766,85 @@ async fn connect_outbound(
     };
     let chain_id =
         *derive_chain_id(config.network.magic(), &Hash256::from_bytes(genesis_hash)).as_bytes();
-    let transport = match tokio::select! {
-        _ = shutdown.wait() => return OutboundAttemptOutcome::Shutdown,
-        result = dom_wire::handshake::perform_handshake_initiator(
-            &mut stream,
-            &privkey,
-            config.network.magic(),
-            &chain_id,
-        ) => result,
-    } {
-        Ok(t) => t,
-        Err(e) => {
-            if let Ok(peer_addr) = addr.parse() {
-                let _ = record_pending_peer_violation(&chain, &svc.peers, peer_addr, &e).await;
+    // Strategy B (spec A1): a failed prologue poisons both the Noise state and
+    // the TCP connection — the responder has already seen bytes it could not
+    // authenticate — so each fallback version needs a fresh connection. Lead
+    // with what per-peer memory says (the newest for an unknown peer) and walk
+    // down on failure; only a peer that fails on every supported version is
+    // recorded as misbehaving.
+    let peer_ip = addr
+        .parse::<std::net::SocketAddr>()
+        .ok()
+        .map(|socket| socket.ip());
+    let mut prologue_version = peer_ip
+        .map(|ip| svc.prologue_prefs.version_for(ip))
+        .unwrap_or(dom_core::WIRE_PROTOCOL_VERSION);
+    let (mut stream, transport) = loop {
+        let mut stream = match tokio::select! {
+            _ = shutdown.wait() => return OutboundAttemptOutcome::Shutdown,
+            result = tokio::net::TcpStream::connect(addr) => result,
+        } {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    event = "session_closed_reason",
+                    peer_addr = %addr,
+                    direction = "outbound",
+                    reason = %e,
+                    failure_class = "operational_network",
+                    "outbound connection failed"
+                );
+                warn!("Connection to {addr} failed: {e}");
+                return OutboundAttemptOutcome::RetryableFailure;
             }
-            warn!("Handshake failed with {addr}: {e}");
-            return OutboundAttemptOutcome::RetryableFailure;
+        };
+        match tokio::select! {
+            _ = shutdown.wait() => return OutboundAttemptOutcome::Shutdown,
+            result = dom_wire::handshake::perform_handshake_initiator_versioned(
+                &mut stream,
+                &privkey,
+                prologue_version,
+                config.network.magic(),
+                &chain_id,
+            ) => result,
+        } {
+            Ok(t) => {
+                if let Some(ip) = peer_ip {
+                    svc.prologue_prefs.record_success(ip, prologue_version);
+                }
+                break (stream, t);
+            }
+            Err(e) => {
+                let fallback = peer_ip.and_then(|ip| {
+                    svc.prologue_prefs
+                        .demote_after_failure(ip, prologue_version)
+                });
+                match fallback {
+                    Some(next) => {
+                        // Expected once per cross-version pair during the
+                        // transition; reconnect immediately with the older
+                        // prologue rather than waiting a full retry cycle.
+                        info!(
+                            "Handshake with {addr} failed on prologue v{prologue_version}; \
+                             reconnecting with v{next}: {e}"
+                        );
+                        prologue_version = next;
+                        continue;
+                    }
+                    None => {
+                        if let Ok(peer_addr) = addr.parse() {
+                            let _ =
+                                record_pending_peer_violation(&chain, &svc.peers, peer_addr, &e)
+                                    .await;
+                        }
+                        warn!("Handshake failed with {addr}: {e}");
+                        return OutboundAttemptOutcome::RetryableFailure;
+                    }
+                }
+            }
         }
     };
-    info!("Connected to {addr}");
+    info!("Connected to {addr} (prologue v{prologue_version})");
 
     let mut codec = dom_wire::codec::NoiseCodec::new(transport, config.network.magic());
     match tokio::select! {

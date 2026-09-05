@@ -278,10 +278,35 @@ pub async fn perform_handshake_responder(
     network_magic: u32,
     chain_id: &[u8; 32],
 ) -> Result<TransportState, DomError> {
+    perform_handshake_responder_versioned(
+        stream,
+        static_privkey,
+        WIRE_PROTOCOL_VERSION,
+        network_magic,
+        chain_id,
+    )
+    .await
+}
+
+/// Perform the responder handshake pinned to one prologue version.
+///
+/// The responder cannot probe: in Noise_XX a prologue mismatch only surfaces
+/// at message 3, after message 2 has already been written, so the version has
+/// to be chosen before anything is known about the initiator. The caller
+/// supplies it from per-peer memory and treats a failure as the signal to
+/// lead with the next older version when this peer reconnects — which the
+/// existing dial loops already do on their own.
+pub async fn perform_handshake_responder_versioned(
+    stream: &mut tokio::net::TcpStream,
+    static_privkey: &[u8; 32],
+    version: u32,
+    network_magic: u32,
+    chain_id: &[u8; 32],
+) -> Result<TransportState, DomError> {
     let timeout_secs = handshake_timeout_secs();
     tokio::time::timeout(
         tokio::time::Duration::from_secs(timeout_secs),
-        perform_handshake_responder_inner(stream, static_privkey, network_magic, chain_id),
+        perform_handshake_responder_inner(stream, static_privkey, version, network_magic, chain_id),
     )
     .await
     .map_err(|_| {
@@ -295,10 +320,11 @@ pub async fn perform_handshake_responder(
 async fn perform_handshake_responder_inner(
     stream: &mut tokio::net::TcpStream,
     static_privkey: &[u8; 32],
+    version: u32,
     network_magic: u32,
     chain_id: &[u8; 32],
 ) -> Result<TransportState, DomError> {
-    let mut hs = build_responder(static_privkey, network_magic, chain_id)?;
+    let mut hs = build_responder_versioned(static_privkey, version, network_magic, chain_id)?;
     let mut buf = vec![0u8; NOISE_MAX_MSG];
 
     // <- e  (message 1)
@@ -388,6 +414,191 @@ mod tests {
     fn prologue_contains_dom_prefix() {
         let p = build_prologue(dom_core::NETWORK_MAGIC_MAINNET, &[0u8; 32]);
         assert_eq!(&p[0..3], b"DOM");
+    }
+
+    // §7, A1 — the version-tolerant prologue. WITHOUT THESE, THE NETWORK
+    // PARTITIONS on the next version bump.
+
+    #[test]
+    fn prologue_differs_between_versions() {
+        let chain_id = [0xABu8; 32];
+        assert_ne!(
+            build_prologue_versioned(2, dom_core::NETWORK_MAGIC_MAINNET, &chain_id),
+            build_prologue_versioned(3, dom_core::NETWORK_MAGIC_MAINNET, &chain_id),
+        );
+    }
+
+    #[test]
+    fn versioned_prologue_matches_legacy_v2_bytes_exactly() {
+        // The v2 bytes must stay what deployed v2 nodes derive today: any
+        // difference and this build cannot ever complete a handshake with
+        // them, whatever the retry logic does.
+        let chain_id = [0x5Au8; 32];
+        let mut expected = Vec::new();
+        expected.extend_from_slice(b"DOM");
+        expected.extend_from_slice(&2u32.to_le_bytes());
+        expected.extend_from_slice(&dom_core::NETWORK_MAGIC_MAINNET.to_le_bytes());
+        expected.extend_from_slice(&chain_id);
+        assert_eq!(
+            build_prologue_versioned(2, dom_core::NETWORK_MAGIC_MAINNET, &chain_id),
+            expected
+        );
+    }
+
+    #[test]
+    fn supported_versions_lead_with_the_newest() {
+        assert_eq!(SUPPORTED_PROLOGUE_VERSIONS[0], WIRE_PROTOCOL_VERSION);
+        assert!(
+            SUPPORTED_PROLOGUE_VERSIONS.windows(2).all(|w| w[0] > w[1]),
+            "fallback must walk strictly downwards"
+        );
+        assert!(
+            SUPPORTED_PROLOGUE_VERSIONS.contains(&2),
+            "dropping v2 support is a flag day, not a code cleanup"
+        );
+    }
+
+    /// §7: `v3_node_completes_noise_handshake_with_v2_node`.
+    ///
+    /// A v3 initiator reaching a v2-only responder: the first attempt fails on
+    /// AEAD, and the reconnect with the v2 prologue completes. Modelled
+    /// end-to-end over loopback TCP with a fresh connection per attempt,
+    /// exactly as the dial loop reconnects — a failed prologue poisons the
+    /// Noise state, so retrying on the same socket is not a thing.
+    #[tokio::test]
+    async fn v3_node_completes_noise_handshake_with_v2_node() {
+        let (ipriv, _) = generate_static_keypair();
+        let (rpriv, _) = generate_static_keypair();
+        let magic = dom_core::NETWORK_MAGIC_REGTEST;
+        let chain_id = [0x42u8; 32];
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // A v2 node: always the v2 prologue, no tolerance, accepts two
+        // connections (the failed cross-version attempt, then the retry).
+        let responder = tokio::spawn(async move {
+            let mut completed = None;
+            for _ in 0..2 {
+                let (mut s, _) = listener.accept().await.unwrap();
+                if let Ok(t) =
+                    perform_handshake_responder_versioned(&mut s, &rpriv, 2, magic, &chain_id).await
+                {
+                    completed = Some(t);
+                    break;
+                }
+            }
+            completed.expect("v2 responder never completed a handshake")
+        });
+
+        // The v3 initiator walks SUPPORTED_PROLOGUE_VERSIONS with a fresh
+        // connection per version, as connect_outbound does.
+        let mut transport = None;
+        for version in SUPPORTED_PROLOGUE_VERSIONS {
+            let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+            match perform_handshake_initiator_versioned(&mut s, &ipriv, *version, magic, &chain_id)
+                .await
+            {
+                Ok(t) => {
+                    assert_eq!(*version, 2, "settled version must be the peer's");
+                    transport = Some(t);
+                    break;
+                }
+                Err(_) => continue,
+            }
+        }
+        assert!(
+            transport.is_some(),
+            "v3 initiator never reached the v2 node"
+        );
+        responder.await.unwrap();
+    }
+
+    /// §7: `v2_node_completes_noise_handshake_with_v3_node`.
+    ///
+    /// The inverse direction, and the one initiator retries cannot rescue: a
+    /// v2 initiator has no fallback logic at all. What saves it is that a v2
+    /// dial loop treats a failed handshake as retryable and redials, while the
+    /// v3 responder demotes its per-peer version after the failure — so the
+    /// second attempt meets a v2 prologue. Modelled with the responder walking
+    /// its versions across two accepted connections.
+    #[tokio::test]
+    async fn v2_node_completes_noise_handshake_with_v3_node() {
+        let (ipriv, _) = generate_static_keypair();
+        let (rpriv, _) = generate_static_keypair();
+        let magic = dom_core::NETWORK_MAGIC_REGTEST;
+        let chain_id = [0x42u8; 32];
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // A v3 node accepting: leads with v3, and after the expected failure
+        // answers the reconnect with v2 (ProloguePreferences::demote_after_failure
+        // is what drives this walk in dom-node).
+        let responder = tokio::spawn(async move {
+            let mut completed = None;
+            for version in SUPPORTED_PROLOGUE_VERSIONS {
+                let (mut s, _) = listener.accept().await.unwrap();
+                match perform_handshake_responder_versioned(
+                    &mut s, &rpriv, *version, magic, &chain_id,
+                )
+                .await
+                {
+                    Ok(t) => {
+                        assert_eq!(*version, 2, "settled version must be the initiator's");
+                        completed = Some(t);
+                        break;
+                    }
+                    Err(_) => continue,
+                }
+            }
+            completed.expect("v3 responder never completed with the v2 initiator")
+        });
+
+        // A v2 node dialing: always the v2 prologue; redials once after the
+        // failure, as its dial loop does for any retryable failure.
+        let mut transport = None;
+        for _ in 0..2 {
+            let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+            if let Ok(t) =
+                perform_handshake_initiator_versioned(&mut s, &ipriv, 2, magic, &chain_id).await
+            {
+                transport = Some(t);
+                break;
+            }
+        }
+        assert!(
+            transport.is_some(),
+            "v2 initiator never reached the v3 node"
+        );
+        responder.await.unwrap();
+    }
+
+    /// §7: `v3_node_accepts_v2_handshake_and_vice_versa` — the degenerate
+    /// same-version cases must keep working on both prologue values.
+    #[tokio::test]
+    async fn same_version_handshakes_complete_on_both_prologues() {
+        for version in SUPPORTED_PROLOGUE_VERSIONS {
+            let version = *version;
+            let (ipriv, _) = generate_static_keypair();
+            let (rpriv, _) = generate_static_keypair();
+            let magic = dom_core::NETWORK_MAGIC_REGTEST;
+            let chain_id = [0x42u8; 32];
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let responder = tokio::spawn(async move {
+                let (mut s, _) = listener.accept().await.unwrap();
+                perform_handshake_responder_versioned(&mut s, &rpriv, version, magic, &chain_id)
+                    .await
+                    .unwrap()
+            });
+            let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+            perform_handshake_initiator_versioned(&mut s, &ipriv, version, magic, &chain_id)
+                .await
+                .unwrap_or_else(|e| panic!("v{version} <-> v{version} failed: {e}"));
+            responder.await.unwrap();
+        }
     }
 
     #[test]

@@ -779,6 +779,64 @@ mod tests {
             );
         }
     }
+
+    // §7, A1 — wire compatibility in both directions.
+
+    /// The exact bytes a deployed v2 node emits: everything up to and
+    /// including local_timestamp, no port.
+    fn hello_v2_bytes() -> Vec<u8> {
+        let mut bytes = hello_payload_for_tests().to_bytes().unwrap();
+        bytes.truncate(bytes.len() - ADVERTISED_PORT_LEN);
+        bytes
+    }
+
+    #[test]
+    fn hello_v2_peer_reads_as_unreachable() {
+        let p = HelloPayload::from_bytes(&hello_v2_bytes()).unwrap();
+        assert_eq!(
+            p.advertised_port, 0,
+            "a v2 peer sends no port and must decode as not-reachable, \
+             never as the default port"
+        );
+        assert_eq!(p.local_timestamp, 1_717_171_717, "v2 fields stay intact");
+    }
+
+    #[test]
+    fn hello_v3_roundtrip_preserves_port() {
+        let mut p = hello_payload_for_tests();
+        p.advertised_port = 45_123;
+        assert_eq!(
+            HelloPayload::from_bytes(&p.to_bytes().unwrap())
+                .unwrap()
+                .advertised_port,
+            45_123
+        );
+    }
+
+    #[test]
+    fn hello_v3_truncated_is_rejected() {
+        let mut b = hello_payload_for_tests().to_bytes().unwrap();
+        b.pop();
+        assert!(
+            HelloPayload::from_bytes(&b).is_err(),
+            "a v3 payload short one byte must be refused, not silently \
+             decoded as v2 with the port dropped"
+        );
+    }
+
+    #[test]
+    fn privileged_advertised_port_is_rejected() {
+        assert!(!sane_advertised_port(80));
+        assert!(!sane_advertised_port(443));
+        assert!(!sane_advertised_port(1023));
+        assert!(
+            sane_advertised_port(0),
+            "0 means not-reachable, not an error"
+        );
+        assert!(sane_advertised_port(1024));
+        assert!(sane_advertised_port(33369));
+        assert!(sane_advertised_port(u16::MAX));
+    }
 }
 
 #[cfg(test)]

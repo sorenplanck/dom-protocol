@@ -12,6 +12,7 @@ pub mod node_handle;
 pub mod orphan_pool;
 pub mod peer_scoring;
 pub mod pex;
+pub(crate) mod prologue_prefs;
 pub mod relay;
 pub mod replay_snapshot;
 pub mod task_supervisor;
