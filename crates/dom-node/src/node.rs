@@ -1977,6 +1977,46 @@ fn node_user_agent() -> String {
     format!("dom-node/{}", env!("CARGO_PKG_VERSION"))
 }
 
+/// The port this node tells peers to reach it on (spec A1).
+///
+/// `DOM_ADVERTISED_PORT` wins when set, because the externally reachable port
+/// is not knowable from inside the process whenever a NAT, a container
+/// publish, or a manual forward remaps it — the listen socket only knows the
+/// inside of that mapping. Otherwise the listen port is the best available
+/// answer.
+///
+/// Returns 0 — "not reachable" — rather than a guess whenever the value is
+/// unusable: an unparseable address, or a port that
+/// [`sane_advertised_port`](dom_wire::message::sane_advertised_port) refuses.
+/// A wrong port is worse than no port: peers would spend their dial budget on
+/// an address that cannot answer, while 0 simply keeps this node out of the
+/// pool until A3/A4 can establish a real mapping.
+fn advertised_port(config: &NodeConfig) -> u16 {
+    let port = match std::env::var("DOM_ADVERTISED_PORT") {
+        Ok(raw) => match raw.trim().parse::<u16>() {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::warn!(
+                    value = %raw,
+                    "DOM_ADVERTISED_PORT is not a valid port; advertising unreachable"
+                );
+                return 0;
+            }
+        },
+        Err(_) => config
+            .p2p_listen_addr
+            .rsplit_once(':')
+            .and_then(|(_, p)| p.parse::<u16>().ok())
+            .unwrap_or(0),
+    };
+    if dom_wire::message::sane_advertised_port(port) {
+        port
+    } else {
+        tracing::warn!(port, "refusing to advertise a privileged port");
+        0
+    }
+}
+
 async fn hello_exchange_inner(
     stream: &mut tokio::net::TcpStream,
     codec: &mut dom_wire::codec::NoiseCodec,
@@ -2003,6 +2043,7 @@ async fn hello_exchange_inner(
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
+        advertised_port: advertised_port(config),
     };
 
     let msg = WireMessage {
@@ -2021,10 +2062,16 @@ async fn hello_exchange_inner(
     }
     let peer_hello = HelloPayload::from_bytes(&peer_msg.payload)?;
 
-    if peer_hello.version != dom_core::WIRE_PROTOCOL_VERSION {
+    // R-A1.3: this must never be an equality test. A peer one version behind
+    // still speaks a wire format this build can read — the Noise prologue is
+    // what actually gates compatibility, and it already succeeded by the time
+    // this Hello arrived. Rejecting on inequality here would undo the
+    // version-tolerant prologue and partition the network on the next bump,
+    // which is precisely the failure Strategy B exists to prevent.
+    if !dom_wire::handshake::SUPPORTED_PROLOGUE_VERSIONS.contains(&peer_hello.version) {
         return Err(DomError::Invalid(format!(
-            "protocol version mismatch: ours={} theirs={}",
-            dom_core::WIRE_PROTOCOL_VERSION,
+            "unsupported protocol version: ours={:?} theirs={}",
+            dom_wire::handshake::SUPPORTED_PROLOGUE_VERSIONS,
             peer_hello.version
         )));
     }

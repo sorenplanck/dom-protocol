@@ -156,7 +156,33 @@ pub struct HelloPayload {
     /// Local Unix timestamp at handshake time (added in PROTOCOL_VERSION 2).
     /// Used for peer time discipline evaluation.
     pub local_timestamp: u64,
+    /// External port where this node accepts inbound connections.
+    /// 0 = not reachable (behind NAT with no mapping).
+    /// Added in PROTOCOL_VERSION 3.
+    ///
+    /// Never trust this value as received: run it through
+    /// [`sane_advertised_port`] before it can reach the peer pool.
+    pub advertised_port: u16,
 }
+
+/// Whether a peer-supplied advertised port may be used at all.
+///
+/// Privileged ports are refused: a hostile peer could otherwise announce the
+/// port of some third-party service and induce the network to connect to it
+/// (R-A1.2). Zero stays legal and means "not reachable" — that is how a node
+/// behind NAT says so, and it is not an error.
+///
+/// This is only half the mitigation; the other half is A4, which dials back
+/// solely the source IP of the connection and never an address taken from a
+/// payload.
+pub fn sane_advertised_port(p: u16) -> bool {
+    p == 0 || p >= 1024
+}
+
+/// Wire width of `local_timestamp` (PROTOCOL_VERSION 2).
+const TIMESTAMP_LEN: usize = 8;
+/// Wire width of `advertised_port` (PROTOCOL_VERSION 3).
+const ADVERTISED_PORT_LEN: usize = 2;
 
 impl HelloPayload {
     /// Serialize.
@@ -165,7 +191,7 @@ impl HelloPayload {
         if ua.len() > dom_core::MAX_USER_AGENT_BYTES {
             return Err(DomError::Invalid("user agent too long".into()));
         }
-        let mut out = Vec::with_capacity(4 + 4 + 32 + 8 + 32 + 2 + ua.len() + 8);
+        let mut out = Vec::with_capacity(4 + 4 + 32 + 8 + 32 + 2 + ua.len() + 8 + 2);
         out.extend_from_slice(&self.version.to_le_bytes());
         out.extend_from_slice(&self.network_magic.to_le_bytes());
         out.extend_from_slice(&self.chain_id);
@@ -175,6 +201,9 @@ impl HelloPayload {
         out.extend_from_slice(ua);
         // local_timestamp: PROTOCOL_VERSION 2 (Doc 4.5b — time discipline)
         out.extend_from_slice(&self.local_timestamp.to_le_bytes());
+        // advertised_port: PROTOCOL_VERSION 3 (spec A1). Appended last so a v2
+        // decoder, which stops after local_timestamp, is unaffected.
+        out.extend_from_slice(&self.advertised_port.to_le_bytes());
         Ok(out)
     }
 
@@ -198,17 +227,31 @@ impl HelloPayload {
         let user_agent = String::from_utf8_lossy(&data[82..82 + ua_len]).into_owned();
         // local_timestamp: 8 bytes after user_agent (added in PROTOCOL_VERSION 2)
         let ts_offset = 82 + ua_len;
-        if data.len() != ts_offset && data.len() != ts_offset + 8 {
+        let port_offset = ts_offset + TIMESTAMP_LEN;
+        // Exactly one of the three known shapes. Matching on exact lengths is
+        // what rejects a truncated v3 payload: a v3 message missing a byte
+        // lands between port_offset and port_offset + 2 and is refused rather
+        // than silently decoded as v2 with a lost field.
+        let v3_len = port_offset + ADVERTISED_PORT_LEN;
+        if data.len() != ts_offset && data.len() != port_offset && data.len() != v3_len {
             return Err(DomError::Malformed(format!(
-                "hello length mismatch: expected {ts_offset} or {}, got {}",
-                ts_offset + 8,
+                "hello length mismatch: expected {ts_offset}, {port_offset} or {}, got {}",
+                v3_len,
                 data.len()
             )));
         }
-        let local_timestamp = if data.len() >= ts_offset + 8 {
-            u64::from_le_bytes(data[ts_offset..ts_offset + 8].try_into().unwrap())
+        let local_timestamp = if data.len() >= port_offset {
+            u64::from_le_bytes(data[ts_offset..port_offset].try_into().unwrap())
         } else {
             0 // backward compat: peers on PROTOCOL_VERSION 1 omit this field
+        };
+        // A v2 peer sends no port. Zero is exactly what it means for it: not
+        // known to be reachable, so it never enters the peer pool through a
+        // guessed default (spec A2).
+        let advertised_port = if data.len() >= v3_len {
+            u16::from_le_bytes(data[port_offset..v3_len].try_into().unwrap())
+        } else {
+            0
         };
         Ok(Self {
             version,
@@ -218,6 +261,7 @@ impl HelloPayload {
             best_hash,
             user_agent,
             local_timestamp,
+            advertised_port,
         })
     }
 }
@@ -668,6 +712,7 @@ mod tests {
             best_hash: [0xAAu8; 32],
             user_agent: "dom-node/0.1.0".into(),
             local_timestamp: 0,
+            advertised_port: 0,
         };
         let bytes = hello.to_bytes().unwrap();
         let hello2 = HelloPayload::from_bytes(&bytes).unwrap();
@@ -685,6 +730,7 @@ mod tests {
             best_hash: [0xAAu8; 32],
             user_agent: "dom-node/0.1.0".into(),
             local_timestamp: 1_717_171_717,
+            advertised_port: 0,
         }
     }
 
@@ -700,7 +746,10 @@ mod tests {
     fn hello_v1_exact_payload_accepted() {
         let hello = hello_payload_for_tests();
         let mut bytes = hello.to_bytes().unwrap();
-        let ts_offset = bytes.len() - 8;
+        // The payload now ends with local_timestamp (8) + advertised_port (2);
+        // named so the next appended field breaks compilation here rather than
+        // silently pointing this offset into the middle of a value.
+        let ts_offset = bytes.len() - (TIMESTAMP_LEN + ADVERTISED_PORT_LEN);
         bytes.truncate(ts_offset);
 
         let parsed = HelloPayload::from_bytes(&bytes).unwrap();
@@ -720,7 +769,7 @@ mod tests {
     fn hello_truncated_timestamp_rejected() {
         let hello = hello_payload_for_tests();
         let bytes = hello.to_bytes().unwrap();
-        let ts_offset = bytes.len() - 8;
+        let ts_offset = bytes.len() - (TIMESTAMP_LEN + ADVERTISED_PORT_LEN);
 
         for extra_ts_bytes in 1..8 {
             let truncated = &bytes[..ts_offset + extra_ts_bytes];

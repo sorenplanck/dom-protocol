@@ -66,13 +66,41 @@ pub fn write_timeout_secs() -> u64 {
         .unwrap_or(WRITE_TIMEOUT_SECS)
 }
 
+/// Prologue versions this build can speak, most preferred first.
+///
+/// A Noise prologue is NOT negotiated: it is mixed into the handshake hash, so
+/// two peers that derive different bytes fail AEAD verification and never
+/// complete. Raising `WIRE_PROTOCOL_VERSION` alone would therefore partition
+/// the network instantly rather than degrade gracefully — every v3 node would
+/// be unable to reach every v2 node.
+///
+/// Strategy B (spec A1): the initiator tries each version in order and
+/// reconnects on failure, and the responder accepts any of them. The cost is
+/// one extra connection per cross-version pair, once; peer connections are
+/// long-lived, so it is cheap. The benefit is that a canary rollout becomes
+/// possible at all.
+///
+/// Ordering is significant: the newest version must come first so that two
+/// upgraded nodes settle on it immediately and never pay the retry.
+pub const SUPPORTED_PROLOGUE_VERSIONS: &[u32] = &[3, 2];
+
 /// Build the Noise prologue that binds chain_id to the transport.
 ///
 /// RFC-0009: prologue = `DOM` || `u32_le(WIRE_PROTOCOL_VERSION)` || `u32_le(NETWORK_MAGIC)` || chain ID (32 bytes).
 pub fn build_prologue(network_magic: u32, chain_id: &[u8; 32]) -> Vec<u8> {
+    build_prologue_versioned(WIRE_PROTOCOL_VERSION, network_magic, chain_id)
+}
+
+/// Build the Noise prologue for an explicit protocol version.
+///
+/// Same layout as [`build_prologue`], with the version supplied by the caller
+/// instead of taken from the compile-time constant. This is what makes a
+/// version-tolerant handshake possible: the wire bytes for a given version stay
+/// fixed forever, independent of which version this build prefers.
+pub fn build_prologue_versioned(version: u32, network_magic: u32, chain_id: &[u8; 32]) -> Vec<u8> {
     let mut prologue = Vec::with_capacity(3 + 4 + 4 + 32);
     prologue.extend_from_slice(b"DOM");
-    prologue.extend_from_slice(&WIRE_PROTOCOL_VERSION.to_le_bytes());
+    prologue.extend_from_slice(&version.to_le_bytes());
     prologue.extend_from_slice(&network_magic.to_le_bytes());
     prologue.extend_from_slice(chain_id);
     prologue
@@ -84,7 +112,22 @@ pub fn build_initiator(
     network_magic: u32,
     chain_id: &[u8; 32],
 ) -> Result<HandshakeState, DomError> {
-    let prologue = build_prologue(network_magic, chain_id);
+    build_initiator_versioned(
+        static_privkey,
+        WIRE_PROTOCOL_VERSION,
+        network_magic,
+        chain_id,
+    )
+}
+
+/// Build a Noise_XX initiator pinned to an explicit prologue version.
+pub fn build_initiator_versioned(
+    static_privkey: &[u8; 32],
+    version: u32,
+    network_magic: u32,
+    chain_id: &[u8; 32],
+) -> Result<HandshakeState, DomError> {
+    let prologue = build_prologue_versioned(version, network_magic, chain_id);
     Builder::new(NOISE_PATTERN.parse().unwrap())
         .local_private_key(static_privkey)
         .prologue(&prologue)
@@ -98,7 +141,22 @@ pub fn build_responder(
     network_magic: u32,
     chain_id: &[u8; 32],
 ) -> Result<HandshakeState, DomError> {
-    let prologue = build_prologue(network_magic, chain_id);
+    build_responder_versioned(
+        static_privkey,
+        WIRE_PROTOCOL_VERSION,
+        network_magic,
+        chain_id,
+    )
+}
+
+/// Build a Noise_XX responder pinned to an explicit prologue version.
+pub fn build_responder_versioned(
+    static_privkey: &[u8; 32],
+    version: u32,
+    network_magic: u32,
+    chain_id: &[u8; 32],
+) -> Result<HandshakeState, DomError> {
+    let prologue = build_prologue_versioned(version, network_magic, chain_id);
     Builder::new(NOISE_PATTERN.parse().unwrap())
         .local_private_key(static_privkey)
         .prologue(&prologue)
@@ -143,10 +201,34 @@ pub async fn perform_handshake_initiator(
     network_magic: u32,
     chain_id: &[u8; 32],
 ) -> Result<TransportState, DomError> {
+    perform_handshake_initiator_versioned(
+        stream,
+        static_privkey,
+        WIRE_PROTOCOL_VERSION,
+        network_magic,
+        chain_id,
+    )
+    .await
+}
+
+/// Perform the initiator handshake pinned to one prologue version.
+///
+/// A failed prologue cannot be retried on the same TCP connection: the Noise
+/// state is poisoned and the peer has already seen bytes it could not
+/// authenticate. The caller therefore drives the fallback by reconnecting —
+/// see the dial loop in `dom-node`, which walks
+/// [`SUPPORTED_PROLOGUE_VERSIONS`].
+pub async fn perform_handshake_initiator_versioned(
+    stream: &mut tokio::net::TcpStream,
+    static_privkey: &[u8; 32],
+    version: u32,
+    network_magic: u32,
+    chain_id: &[u8; 32],
+) -> Result<TransportState, DomError> {
     let timeout_secs = handshake_timeout_secs();
     tokio::time::timeout(
         tokio::time::Duration::from_secs(timeout_secs),
-        perform_handshake_initiator_inner(stream, static_privkey, network_magic, chain_id),
+        perform_handshake_initiator_inner(stream, static_privkey, version, network_magic, chain_id),
     )
     .await
     .map_err(|_| {
@@ -160,10 +242,11 @@ pub async fn perform_handshake_initiator(
 async fn perform_handshake_initiator_inner(
     stream: &mut tokio::net::TcpStream,
     static_privkey: &[u8; 32],
+    version: u32,
     network_magic: u32,
     chain_id: &[u8; 32],
 ) -> Result<TransportState, DomError> {
-    let mut hs = build_initiator(static_privkey, network_magic, chain_id)?;
+    let mut hs = build_initiator_versioned(static_privkey, version, network_magic, chain_id)?;
     let mut buf = vec![0u8; NOISE_MAX_MSG];
 
     // -> e  (message 1)

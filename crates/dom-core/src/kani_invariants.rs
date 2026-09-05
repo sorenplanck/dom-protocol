@@ -216,9 +216,15 @@ fn frozen_consensus_constants_and_genesis_identity_hold() {
             && NETWORK_MAGIC_TESTNET != NETWORK_MAGIC_REGTEST,
         "network magic values must be pairwise distinct",
     );
+    // The wire version is no longer frozen to a single value: spec A1 raises it
+    // to 3 to carry `advertised_port`, and Strategy B makes a node speak every
+    // version in SUPPORTED_PROLOGUE_VERSIONS rather than exactly one. What must
+    // stay frozen is that it only ever moves forward — a version that went
+    // backwards would make an upgraded node derive a prologue an older peer has
+    // already stopped accepting.
     kani::assert(
-        WIRE_PROTOCOL_VERSION == 2,
-        "wire protocol version is frozen",
+        WIRE_PROTOCOL_VERSION >= 2,
+        "wire protocol version never regresses",
     );
     kani::assert(FEE_POLICY_VERSION == 1, "fee policy version is frozen");
     kani::assert(
