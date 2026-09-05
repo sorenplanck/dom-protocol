@@ -91,6 +91,13 @@ pub struct DomNode {
     /// Strategy B). Shared by the dial loop and the inbound acceptor so a
     /// version learned in one direction serves the other.
     pub(crate) prologue_prefs: Arc<crate::prologue_prefs::ProloguePreferences>,
+    /// Admission control for reachability dial-backs (spec A4, R-A4.1).
+    pub(crate) dialback: Arc<crate::dialback::DialbackLimiter>,
+    /// Live externally-reachable port to announce in Hello (spec A1/A3).
+    /// Starts from configuration and is updated by the port-mapping task; 0
+    /// means "not reachable", which is what an expired or unusable mapping
+    /// reverts to.
+    pub(crate) live_advertised_port: Arc<AtomicU64>,
 }
 
 /// Per-connection I/O context passed into message_loop.
@@ -116,6 +123,8 @@ struct NodeServices {
     ibd_active_sessions: Arc<AtomicU64>,
     pex: Arc<Mutex<crate::pex::PexManager>>,
     prologue_prefs: Arc<crate::prologue_prefs::ProloguePreferences>,
+    dialback: Arc<crate::dialback::DialbackLimiter>,
+    live_advertised_port: Arc<AtomicU64>,
 }
 
 /// Broadcast channels shared across connection tasks.
@@ -622,6 +631,8 @@ impl DomNode {
                 config.network,
             ))),
             prologue_prefs: Arc::new(crate::prologue_prefs::ProloguePreferences::default()),
+            dialback: Arc::new(crate::dialback::DialbackLimiter::default()),
+            live_advertised_port: Arc::new(AtomicU64::new(u64::from(advertised_port(&config)))),
         })
     }
 
@@ -746,6 +757,61 @@ impl DomNode {
         let p2p_addr = self.config.p2p_listen_addr.clone();
         let p2p_listener = bind_p2p_listener(&p2p_addr).await?;
         info!("P2P listening on {p2p_addr}");
+
+        // A3: ask the router to open our port, and keep the announcement
+        // honest over time. Detached and fully bounded — the boot never
+        // waits on a router (§1.4) and every probe runs under the module's
+        // per-method timeout.
+        if crate::portmap::portmap_enabled() {
+            let internal_port = self
+                .config
+                .p2p_listen_addr
+                .rsplit_once(':')
+                .and_then(|(_, p)| p.parse::<u16>().ok())
+                .unwrap_or_else(|| self.config.network.default_port());
+            let baseline_port = advertised_port(&self.config);
+            let live_port = self.live_advertised_port.clone();
+            let metrics = self.metrics.clone();
+            tokio::spawn(async move {
+                use std::sync::atomic::Ordering;
+                loop {
+                    let mapping = crate::portmap::try_map(internal_port).await;
+                    // What to announce, and why the spec's "no mapping →
+                    // announce 0" is refined here: "no gateway answered" is
+                    // not evidence of a NAT. A hub on a public IP has no IGD
+                    // and must keep announcing its listen port — writing 0
+                    // there would blind the whole network's discovery. So:
+                    // a granted, usable mapping announces the GRANTED port
+                    // (R-A3.4); a mapping the internet cannot reach (CGNAT)
+                    // announces 0, because there the NAT is proven and
+                    // unreachable; no gateway keeps the configured baseline,
+                    // and A4's dial-back by other nodes decides the truth.
+                    let (port, code) = match mapping {
+                        crate::portmap::Mapping::Upnp { .. } => (mapping.advertised_port(), 1),
+                        crate::portmap::Mapping::NatPmp { .. } => (mapping.advertised_port(), 2),
+                        crate::portmap::Mapping::CgnatDetected => (0, 3),
+                        crate::portmap::Mapping::None => (baseline_port, 0),
+                    };
+                    live_port.store(u64::from(port), Ordering::Relaxed);
+                    metrics
+                        .advertised_port
+                        .store(u64::from(port), Ordering::Relaxed);
+                    metrics.portmap_status_code.store(code, Ordering::Relaxed);
+                    info!(
+                        method = mapping.status_label(),
+                        advertised_port = port,
+                        "port mapping state"
+                    );
+                    // Renew at half-lease; with nothing to renew, retry at a
+                    // slow cadence — which is also what recovers from a
+                    // network change (R-A3.3), at that cadence.
+                    let wait = mapping
+                        .renew_interval()
+                        .unwrap_or(std::time::Duration::from_secs(900));
+                    tokio::time::sleep(wait).await;
+                }
+            });
+        }
 
         let rpc_pair = if let Some(rpc_addr) = self.config.rpc_listen_addr.clone() {
             use crate::node_handle::NodeHandleImpl;
@@ -1178,6 +1244,8 @@ impl DomNode {
                         ibd_active_sessions: self.ibd_active_sessions.clone(),
                         pex: self.pex.clone(),
                         prologue_prefs: self.prologue_prefs.clone(),
+                        dialback: self.dialback.clone(),
+                        live_advertised_port: self.live_advertised_port.clone(),
                     };
                     let peers = svc.peers.clone();
                     let metrics = svc.metrics.clone();
@@ -1244,6 +1312,8 @@ impl DomNode {
             ibd_active_sessions: self.ibd_active_sessions.clone(),
             pex: self.pex.clone(),
             prologue_prefs: self.prologue_prefs.clone(),
+            dialback: self.dialback.clone(),
+            live_advertised_port: self.live_advertised_port.clone(),
         };
         let mut configured_seed_ip_cache = HashMap::<String, HashSet<std::net::IpAddr>>::new();
         loop {
@@ -1665,7 +1735,14 @@ async fn handle_inbound(
     let mut codec = dom_wire::codec::NoiseCodec::new(transport, config.network.magic());
     match tokio::select! {
         _ = shutdown.wait() => return None,
-        result = hello_exchange(&mut stream, &mut codec, &config, &chain_id, &chain) => result,
+        result = hello_exchange(
+            &mut stream,
+            &mut codec,
+            &config,
+            &chain_id,
+            &chain,
+            svc.live_advertised_port.load(std::sync::atomic::Ordering::Relaxed) as u16,
+        ) => result,
     } {
         Ok(peer_hello) => {
             let peer_id = codec.peer_id();
@@ -1718,6 +1795,26 @@ async fn handle_inbound(
                 let mut pex = trace_lock("pex", &svc.pex).await;
                 pex.learn_inbound_peer(addr.ip(), peer_hello.advertised_port);
                 refresh_pex_metrics(&pex, &svc.metrics);
+            }
+            // A4: the announced port is a hypothesis until it answers from
+            // the outside — routers acknowledge mappings they never honour
+            // (R-A3.2), and peers can lie. Dial back and only a completed
+            // connection confirms the address for gossip. The target IP is
+            // the socket's source address; the payload contributed only the
+            // port, and an unusable one never got past learn_inbound_peer.
+            // The limiter enforces one probe per source IP per window and a
+            // global concurrency cap (R-A4.1); a refused probe just leaves
+            // the address unconfirmed, which is the safe state.
+            if peer_hello.advertised_port != 0
+                && dom_wire::message::sane_advertised_port(peer_hello.advertised_port)
+            {
+                spawn_dialback_probe(
+                    addr.ip(),
+                    peer_hello.advertised_port,
+                    svc.dialback.clone(),
+                    svc.pex.clone(),
+                    svc.metrics.clone(),
+                );
             }
             refresh_peer_metrics(&svc.peers, &svc.metrics, Some(&svc.state_events)).await;
             // An inbound peer with a taller chain is a normal IBD source.
@@ -1914,7 +2011,14 @@ async fn connect_outbound(
     let mut codec = dom_wire::codec::NoiseCodec::new(transport, config.network.magic());
     match tokio::select! {
         _ = shutdown.wait() => return OutboundAttemptOutcome::Shutdown,
-        result = hello_exchange(&mut stream, &mut codec, &config, &chain_id, &chain) => result,
+        result = hello_exchange(
+            &mut stream,
+            &mut codec,
+            &config,
+            &chain_id,
+            &chain,
+            svc.live_advertised_port.load(std::sync::atomic::Ordering::Relaxed) as u16,
+        ) => result,
     } {
         Ok(peer_hello) => {
             let peer_id = codec.peer_id();
@@ -2098,10 +2202,11 @@ async fn hello_exchange(
     config: &NodeConfig,
     chain_id: &[u8; 32],
     chain: &Arc<Mutex<ChainState>>,
+    advertised_port: u16,
 ) -> Result<dom_wire::message::HelloPayload, DomError> {
     tokio::time::timeout(
         tokio::time::Duration::from_secs(HELLO_EXCHANGE_TIMEOUT_SECS),
-        hello_exchange_inner(stream, codec, config, chain_id, chain),
+        hello_exchange_inner(stream, codec, config, chain_id, chain, advertised_port),
     )
     .await
     .map_err(|_| {
@@ -2162,6 +2267,7 @@ async fn hello_exchange_inner(
     config: &NodeConfig,
     chain_id: &[u8; 32],
     chain: &Arc<Mutex<ChainState>>,
+    advertised_port: u16,
 ) -> Result<dom_wire::message::HelloPayload, DomError> {
     use dom_wire::message::{Command, HelloPayload, WireMessage};
 
@@ -2182,7 +2288,7 @@ async fn hello_exchange_inner(
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
-        advertised_port: advertised_port(config),
+        advertised_port,
     };
 
     let msg = WireMessage {
@@ -3118,6 +3224,50 @@ async fn record_duplicate_block_relay(
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     exceeded
+}
+
+/// Fire one reachability probe at `source_ip:advertised_port` (spec A4).
+///
+/// Detached: the inbound session must not wait on a probe, and a slow target
+/// costs at most `DIALBACK_CONNECT_TIMEOUT` of one bounded slot. Success
+/// promotes the address to confirmed — the only state PEX gossips — through
+/// the same `mark_connected` an ordinary completed outbound uses. Failure
+/// changes nothing: unconfirmed is the safe state, and the regular outbound
+/// cooldown machinery governs any retry.
+fn spawn_dialback_probe(
+    source_ip: std::net::IpAddr,
+    advertised_port: u16,
+    limiter: Arc<crate::dialback::DialbackLimiter>,
+    pex: Arc<Mutex<crate::pex::PexManager>>,
+    metrics: Arc<Metrics>,
+) {
+    use std::sync::atomic::Ordering;
+    tokio::spawn(async move {
+        let Some(slot) = limiter.try_begin(source_ip) else {
+            return;
+        };
+        metrics.dialback_attempts.fetch_add(1, Ordering::Relaxed);
+        let target = std::net::SocketAddr::new(source_ip, advertised_port);
+        let connected = tokio::time::timeout(
+            crate::dialback::DIALBACK_CONNECT_TIMEOUT,
+            tokio::net::TcpStream::connect(target),
+        )
+        .await;
+        drop(slot);
+        match connected {
+            Ok(Ok(_stream)) => {
+                metrics.dialback_success.fetch_add(1, Ordering::Relaxed);
+                let mut px = trace_lock("pex", &pex).await;
+                if px.mark_connected(&target.to_string()) {
+                    refresh_pex_metrics(&px, &metrics);
+                    tracing::debug!(%target, "dial-back confirmed advertised endpoint");
+                }
+            }
+            _ => {
+                tracing::debug!(%target, "dial-back could not reach advertised endpoint");
+            }
+        }
+    });
 }
 
 /// Publish the PEX pool composition gauges (spec A5).

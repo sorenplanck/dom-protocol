@@ -55,6 +55,10 @@ pub struct Metrics {
     pub dialback_attempts: Arc<AtomicU64>,
     /// Dial-back reachability probes that connected (A4).
     pub dialback_success: Arc<AtomicU64>,
+    /// Port-mapping outcome (A3): 0 none, 1 upnp, 2 natpmp, 3 cgnat_detected.
+    /// Rendered as the labeled one-hot gauge `dom_portmap_status` — the
+    /// number that decides whether A7 (hole punching) is worth building.
+    pub portmap_status_code: Arc<AtomicU64>,
 }
 
 impl Metrics {
@@ -91,6 +95,7 @@ impl Metrics {
             pex_unreachable_peers: Arc::new(AtomicU64::new(0)),
             dialback_attempts: Arc::new(AtomicU64::new(0)),
             dialback_success: Arc::new(AtomicU64::new(0)),
+            portmap_status_code: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -288,6 +293,25 @@ impl Metrics {
             "dom_clock_drift_seconds {}\n\n",
             self.local_clock_drift_seconds.load(Ordering::Relaxed)
         ));
+
+        // dom_portmap_status (A3/A5): labeled one-hot, rendered by hand
+        // because the shared loop below is for unlabeled series. The four
+        // method labels are a fixed set — never per-peer (R-A5.1).
+        let code = self.portmap_status_code.load(Ordering::Relaxed);
+        out.push_str("# HELP dom_portmap_status Port-mapping outcome by method\n");
+        out.push_str("# TYPE dom_portmap_status gauge\n");
+        for (label, value) in [
+            ("none", 0u64),
+            ("upnp", 1),
+            ("natpmp", 2),
+            ("cgnat_detected", 3),
+        ] {
+            out.push_str(&format!(
+                "dom_portmap_status{{method=\"{label}\"}} {}\n",
+                u64::from(code == value)
+            ));
+        }
+        out.push('\n');
 
         for (name, help, kind, counter) in metrics_list.iter() {
             out.push_str(&format!("# HELP {} {}\n", name, help));

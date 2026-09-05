@@ -377,7 +377,7 @@ fn is_public_ipv4(ip: Ipv4Addr) -> bool {
         && a < 240 // reserved/future-use, including limited broadcast
 }
 
-fn is_public_ipv6(ip: Ipv6Addr) -> bool {
+pub(crate) fn is_public_ipv6(ip: Ipv6Addr) -> bool {
     if let Some(mapped) = ip.to_ipv4_mapped() {
         return is_public_ipv4(mapped);
     }

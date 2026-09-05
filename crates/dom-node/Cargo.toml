@@ -12,6 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 socket2.workspace     = true
+igd-next.workspace    = true
+natpmp.workspace      = true
 thiserror.workspace = true
 dom-core.workspace      = true
 dom-consensus.workspace = true
