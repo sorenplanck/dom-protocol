@@ -128,7 +128,7 @@ compile-time constant, not a configuration value:
 
 ```text
 crates/dom-core/src/constants.rs
-  WIRE_PROTOCOL_VERSION        = 2      // P2P handshake; independent of consensus
+  WIRE_PROTOCOL_VERSION        = 3      // P2P handshake; independent of consensus
   BLOCK_VERSION_LEGACY         = 2
   BLOCK_VERSION_V3             = 3
   MAINNET_V3_ACTIVATION_HEIGHT = 12_500

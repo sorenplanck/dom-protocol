@@ -94,7 +94,7 @@ fn rows() -> Vec<AuditRow> {
         AuditRow {
             name: "PROTOCOL_VERSION",
             runtime: PROTOCOL_VERSION as u128,
-            documented_form: "PROTOCOL_VERSION = 2",
+            documented_form: "PROTOCOL_VERSION = 3",
         },
         AuditRow {
             name: "ASERT_HALF_LIFE_BLOCKS",
@@ -160,7 +160,7 @@ fn audit_runtime_constants_match_published_literals() {
     assert_eq!(NETWORK_MAGIC_MAINNET, 0x444F_4D31, "MAINNET magic drift");
     assert_eq!(NETWORK_MAGIC_TESTNET, 0x444F_4D54, "TESTNET magic drift");
     assert_eq!(P2P_PORT_MAINNET, 33_369, "P2P_PORT_MAINNET drift");
-    assert_eq!(PROTOCOL_VERSION, 2, "PROTOCOL_VERSION drift");
+    assert_eq!(PROTOCOL_VERSION, 3, "PROTOCOL_VERSION drift");
     assert_eq!(ASERT_HALF_LIFE_BLOCKS, 288, "ASERT_HALF_LIFE_BLOCKS drift");
     assert_eq!(ASERT_HALF_LIFE, 34_560, "ASERT_HALF_LIFE drift");
     assert_eq!(ASERT_RADIX_BITS, 16, "ASERT_RADIX_BITS drift");
