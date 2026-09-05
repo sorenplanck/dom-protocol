@@ -84,6 +84,26 @@ pub fn write_timeout_secs() -> u64 {
 /// upgraded nodes settle on it immediately and never pay the retry.
 pub const SUPPORTED_PROLOGUE_VERSIONS: &[u32] = &[3, 2];
 
+/// Whether a handshake failure is evidence of a prologue version mismatch.
+///
+/// Only an AEAD failure on one of the MAC-carrying messages (msg2 for the
+/// initiator, msg3 for the responder) says anything about the prologue: it
+/// means both sides ran real Noise and their transcripts diverged. Everything
+/// else — early EOF, timeouts, connection resets — is a peer that went away
+/// or never spoke Noise at all, and MUST NOT demote version memory: a
+/// readiness probe, a port scanner, or a monitoring health check that
+/// connects and closes would otherwise walk every real peer at that IP down
+/// to the oldest version (the exact failure a poisoned-memory test caught).
+pub fn is_prologue_mismatch(err: &DomError) -> bool {
+    match err {
+        DomError::Invalid(msg) => {
+            (msg.contains("noise read msg2") || msg.contains("noise read msg3"))
+                && msg.contains("decrypt")
+        }
+        _ => false,
+    }
+}
+
 /// Build the Noise prologue that binds chain_id to the transport.
 ///
 /// RFC-0009: prologue = `DOM` || `u32_le(WIRE_PROTOCOL_VERSION)` || `u32_le(NETWORK_MAGIC)` || chain ID (32 bytes).
@@ -418,6 +438,29 @@ mod tests {
 
     // §7, A1 — the version-tolerant prologue. WITHOUT THESE, THE NETWORK
     // PARTITIONS on the next version bump.
+
+    /// The poisoned-memory regression: a visitor that connects and closes
+    /// (readiness probe, scanner, health check) produces IO-class errors,
+    /// never AEAD ones — and must not count as version evidence.
+    #[test]
+    fn only_aead_transcript_failures_count_as_prologue_mismatch() {
+        assert!(is_prologue_mismatch(&DomError::Invalid(
+            "noise read msg2: decrypt error".into()
+        )));
+        assert!(is_prologue_mismatch(&DomError::Invalid(
+            "noise read msg3: decrypt error".into()
+        )));
+        assert!(!is_prologue_mismatch(&DomError::Internal(
+            "read frame len: early eof".into()
+        )));
+        assert!(!is_prologue_mismatch(&DomError::Invalid(
+            "noise read msg1: invalid input".into()
+        )));
+        assert!(!is_prologue_mismatch(&DomError::peer_misbehavior(
+            PeerMisbehavior::HandshakeTimeout,
+            "handshake timeout after 10s",
+        )));
+    }
 
     #[test]
     fn prologue_differs_between_versions() {

@@ -61,14 +61,28 @@ impl ProloguePreferences {
         let idx = SUPPORTED_PROLOGUE_VERSIONS
             .iter()
             .position(|v| *v == failed)?;
-        let next = *SUPPORTED_PROLOGUE_VERSIONS.get(idx + 1)?;
-        if let Ok(mut map) = self.by_ip.lock() {
-            if map.len() >= MAX_TRACKED_PEERS && !map.contains_key(&ip) {
-                map.clear();
+        match SUPPORTED_PROLOGUE_VERSIONS.get(idx + 1) {
+            Some(next) => {
+                if let Ok(mut map) = self.by_ip.lock() {
+                    if map.len() >= MAX_TRACKED_PEERS && !map.contains_key(&ip) {
+                        map.clear();
+                    }
+                    map.insert(ip, *next);
+                }
+                Some(*next)
             }
-            map.insert(ip, next);
+            None => {
+                // Exhausted: every supported version produced a genuine AEAD
+                // mismatch. Reset instead of pinning the oldest version — the
+                // stored value would otherwise outlive whatever hostile or
+                // broken speaker caused this and tax the next honest peer at
+                // this IP forever.
+                if let Ok(mut map) = self.by_ip.lock() {
+                    map.remove(&ip);
+                }
+                None
+            }
         }
-        Some(next)
     }
 
     /// A handshake completed with `version`; lead with it for this peer from

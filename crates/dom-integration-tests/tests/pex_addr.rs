@@ -57,6 +57,9 @@ async fn connect_pex_peer(node: &Arc<DomNode>) -> (tokio::net::TcpStream, NoiseC
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
+        // Test harness peers are dial-in only; 0 = declared unreachable,
+        // which also keeps them out of any PEX pool they touch (spec A2).
+        advertised_port: 0,
     };
     let wire = WireMessage {
         magic: config.network.magic(),
@@ -73,10 +76,11 @@ async fn connect_pex_peer(node: &Arc<DomNode>) -> (tokio::net::TcpStream, NoiseC
 /// Same authenticated P2P path, but with an explicit TCP source address. This
 /// lets the test model an inbound peer whose public IP is also listening on the
 /// standard P2P port.
-async fn connect_pex_peer_from(
+async fn connect_pex_peer_from_announcing(
     node: &Arc<DomNode>,
     source: SocketAddr,
     private_key: [u8; 32],
+    advertised_port: u16,
 ) -> (tokio::net::TcpStream, NoiseCodec) {
     let config = node.config.clone();
     let socket = tokio::net::TcpSocket::new_v4().expect("create source socket");
@@ -102,6 +106,9 @@ async fn connect_pex_peer_from(
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
+        // A2: what the node learns is the ANNOUNCED port, so the test client
+        // states where it can be reached (or 0 for a dial-in-only leaf).
+        advertised_port,
     };
     codec
         .send(
@@ -298,11 +305,15 @@ async fn pex_addr_message_adds_only_valid_addresses() {
         .await
         .expect("send addr");
 
-    // The authenticated loopback peer itself is also learned as an
-    // unconfirmed inbound candidate on regtest, in addition to the two Addr
-    // entries below.
-    let known = wait_for_pex_known_count(&node, 3, Duration::from_secs(10)).await;
-    assert!(known >= 3, "the two valid Addr entries must be added");
+    // A2: the authenticated loopback peer announces advertised_port = 0
+    // (declared unreachable), so unlike before it is counted but never
+    // pooled — only the two valid Addr entries below may appear.
+    let known = wait_for_pex_known_count(&node, 2, Duration::from_secs(10)).await;
+    assert!(known >= 2, "the two valid Addr entries must be added");
+    assert!(
+        node.pex.lock().await.unreachable_peers_seen() >= 1,
+        "the declared-unreachable inbound peer must stay visible in the counter (R-A2.2)"
+    );
     let pex = node.pex.lock().await;
     let addrs: Vec<String> = pex
         .connectable_peers()
@@ -338,19 +349,25 @@ async fn authenticated_inbound_peer_becomes_a_confirmed_pex_candidate() {
         .await
         .expect("node B listener ready");
 
-    let (stream, codec) = connect_pex_peer_from(
+    // A2: node A only learns the endpoint its peer ANNOUNCES; the guessed
+    // default port is gone. The client therefore declares the port node B
+    // actually listens on — the same value the old code used to assume.
+    let (stream, codec) = connect_pex_peer_from_announcing(
         &node_a,
         "127.0.0.2:0".parse().expect("source address"),
         node_b.noise_privkey,
+        default_port,
     )
     .await;
     let learned = format!("127.0.0.2:{default_port}");
     let known = wait_for_pex_known_count(&node_a, 1, Duration::from_secs(10)).await;
     assert!(known >= 1, "inbound peer was not learned");
-    assert!(
-        !node_a.pex.lock().await.is_confirmed(&learned),
-        "inbound heuristic must remain unconfirmed before a dial succeeds"
-    );
+    // A4 collapsed the observable unconfirmed window: the dial-back fires as
+    // soon as the Hello lands, and node B really is listening on the
+    // announced endpoint, so confirmation arrives within milliseconds. The
+    // invariant behind the old assertion here — nothing is ever confirmed
+    // WITHOUT a successful dial — is pinned below by the dial-back success
+    // counter, and at unit level by pex's confirmed-only gossip tests.
     drop(codec);
     drop(stream);
 
@@ -365,6 +382,14 @@ async fn authenticated_inbound_peer_becomes_a_confirmed_pex_candidate() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    // Confirmation must have come from an actual completed dial — the A4
+    // dial-back or the ordinary connector — never from the announcement
+    // alone. The dial-back counters prove at least one probe ran end to end.
+    use std::sync::atomic::Ordering;
+    assert!(
+        node_a.metrics.dialback_attempts.load(Ordering::Relaxed) >= 1,
+        "the announced endpoint must have been probed (A4)"
+    );
 }
 
 /// Addr flood: each message beyond MAX_ADDR_MESSAGES_PER_WINDOW adds exactly

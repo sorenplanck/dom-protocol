@@ -43,6 +43,9 @@ async fn connect_adversarial_peer(node: &Arc<DomNode>) -> (tokio::net::TcpStream
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
+        // Test harness peers are dial-in only; 0 = declared unreachable,
+        // which also keeps them out of any PEX pool they touch (spec A2).
+        advertised_port: 0,
     };
     let wire = WireMessage {
         magic: config.network.magic(),

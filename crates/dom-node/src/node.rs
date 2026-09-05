@@ -1712,20 +1712,32 @@ async fn handle_inbound(
             t
         }
         Err(e) => {
-            if let Some(next) = svc
-                .prologue_prefs
-                .demote_after_failure(addr.ip(), prologue_version)
-            {
-                // Expected during the version transition, so it must not feed
-                // the ban machinery: penalising it would cool down exactly the
-                // peer whose reconnection completes the negotiation.
-                info!(
-                    "Handshake with {addr} failed on prologue v{prologue_version}; \
-                     will offer v{next} when this peer reconnects: {e}"
-                );
+            // Only an AEAD transcript failure is evidence about the prologue.
+            // Anything else — a readiness probe closing, a scanner, a timeout
+            // — says nothing about versions, and demoting on it would let any
+            // connect-and-close visitor walk this IP's real peers down to the
+            // oldest version (a poisoned readiness probe surfaced exactly
+            // that).
+            if dom_wire::handshake::is_prologue_mismatch(&e) {
+                if let Some(next) = svc
+                    .prologue_prefs
+                    .demote_after_failure(addr.ip(), prologue_version)
+                {
+                    // Expected during the version transition, so it must not
+                    // feed the ban machinery: penalising it would cool down
+                    // exactly the peer whose reconnection completes the
+                    // negotiation.
+                    info!(
+                        "Handshake with {addr} failed on prologue v{prologue_version}; \
+                         will offer v{next} when this peer reconnects: {e}"
+                    );
+                } else {
+                    let _ = record_pending_peer_violation(&chain, &svc.peers, addr, &e).await;
+                    warn!("Handshake failed with {addr} on every supported version: {e}");
+                }
             } else {
                 let _ = record_pending_peer_violation(&chain, &svc.peers, addr, &e).await;
-                warn!("Handshake failed with {addr} on every supported version: {e}");
+                warn!("Handshake failed with {addr}: {e}");
             }
             return None;
         }
@@ -1977,10 +1989,18 @@ async fn connect_outbound(
                 break (stream, t);
             }
             Err(e) => {
-                let fallback = peer_ip.and_then(|ip| {
-                    svc.prologue_prefs
-                        .demote_after_failure(ip, prologue_version)
-                });
+                // Same evidence rule as the responder: only an AEAD failure
+                // is about the prologue. A dead seed timing out must not walk
+                // the dialer through every version against a host that never
+                // answered Noise in the first place.
+                let fallback = if dom_wire::handshake::is_prologue_mismatch(&e) {
+                    peer_ip.and_then(|ip| {
+                        svc.prologue_prefs
+                            .demote_after_failure(ip, prologue_version)
+                    })
+                } else {
+                    None
+                };
                 match fallback {
                     Some(next) => {
                         // Expected once per cross-version pair during the
