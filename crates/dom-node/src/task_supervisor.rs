@@ -58,12 +58,22 @@ pub enum TaskKind {
     DandelionStem,
     /// Dynamic per-peer relay worker, keyed by an assigned id.
     Relay(u64),
+    /// Router port-mapping and advertised-port announcement refresher.
+    PortMap,
+    /// Short-lived dial-back reachability probe, keyed by an assigned id.
+    Dialback(u64),
 }
 
 impl TaskKind {
     /// True for the dynamic relay-worker class.
     pub fn is_relay(&self) -> bool {
         matches!(self, TaskKind::Relay(_))
+    }
+
+    /// True for dynamic short-lived task classes whose registry entry is
+    /// removed automatically when the task finishes.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, TaskKind::Relay(_) | TaskKind::Dialback(_))
     }
 }
 
@@ -125,6 +135,7 @@ struct Inner {
     handles: BTreeMap<TaskId, (TaskKind, JoinHandle<()>)>,
     next_id: u64,
     next_relay_id: u64,
+    next_dialback_id: u64,
     failure: Option<TaskFailure>,
     shutting_down: bool,
 }
@@ -257,7 +268,7 @@ impl NodeTaskSupervisor {
                     sup.record_failure(kind, panic_reason(panic)).await;
                 }
             }
-            if kind.is_relay() {
+            if kind.is_transient() {
                 sup.finish_task(id).await;
             }
         });
@@ -315,6 +326,22 @@ impl NodeTaskSupervisor {
             r
         };
         self.spawn(TaskKind::Relay(relay_id), fut).await
+    }
+
+    /// Spawn a short-lived dial-back probe, assigning it a fresh
+    /// [`TaskKind::Dialback`] id. The registry entry is removed automatically
+    /// when the probe finishes.
+    pub async fn spawn_dialback<F>(&self, fut: F) -> TaskId
+    where
+        F: Future<Output = Result<(), String>> + Send + 'static,
+    {
+        let dialback_id = {
+            let mut g = self.inner.lock().await;
+            let d = g.next_dialback_id;
+            g.next_dialback_id += 1;
+            d
+        };
+        self.spawn(TaskKind::Dialback(dialback_id), fut).await
     }
 
     /// Remove a task's registry entry and abort it if still running. Used to
@@ -382,7 +409,11 @@ impl NodeTaskSupervisor {
         match kind {
             TaskKind::Listener | TaskKind::FutureQueue => 1,
             TaskKind::Miner => 2,
-            TaskKind::Connector | TaskKind::DandelionStem | TaskKind::Relay(_) => 3,
+            TaskKind::Connector
+            | TaskKind::DandelionStem
+            | TaskKind::Relay(_)
+            | TaskKind::PortMap
+            | TaskKind::Dialback(_) => 3,
             TaskKind::Rpc | TaskKind::Metrics => 5,
         }
     }

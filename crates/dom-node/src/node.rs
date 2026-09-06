@@ -125,6 +125,7 @@ struct NodeServices {
     prologue_prefs: Arc<crate::prologue_prefs::ProloguePreferences>,
     dialback: Arc<crate::dialback::DialbackLimiter>,
     live_advertised_port: Arc<AtomicU64>,
+    task_supervisor: NodeTaskSupervisor,
 }
 
 /// Broadcast channels shared across connection tasks.
@@ -772,45 +773,54 @@ impl DomNode {
             let baseline_port = advertised_port(&self.config);
             let live_port = self.live_advertised_port.clone();
             let metrics = self.metrics.clone();
-            tokio::spawn(async move {
-                use std::sync::atomic::Ordering;
-                loop {
-                    let mapping = crate::portmap::try_map(internal_port).await;
-                    // What to announce, and why the spec's "no mapping →
-                    // announce 0" is refined here: "no gateway answered" is
-                    // not evidence of a NAT. A hub on a public IP has no IGD
-                    // and must keep announcing its listen port — writing 0
-                    // there would blind the whole network's discovery. So:
-                    // a granted, usable mapping announces the GRANTED port
-                    // (R-A3.4); a mapping the internet cannot reach (CGNAT)
-                    // announces 0, because there the NAT is proven and
-                    // unreachable; no gateway keeps the configured baseline,
-                    // and A4's dial-back by other nodes decides the truth.
-                    let (port, code) = match mapping {
-                        crate::portmap::Mapping::Upnp { .. } => (mapping.advertised_port(), 1),
-                        crate::portmap::Mapping::NatPmp { .. } => (mapping.advertised_port(), 2),
-                        crate::portmap::Mapping::CgnatDetected => (0, 3),
-                        crate::portmap::Mapping::None => (baseline_port, 0),
-                    };
-                    live_port.store(u64::from(port), Ordering::Relaxed);
-                    metrics
-                        .advertised_port
-                        .store(u64::from(port), Ordering::Relaxed);
-                    metrics.portmap_status_code.store(code, Ordering::Relaxed);
-                    info!(
-                        method = mapping.status_label(),
-                        advertised_port = port,
-                        "port mapping state"
-                    );
-                    // Renew at half-lease; with nothing to renew, retry at a
-                    // slow cadence — which is also what recovers from a
-                    // network change (R-A3.3), at that cadence.
-                    let wait = mapping
-                        .renew_interval()
-                        .unwrap_or(std::time::Duration::from_secs(900));
-                    tokio::time::sleep(wait).await;
-                }
-            });
+            let portmap_supervisor = self.task_supervisor.clone();
+            let portmap_shutdown = portmap_supervisor.shutdown_token();
+            portmap_supervisor
+                .spawn(TaskKind::PortMap, async move {
+                    use std::sync::atomic::Ordering;
+                    loop {
+                        let mapping = crate::portmap::try_map(internal_port).await;
+                        // What to announce, and why the spec's "no mapping →
+                        // announce 0" is refined here: "no gateway answered" is
+                        // not evidence of a NAT. A hub on a public IP has no IGD
+                        // and must keep announcing its listen port — writing 0
+                        // there would blind the whole network's discovery. So:
+                        // a granted, usable mapping announces the GRANTED port
+                        // (R-A3.4); a mapping the internet cannot reach (CGNAT)
+                        // announces 0, because there the NAT is proven and
+                        // unreachable; no gateway keeps the configured baseline,
+                        // and A4's dial-back by other nodes decides the truth.
+                        let (port, code) = match mapping {
+                            crate::portmap::Mapping::Upnp { .. } => (mapping.advertised_port(), 1),
+                            crate::portmap::Mapping::NatPmp { .. } => {
+                                (mapping.advertised_port(), 2)
+                            }
+                            crate::portmap::Mapping::CgnatDetected => (0, 3),
+                            crate::portmap::Mapping::None => (baseline_port, 0),
+                        };
+                        live_port.store(u64::from(port), Ordering::Relaxed);
+                        metrics
+                            .advertised_port
+                            .store(u64::from(port), Ordering::Relaxed);
+                        metrics.portmap_status_code.store(code, Ordering::Relaxed);
+                        info!(
+                            method = mapping.status_label(),
+                            advertised_port = port,
+                            "port mapping state"
+                        );
+                        // Renew at half-lease; with nothing to renew, retry at a
+                        // slow cadence — which is also what recovers from a
+                        // network change (R-A3.3), at that cadence.
+                        let wait = mapping
+                            .renew_interval()
+                            .unwrap_or(std::time::Duration::from_secs(900));
+                        tokio::select! {
+                            () = portmap_shutdown.wait() => return Ok(()),
+                            () = tokio::time::sleep(wait) => {}
+                        }
+                    }
+                })
+                .await;
         }
 
         let rpc_pair = if let Some(rpc_addr) = self.config.rpc_listen_addr.clone() {
@@ -1246,6 +1256,7 @@ impl DomNode {
                         prologue_prefs: self.prologue_prefs.clone(),
                         dialback: self.dialback.clone(),
                         live_advertised_port: self.live_advertised_port.clone(),
+                        task_supervisor: self.task_supervisor.clone(),
                     };
                     let peers = svc.peers.clone();
                     let metrics = svc.metrics.clone();
@@ -1314,6 +1325,7 @@ impl DomNode {
             prologue_prefs: self.prologue_prefs.clone(),
             dialback: self.dialback.clone(),
             live_advertised_port: self.live_advertised_port.clone(),
+            task_supervisor: self.task_supervisor.clone(),
         };
         let mut configured_seed_ip_cache = HashMap::<String, HashSet<std::net::IpAddr>>::new();
         loop {
@@ -1821,12 +1833,14 @@ async fn handle_inbound(
                 && dom_wire::message::sane_advertised_port(peer_hello.advertised_port)
             {
                 spawn_dialback_probe(
+                    svc.task_supervisor.clone(),
                     addr.ip(),
                     peer_hello.advertised_port,
                     svc.dialback.clone(),
                     svc.pex.clone(),
                     svc.metrics.clone(),
-                );
+                )
+                .await;
             }
             refresh_peer_metrics(&svc.peers, &svc.metrics, Some(&svc.state_events)).await;
             // An inbound peer with a taller chain is a normal IBD source.
@@ -3254,7 +3268,8 @@ async fn record_duplicate_block_relay(
 /// the same `mark_connected` an ordinary completed outbound uses. Failure
 /// changes nothing: unconfirmed is the safe state, and the regular outbound
 /// cooldown machinery governs any retry.
-fn spawn_dialback_probe(
+async fn spawn_dialback_probe(
+    supervisor: NodeTaskSupervisor,
     source_ip: std::net::IpAddr,
     advertised_port: u16,
     limiter: Arc<crate::dialback::DialbackLimiter>,
@@ -3262,32 +3277,35 @@ fn spawn_dialback_probe(
     metrics: Arc<Metrics>,
 ) {
     use std::sync::atomic::Ordering;
-    tokio::spawn(async move {
-        let Some(slot) = limiter.try_begin(source_ip) else {
-            return;
-        };
-        metrics.dialback_attempts.fetch_add(1, Ordering::Relaxed);
-        let target = std::net::SocketAddr::new(source_ip, advertised_port);
-        let connected = tokio::time::timeout(
-            crate::dialback::DIALBACK_CONNECT_TIMEOUT,
-            tokio::net::TcpStream::connect(target),
-        )
-        .await;
-        drop(slot);
-        match connected {
-            Ok(Ok(_stream)) => {
-                metrics.dialback_success.fetch_add(1, Ordering::Relaxed);
-                let mut px = trace_lock("pex", &pex).await;
-                if px.mark_connected(&target.to_string()) {
-                    refresh_pex_metrics(&px, &metrics);
-                    tracing::debug!(%target, "dial-back confirmed advertised endpoint");
+    supervisor
+        .spawn_dialback(async move {
+            let Some(slot) = limiter.try_begin(source_ip) else {
+                return Ok(());
+            };
+            metrics.dialback_attempts.fetch_add(1, Ordering::Relaxed);
+            let target = std::net::SocketAddr::new(source_ip, advertised_port);
+            let connected = tokio::time::timeout(
+                crate::dialback::DIALBACK_CONNECT_TIMEOUT,
+                tokio::net::TcpStream::connect(target),
+            )
+            .await;
+            drop(slot);
+            match connected {
+                Ok(Ok(_stream)) => {
+                    metrics.dialback_success.fetch_add(1, Ordering::Relaxed);
+                    let mut px = trace_lock("pex", &pex).await;
+                    if px.mark_connected(&target.to_string()) {
+                        refresh_pex_metrics(&px, &metrics);
+                        tracing::debug!(%target, "dial-back confirmed advertised endpoint");
+                    }
+                }
+                _ => {
+                    tracing::debug!(%target, "dial-back could not reach advertised endpoint");
                 }
             }
-            _ => {
-                tracing::debug!(%target, "dial-back could not reach advertised endpoint");
-            }
-        }
-    });
+            Ok(())
+        })
+        .await;
 }
 
 /// Publish the PEX pool composition gauges (spec A5).
