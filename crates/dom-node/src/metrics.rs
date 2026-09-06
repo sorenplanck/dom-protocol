@@ -40,6 +40,25 @@ pub struct Metrics {
     /// Total relayed txs already in the mempool, skipped before chain lock /
     /// validation (FABLE5-001 replay short-circuit).
     pub suppressed_duplicate_tx_relays: Arc<AtomicU64>,
+
+    // Peer autodiscovery metrics (spec A5). Deliberately unlabeled per peer:
+    // R-A5.1 — a small network today is a series explosion tomorrow.
+    /// Port this node advertises in its Hello (0 = declared unreachable).
+    pub advertised_port: Arc<AtomicU64>,
+    /// PEX entries confirmed by a successful outbound dial.
+    pub pex_confirmed_peers: Arc<AtomicU64>,
+    /// PEX entries not yet confirmed (dial candidates, never gossiped).
+    pub pex_unconfirmed_peers: Arc<AtomicU64>,
+    /// Inbound peers that announced no usable listening port (R-A2.2).
+    pub pex_unreachable_peers: Arc<AtomicU64>,
+    /// Dial-back reachability probes attempted (A4).
+    pub dialback_attempts: Arc<AtomicU64>,
+    /// Dial-back reachability probes that connected (A4).
+    pub dialback_success: Arc<AtomicU64>,
+    /// Port-mapping outcome (A3): 0 none, 1 upnp, 2 natpmp, 3 cgnat_detected.
+    /// Rendered as the labeled one-hot gauge `dom_portmap_status` — the
+    /// number that decides whether A7 (hole punching) is worth building.
+    pub portmap_status_code: Arc<AtomicU64>,
 }
 
 impl Metrics {
@@ -70,6 +89,13 @@ impl Metrics {
             malformed_block_relays: Arc::new(AtomicU64::new(0)),
             duplicate_block_relay_quota_exceeded: Arc::new(AtomicU64::new(0)),
             suppressed_duplicate_tx_relays: Arc::new(AtomicU64::new(0)),
+            advertised_port: Arc::new(AtomicU64::new(0)),
+            pex_confirmed_peers: Arc::new(AtomicU64::new(0)),
+            pex_unconfirmed_peers: Arc::new(AtomicU64::new(0)),
+            pex_unreachable_peers: Arc::new(AtomicU64::new(0)),
+            dialback_attempts: Arc::new(AtomicU64::new(0)),
+            dialback_success: Arc::new(AtomicU64::new(0)),
+            portmap_status_code: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -105,6 +131,42 @@ impl Metrics {
                 "Outbound peer connections",
                 "gauge",
                 &self.outbound_peers,
+            ),
+            (
+                "dom_advertised_port",
+                "Port this node advertises for inbound connections (0 = unreachable)",
+                "gauge",
+                &self.advertised_port,
+            ),
+            (
+                "dom_pex_confirmed_peers",
+                "PEX entries confirmed by a successful outbound dial",
+                "gauge",
+                &self.pex_confirmed_peers,
+            ),
+            (
+                "dom_pex_unconfirmed_peers",
+                "PEX dial candidates not yet confirmed",
+                "gauge",
+                &self.pex_unconfirmed_peers,
+            ),
+            (
+                "dom_pex_unreachable_peers",
+                "Inbound peers that announced no usable listening port",
+                "gauge",
+                &self.pex_unreachable_peers,
+            ),
+            (
+                "dom_dialback_attempts_total",
+                "Dial-back reachability probes attempted",
+                "counter",
+                &self.dialback_attempts,
+            ),
+            (
+                "dom_dialback_success_total",
+                "Dial-back reachability probes that connected",
+                "counter",
+                &self.dialback_success,
             ),
             (
                 "dom_blocks_mined",
@@ -231,6 +293,25 @@ impl Metrics {
             "dom_clock_drift_seconds {}\n\n",
             self.local_clock_drift_seconds.load(Ordering::Relaxed)
         ));
+
+        // dom_portmap_status (A3/A5): labeled one-hot, rendered by hand
+        // because the shared loop below is for unlabeled series. The four
+        // method labels are a fixed set — never per-peer (R-A5.1).
+        let code = self.portmap_status_code.load(Ordering::Relaxed);
+        out.push_str("# HELP dom_portmap_status Port-mapping outcome by method\n");
+        out.push_str("# TYPE dom_portmap_status gauge\n");
+        for (label, value) in [
+            ("none", 0u64),
+            ("upnp", 1),
+            ("natpmp", 2),
+            ("cgnat_detected", 3),
+        ] {
+            out.push_str(&format!(
+                "dom_portmap_status{{method=\"{label}\"}} {}\n",
+                u64::from(code == value)
+            ));
+        }
+        out.push('\n');
 
         for (name, help, kind, counter) in metrics_list.iter() {
             out.push_str(&format!("# HELP {} {}\n", name, help));

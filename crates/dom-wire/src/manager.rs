@@ -13,7 +13,16 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
-/// Maximum peers from the same /16 subnet (eclipse protection).
+/// Maximum peers from the same subnet bucket (eclipse protection).
+///
+/// The bucket is per family — /16 for IPv4, /48 for IPv6 (spec A8, R-A8.1).
+/// The v6 width matters twice over. Too fine and the limit is free to evade:
+/// a v6 attacker typically controls an entire /64, which is 2^64 "distinct"
+/// addresses, so any grouping at /64 or finer lets one host fill the table
+/// alone. Too coarse and v6 connectivity dies: the previous code bucketed v6
+/// by its first two bytes, which put most of the routable v6 internet
+/// (2001::/16 and friends) into a single two-peer bucket. /48 is the typical
+/// site allocation: one site, one bucket.
 const MAX_PEERS_SAME_SLASH_16: usize = 2;
 /// Pre-registration penalties expire after this interval.
 const PENDING_PENALTY_TTL_SECS: u64 = 15 * 60;
@@ -447,19 +456,19 @@ impl PeerManager {
         if self.inbound_count() + self.pending_inbound_count() >= self.max_inbound {
             return false;
         }
-        // Eclipse protection: max 2 peers per /16
-        let slash16 = to_slash16(new_addr);
+        // Eclipse protection: max 2 peers per /16 (v4) or /48 (v6)
+        let bucket = to_subnet_bucket(new_addr);
         let connected_same_subnet = self
             .peers
             .values()
-            .filter(|p| !p.outbound && to_slash16(p.addr.ip()) == slash16)
+            .filter(|p| !p.outbound && to_subnet_bucket(p.addr.ip()) == bucket)
             .count();
         let pending_same_subnet = self
             .pending_inbound
             .iter()
             .filter(|(_, pending)| !reservation_is_stale(**pending))
             .filter_map(|(addr, _)| addr.parse::<std::net::SocketAddr>().ok())
-            .filter(|addr| to_slash16(addr.ip()) == slash16)
+            .filter(|addr| to_subnet_bucket(addr.ip()) == bucket)
             .count();
         connected_same_subnet + pending_same_subnet < MAX_PEERS_SAME_SLASH_16
     }
@@ -1261,16 +1270,36 @@ fn deterministic_addr_jitter(addr: &str, max_jitter_secs: u64) -> u64 {
     hash % (max_jitter_secs + 1)
 }
 
-/// Extract /16 prefix from an IP for subnet diversity check.
-fn to_slash16(ip: IpAddr) -> [u8; 2] {
+/// The subnet bucket an address counts against for peer diversity.
+///
+/// Family-tagged so a v4 /16 can never collide with a v6 /48 that happens to
+/// share leading bytes. See `MAX_PEERS_SAME_SLASH_16` for how the widths were
+/// chosen.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SubnetBucket {
+    /// First 16 bits of an IPv4 address.
+    V4([u8; 2]),
+    /// First 48 bits of an IPv6 address.
+    V6([u8; 6]),
+}
+
+/// Extract the per-family diversity bucket from an IP (spec A8).
+fn to_subnet_bucket(ip: IpAddr) -> SubnetBucket {
     match ip {
         IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            [octets[0], octets[1]]
+            let o = v4.octets();
+            SubnetBucket::V4([o[0], o[1]])
         }
         IpAddr::V6(v6) => {
-            let octets = v6.octets();
-            [octets[0], octets[1]]
+            // An IPv4-mapped address is a v4 peer arriving through a
+            // dual-stack socket: it must share the bucket of its native v4
+            // form, or the same host would get one bucket per socket family.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                let o = v4.octets();
+                return SubnetBucket::V4([o[0], o[1]]);
+            }
+            let o = v6.octets();
+            SubnetBucket::V6([o[0], o[1], o[2], o[3], o[4], o[5]])
         }
     }
 }
@@ -1405,6 +1434,89 @@ mod tests {
             .unwrap();
         // Different /16 — should be accepted
         assert!(mgr.can_accept_inbound(IpAddr::V4(Ipv4Addr::new(172, 16, 1, 1))));
+    }
+
+    /// §7 (A8): `ipv6_subnet_diversity_is_enforced`. R-A8.1 — a v6 attacker
+    /// typically controls a whole /64, so without a per-/48 cap one host fills
+    /// the peer table alone; this limit must exist BEFORE the v6 listener is
+    /// ever enabled.
+    #[test]
+    fn ipv6_subnet_diversity_is_enforced() {
+        use std::net::Ipv6Addr;
+        let mk = |segments: [u16; 8], port: u16| {
+            let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::from(segments)), port);
+            let mut p = PeerInfo::new(addr, false);
+            p.state = PeerState::Connected;
+            p
+        };
+        let mut mgr = PeerManager::new(125, 8);
+        // Two peers inside the same /64 (and therefore the same /48).
+        mgr.register_peer(mk([0x2001, 0xdb8, 0x1, 0x1, 0, 0, 0, 0x10], 33369))
+            .unwrap();
+        mgr.register_peer(mk([0x2001, 0xdb8, 0x1, 0x1, 0, 0, 0, 0x20], 33370))
+            .unwrap();
+        // A third from the same /64 — a "different" host the attacker gets for
+        // free — must be refused.
+        assert!(
+            !mgr.can_accept_inbound(IpAddr::V6(Ipv6Addr::from([
+                0x2001, 0xdb8, 0x1, 0x1, 0, 0, 0, 0x30
+            ]))),
+            "a /64 holder must not exceed the per-/48 cap"
+        );
+        // Same again from elsewhere in the same /48 (different /64).
+        assert!(
+            !mgr.can_accept_inbound(IpAddr::V6(Ipv6Addr::from([
+                0x2001, 0xdb8, 0x1, 0x2, 0, 0, 0, 0x1
+            ]))),
+            "the bucket is the /48, not the /64"
+        );
+        // A different /48 is a different site: accepted.
+        assert!(mgr.can_accept_inbound(IpAddr::V6(Ipv6Addr::from([
+            0x2001, 0xdb8, 0x2, 0x1, 0, 0, 0, 0x1
+        ]))));
+    }
+
+    /// A v4 peer arriving as an IPv4-mapped v6 address through a dual-stack
+    /// socket must count against its native v4 /16, not against a v6 bucket —
+    /// otherwise the same host gets one quota per socket family.
+    #[test]
+    fn ipv4_mapped_v6_shares_the_v4_bucket() {
+        let mut mgr = PeerManager::new(125, 8);
+        mgr.register_peer(make_peer([192, 168, 1, 1], 33369, false))
+            .unwrap();
+        mgr.register_peer(make_peer([192, 168, 2, 1], 33370, false))
+            .unwrap();
+        let mapped: IpAddr = std::net::Ipv4Addr::new(192, 168, 3, 1)
+            .to_ipv6_mapped()
+            .into();
+        assert!(
+            !mgr.can_accept_inbound(mapped),
+            "the mapped form of a capped /16 must be refused too"
+        );
+    }
+
+    /// v6 diversity must not throttle unrelated networks the way the old
+    /// 2-byte bucket did: distinct /48s under 2001::/16 are distinct sites.
+    #[test]
+    fn distinct_v6_sites_are_not_lumped_together() {
+        use std::net::Ipv6Addr;
+        let mut mgr = PeerManager::new(125, 8);
+        let mk = |segments: [u16; 8], port: u16| {
+            let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::from(segments)), port);
+            let mut p = PeerInfo::new(addr, false);
+            p.state = PeerState::Connected;
+            p
+        };
+        mgr.register_peer(mk([0x2001, 0x470, 0x1, 0, 0, 0, 0, 0x1], 33369))
+            .unwrap();
+        mgr.register_peer(mk([0x2001, 0x470, 0x2, 0, 0, 0, 0, 0x1], 33370))
+            .unwrap();
+        assert!(
+            mgr.can_accept_inbound(IpAddr::V6(Ipv6Addr::from([
+                0x2001, 0x470, 0x3, 0, 0, 0, 0, 0x1
+            ]))),
+            "three different /48s sharing 2001::/16 must all be admissible"
+        );
     }
 
     #[test]

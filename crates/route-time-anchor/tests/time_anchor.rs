@@ -37,11 +37,11 @@ fn kat_canonical_policy_evidence_and_worst_case_intervals() {
     assert_eq!(evidence_bytes.len(), 880);
     assert_eq!(
         hex::encode(fixture.policy.policy_digest().unwrap()),
-        "9bc976021efc2fb4918d63757a7972276bbbf4b309bd96c2ef1f88158b2471b4"
+        "d7ffd5d069a7225e1c4eec1c396285fc392f570aaf7accd9b4adcaaf91906c78"
     );
     assert_eq!(
         hex::encode(evidence.evidence_digest().unwrap()),
-        "acf69471e8157365f2cefa1b2f5a960b33c48759e63437e120c55895e5c46a91"
+        "bcafe8375147b242c5a4991997fb1c636c379ce391f725c1067c0d0776fb0dd5"
     );
 
     let config = RouteTimeAnchorStoreConfigV2::new(
@@ -96,7 +96,7 @@ fn kat_canonical_policy_evidence_and_worst_case_intervals() {
     assert_eq!(proof.valid_until_seconds(), EVIDENCE_TIME + 90);
     assert_eq!(
         hex::encode(proof.binding_digest()),
-        "1920f7f7231eac109b2d937ed224b54984bc7532995f53e5bdca0bb6f6aa01b0"
+        "e20b9e32c37e78def607e44ca95a94b2501e9e1fb4d1fad8447d2d34a4e27480"
     );
     store.revalidate_capability(&proof).unwrap();
     store

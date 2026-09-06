@@ -318,7 +318,16 @@ pub const MEDIAN_TIME_WINDOW: usize = 11;
 ///
 /// This version is committed to the Noise prologue and exchanged in `Hello`.
 /// It is deliberately independent from block-version consensus rules.
-pub const WIRE_PROTOCOL_VERSION: u32 = 2;
+///
+/// Version 3 adds `advertised_port` to `HelloPayload` (spec A1), which is what
+/// lets a node on a non-default or NAT-mapped port be discovered at all.
+///
+/// Raising this alone would partition the network: the prologue is mixed into
+/// the Noise handshake hash and is never negotiated, so peers deriving
+/// different bytes fail AEAD and never connect. It is only safe because
+/// `SUPPORTED_PROLOGUE_VERSIONS` makes a node speak both 3 and 2 — read that
+/// before changing this number.
+pub const WIRE_PROTOCOL_VERSION: u32 = 3;
 
 /// Consensus. Block version used by the existing chain.
 pub const BLOCK_VERSION_LEGACY: u32 = 2;

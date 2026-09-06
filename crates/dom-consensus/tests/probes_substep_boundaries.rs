@@ -29,8 +29,8 @@ use dom_consensus::{
     CoinbaseTransaction, ValidationContext,
 };
 use dom_core::{
-    Amount, BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
-    PROTOCOL_VERSION, TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
+    Amount, BlockHeight, DomError, Hash256, Timestamp, BLOCK_VERSION_LEGACY, KERNEL_FEAT_COINBASE,
+    KERNEL_FEAT_PLAIN, TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
 };
 use dom_crypto::hash::blake2b_256_tagged;
 use dom_crypto::keys::SecretKey;
@@ -145,7 +145,7 @@ fn probe_fix006_validate_block_ignores_zero_pow() {
         compute_block_pmmr_roots(BlockHeight(1), &coinbase, std::slice::from_ref(&tx)).unwrap();
     let block = Block {
         header: BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: BLOCK_VERSION_LEGACY,
             height: BlockHeight(1),
             prev_hash: Hash256::from_bytes([0x55; 32]),
             timestamp: Timestamp(1_704_067_260),
@@ -240,7 +240,7 @@ fn probe_block_header_offset_noncanonical_is_rejected() {
     for bad_offset in [SECP256K1_N, n_plus_one(), [0xFFu8; 32]] {
         let block = Block {
             header: BlockHeader {
-                version: PROTOCOL_VERSION,
+                version: BLOCK_VERSION_LEGACY,
                 height: BlockHeight(1),
                 prev_hash: Hash256::from_bytes([0x55; 32]),
                 timestamp: Timestamp(1_704_067_260),

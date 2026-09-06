@@ -1,6 +1,6 @@
 use dom_config::Network;
 use dom_consensus::derive_chain_id;
-use dom_core::{Hash256, PROTOCOL_VERSION};
+use dom_core::{Hash256, BLOCK_VERSION_LEGACY};
 use dom_integration_tests::helpers::*;
 use dom_node::node::DomNode;
 use dom_wire::codec::NoiseCodec;
@@ -33,7 +33,7 @@ async fn connect_adversarial_peer(node: &Arc<DomNode>) -> (tokio::net::TcpStream
     let mut codec = NoiseCodec::new(transport, config.network.magic());
 
     let hello = HelloPayload {
-        version: PROTOCOL_VERSION,
+        version: BLOCK_VERSION_LEGACY,
         network_magic: config.network.magic(),
         chain_id,
         best_height: 0,
@@ -43,6 +43,9 @@ async fn connect_adversarial_peer(node: &Arc<DomNode>) -> (tokio::net::TcpStream
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
+        // Test harness peers are dial-in only; 0 = declared unreachable,
+        // which also keeps them out of any PEX pool they touch (spec A2).
+        advertised_port: 0,
     };
     let wire = WireMessage {
         magic: config.network.magic(),

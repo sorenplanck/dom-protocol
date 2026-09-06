@@ -123,6 +123,9 @@ async fn second_hello_after_successful_exchange_is_disconnected_and_cleans_metri
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
+        // Test harness peers are dial-in only; 0 = declared unreachable,
+        // which also keeps them out of any PEX pool they touch (spec A2).
+        advertised_port: 0,
     };
     codec
         .send(

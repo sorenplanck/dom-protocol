@@ -30,10 +30,11 @@ proptest! {
         best_hash in hash32(),
         user_agent in "[ -~]{0,200}",
         local_timestamp in any::<u64>(),
+        advertised_port in any::<u16>(),
     ) {
         let p = HelloPayload {
             version, network_magic, chain_id, best_height, best_hash,
-            user_agent: user_agent.clone(), local_timestamp,
+            user_agent: user_agent.clone(), local_timestamp, advertised_port,
         };
         let back = HelloPayload::from_bytes(&p.to_bytes().unwrap()).expect("hello roundtrip");
         prop_assert_eq!(back.version, version);

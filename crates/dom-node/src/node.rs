@@ -87,6 +87,17 @@ pub struct DomNode {
     /// Peer Exchange state: known peer addresses learned from seeds and Addr
     /// gossip, plus GetAddr cooldown tracking (RFC-0005 §6).
     pub pex: Arc<Mutex<crate::pex::PexManager>>,
+    /// Which Noise prologue version to lead with per peer (spec A1,
+    /// Strategy B). Shared by the dial loop and the inbound acceptor so a
+    /// version learned in one direction serves the other.
+    pub(crate) prologue_prefs: Arc<crate::prologue_prefs::ProloguePreferences>,
+    /// Admission control for reachability dial-backs (spec A4, R-A4.1).
+    pub(crate) dialback: Arc<crate::dialback::DialbackLimiter>,
+    /// Live externally-reachable port to announce in Hello (spec A1/A3).
+    /// Starts from configuration and is updated by the port-mapping task; 0
+    /// means "not reachable", which is what an expired or unusable mapping
+    /// reverts to.
+    pub(crate) live_advertised_port: Arc<AtomicU64>,
 }
 
 /// Per-connection I/O context passed into message_loop.
@@ -111,6 +122,10 @@ struct NodeServices {
     state_events: Arc<Notify>,
     ibd_active_sessions: Arc<AtomicU64>,
     pex: Arc<Mutex<crate::pex::PexManager>>,
+    prologue_prefs: Arc<crate::prologue_prefs::ProloguePreferences>,
+    dialback: Arc<crate::dialback::DialbackLimiter>,
+    live_advertised_port: Arc<AtomicU64>,
+    task_supervisor: NodeTaskSupervisor,
 }
 
 /// Broadcast channels shared across connection tasks.
@@ -255,6 +270,61 @@ const PEER_REPUTATION_METADATA_KEY: &[u8] = b"dom/peer_reputation_state/v2";
 const LEGACY_PEER_REPUTATION_METADATA_KEY: &[u8] = b"dom/peer_reputation_state/v1";
 const MEMPOOL_METADATA_KEY: &[u8] = b"dom/mempool_state/v1";
 const NOISE_STATIC_KEY_METADATA_KEY: &[u8] = b"dom/noise_static_key/v1";
+
+/// Bind the P2P listener, dual-stack when the configured address is IPv6
+/// (spec A8).
+///
+/// The single-socket scheme was chosen deliberately over two sockets
+/// (R-A8.2): an IPv6 bind gets `IPV6_V6ONLY` set to `false` EXPLICITLY, so
+/// `[::]:port` accepts both families on every OS instead of inheriting
+/// Linux's `bindv6only` sysctl or the differing defaults elsewhere — and
+/// nothing else may then also bind `0.0.0.0` on the same port, which is
+/// exactly the double-bind `EADDRINUSE` the risk note warns about. Platforms
+/// that refuse dual-stack sockets get a warning and a v6-only listener
+/// rather than a dead node (§1.4: nothing may stop the boot).
+///
+/// An IPv4 address keeps the plain tokio bind: nothing about v4-only
+/// behaviour changes, and the default configs still ship `0.0.0.0`, so
+/// enabling v6 remains an explicit operator action via
+/// `DOM_P2P_LISTEN_ADDR="[::]:33369"` until the hubs have AAAA records and
+/// firewall rules to make it useful (§5.3).
+async fn bind_p2p_listener(p2p_addr: &str) -> Result<tokio::net::TcpListener, DomError> {
+    let parsed: std::net::SocketAddr = p2p_addr
+        .parse()
+        .map_err(|e| DomError::Internal(format!("Invalid P2P listen addr {p2p_addr}: {e}")))?;
+    if parsed.is_ipv4() {
+        return tokio::net::TcpListener::bind(parsed)
+            .await
+            .map_err(|e| DomError::Internal(format!("P2P bind {p2p_addr}: {e}")));
+    }
+
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV6,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )
+    .map_err(|e| DomError::Internal(format!("P2P socket for {p2p_addr}: {e}")))?;
+    if let Err(e) = socket.set_only_v6(false) {
+        warn!("dual-stack unavailable for {p2p_addr}; listening on IPv6 only: {e}");
+    }
+    // Match tokio's own bind behaviour so a quick restart does not fail on
+    // TIME_WAIT remnants of our previous listener.
+    #[cfg(unix)]
+    socket
+        .set_reuse_address(true)
+        .map_err(|e| DomError::Internal(format!("P2P SO_REUSEADDR for {p2p_addr}: {e}")))?;
+    socket
+        .set_nonblocking(true)
+        .map_err(|e| DomError::Internal(format!("P2P nonblocking for {p2p_addr}: {e}")))?;
+    socket
+        .bind(&parsed.into())
+        .map_err(|e| DomError::Internal(format!("P2P bind {p2p_addr}: {e}")))?;
+    socket
+        .listen(1024)
+        .map_err(|e| DomError::Internal(format!("P2P listen {p2p_addr}: {e}")))?;
+    tokio::net::TcpListener::from_std(socket.into())
+        .map_err(|e| DomError::Internal(format!("P2P listener registration {p2p_addr}: {e}")))
+}
 
 async fn bind_metrics_listener(
     config: &NodeConfig,
@@ -494,6 +564,13 @@ impl DomNode {
 
         // NTP health check (Doc 4.5 mitigation 2)
         let metrics = Arc::new(Metrics::new());
+        // dom_advertised_port (spec A5): what this node will announce in its
+        // Hello. Published once — the value is fixed for the process lifetime
+        // until A3 introduces runtime port mappings.
+        metrics.advertised_port.store(
+            u64::from(advertised_port(&config)),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         match check_clock_health() {
             Ok(DriftStatus::Critical { drift_secs }) => {
                 warn!(
@@ -554,6 +631,9 @@ impl DomNode {
                 PEX_MAX_KNOWN_PEERS,
                 config.network,
             ))),
+            prologue_prefs: Arc::new(crate::prologue_prefs::ProloguePreferences::default()),
+            dialback: Arc::new(crate::dialback::DialbackLimiter::default()),
+            live_advertised_port: Arc::new(AtomicU64::new(u64::from(advertised_port(&config)))),
         })
     }
 
@@ -676,10 +756,72 @@ impl DomNode {
         // RPC server — making readiness checks lie and external tooling
         // (curl/CLI/scripts) see ConnectionRefused with no explanation.
         let p2p_addr = self.config.p2p_listen_addr.clone();
-        let p2p_listener = tokio::net::TcpListener::bind(&p2p_addr)
-            .await
-            .map_err(|e| DomError::Internal(format!("P2P bind {p2p_addr}: {e}")))?;
+        let p2p_listener = bind_p2p_listener(&p2p_addr).await?;
         info!("P2P listening on {p2p_addr}");
+
+        // A3: ask the router to open our port, and keep the announcement
+        // honest over time. Detached and fully bounded — the boot never
+        // waits on a router (§1.4) and every probe runs under the module's
+        // per-method timeout.
+        if crate::portmap::portmap_enabled() {
+            let internal_port = self
+                .config
+                .p2p_listen_addr
+                .rsplit_once(':')
+                .and_then(|(_, p)| p.parse::<u16>().ok())
+                .unwrap_or_else(|| self.config.network.default_port());
+            let baseline_port = advertised_port(&self.config);
+            let live_port = self.live_advertised_port.clone();
+            let metrics = self.metrics.clone();
+            let portmap_supervisor = self.task_supervisor.clone();
+            let portmap_shutdown = portmap_supervisor.shutdown_token();
+            portmap_supervisor
+                .spawn(TaskKind::PortMap, async move {
+                    use std::sync::atomic::Ordering;
+                    loop {
+                        let mapping = crate::portmap::try_map(internal_port).await;
+                        // What to announce, and why the spec's "no mapping →
+                        // announce 0" is refined here: "no gateway answered" is
+                        // not evidence of a NAT. A hub on a public IP has no IGD
+                        // and must keep announcing its listen port — writing 0
+                        // there would blind the whole network's discovery. So:
+                        // a granted, usable mapping announces the GRANTED port
+                        // (R-A3.4); a mapping the internet cannot reach (CGNAT)
+                        // announces 0, because there the NAT is proven and
+                        // unreachable; no gateway keeps the configured baseline,
+                        // and A4's dial-back by other nodes decides the truth.
+                        let (port, code) = match mapping {
+                            crate::portmap::Mapping::Upnp { .. } => (mapping.advertised_port(), 1),
+                            crate::portmap::Mapping::NatPmp { .. } => {
+                                (mapping.advertised_port(), 2)
+                            }
+                            crate::portmap::Mapping::CgnatDetected => (0, 3),
+                            crate::portmap::Mapping::None => (baseline_port, 0),
+                        };
+                        live_port.store(u64::from(port), Ordering::Relaxed);
+                        metrics
+                            .advertised_port
+                            .store(u64::from(port), Ordering::Relaxed);
+                        metrics.portmap_status_code.store(code, Ordering::Relaxed);
+                        info!(
+                            method = mapping.status_label(),
+                            advertised_port = port,
+                            "port mapping state"
+                        );
+                        // Renew at half-lease; with nothing to renew, retry at a
+                        // slow cadence — which is also what recovers from a
+                        // network change (R-A3.3), at that cadence.
+                        let wait = mapping
+                            .renew_interval()
+                            .unwrap_or(std::time::Duration::from_secs(900));
+                        tokio::select! {
+                            () = portmap_shutdown.wait() => return Ok(()),
+                            () = tokio::time::sleep(wait) => {}
+                        }
+                    }
+                })
+                .await;
+        }
 
         let rpc_pair = if let Some(rpc_addr) = self.config.rpc_listen_addr.clone() {
             use crate::node_handle::NodeHandleImpl;
@@ -1111,6 +1253,10 @@ impl DomNode {
                         state_events: self.state_events.clone(),
                         ibd_active_sessions: self.ibd_active_sessions.clone(),
                         pex: self.pex.clone(),
+                        prologue_prefs: self.prologue_prefs.clone(),
+                        dialback: self.dialback.clone(),
+                        live_advertised_port: self.live_advertised_port.clone(),
+                        task_supervisor: self.task_supervisor.clone(),
                     };
                     let peers = svc.peers.clone();
                     let metrics = svc.metrics.clone();
@@ -1176,6 +1322,10 @@ impl DomNode {
             state_events: self.state_events.clone(),
             ibd_active_sessions: self.ibd_active_sessions.clone(),
             pex: self.pex.clone(),
+            prologue_prefs: self.prologue_prefs.clone(),
+            dialback: self.dialback.clone(),
+            live_advertised_port: self.live_advertised_port.clone(),
+            task_supervisor: self.task_supervisor.clone(),
         };
         let mut configured_seed_ip_cache = HashMap::<String, HashSet<std::net::IpAddr>>::new();
         loop {
@@ -1553,28 +1703,70 @@ async fn handle_inbound(
     };
     let chain_id =
         *derive_chain_id(config.network.magic(), &Hash256::from_bytes(genesis_hash)).as_bytes();
+    // Strategy B (spec A1): lead with what per-peer memory says. The prologue
+    // cannot be probed — a mismatch only surfaces after message 2 is written —
+    // so a wrong guess costs this connection, and recovery happens when the
+    // peer redials (its dial loop treats handshake failure as retryable).
+    let prologue_version = svc.prologue_prefs.version_for(addr.ip());
     let transport = match tokio::select! {
         _ = shutdown.wait() => return None,
-        result = dom_wire::handshake::perform_handshake_responder(
+        result = dom_wire::handshake::perform_handshake_responder_versioned(
             &mut stream,
             &privkey,
+            prologue_version,
             config.network.magic(),
             &chain_id,
         ) => result,
     } {
-        Ok(t) => t,
+        Ok(t) => {
+            svc.prologue_prefs
+                .record_success(addr.ip(), prologue_version);
+            t
+        }
         Err(e) => {
-            let _ = record_pending_peer_violation(&chain, &svc.peers, addr, &e).await;
-            warn!("Handshake failed with {addr}: {e}");
+            // Only an AEAD transcript failure is evidence about the prologue.
+            // Anything else — a readiness probe closing, a scanner, a timeout
+            // — says nothing about versions, and demoting on it would let any
+            // connect-and-close visitor walk this IP's real peers down to the
+            // oldest version (a poisoned readiness probe surfaced exactly
+            // that).
+            if dom_wire::handshake::is_prologue_mismatch(&e) {
+                if let Some(next) = svc
+                    .prologue_prefs
+                    .demote_after_failure(addr.ip(), prologue_version)
+                {
+                    // Expected during the version transition, so it must not
+                    // feed the ban machinery: penalising it would cool down
+                    // exactly the peer whose reconnection completes the
+                    // negotiation.
+                    info!(
+                        "Handshake with {addr} failed on prologue v{prologue_version}; \
+                         will offer v{next} when this peer reconnects: {e}"
+                    );
+                } else {
+                    let _ = record_pending_peer_violation(&chain, &svc.peers, addr, &e).await;
+                    warn!("Handshake failed with {addr} on every supported version: {e}");
+                }
+            } else {
+                let _ = record_pending_peer_violation(&chain, &svc.peers, addr, &e).await;
+                warn!("Handshake failed with {addr}: {e}");
+            }
             return None;
         }
     };
-    info!("Noise handshake complete with {addr}");
+    info!("Noise handshake complete with {addr} (prologue v{prologue_version})");
 
     let mut codec = dom_wire::codec::NoiseCodec::new(transport, config.network.magic());
     match tokio::select! {
         _ = shutdown.wait() => return None,
-        result = hello_exchange(&mut stream, &mut codec, &config, &chain_id, &chain) => result,
+        result = hello_exchange(
+            &mut stream,
+            &mut codec,
+            &config,
+            &chain_id,
+            &chain,
+            svc.live_advertised_port.load(std::sync::atomic::Ordering::Relaxed) as u16,
+        ) => result,
     } {
         Ok(peer_hello) => {
             let peer_id = codec.peer_id();
@@ -1612,16 +1804,43 @@ async fn handle_inbound(
                 warn!("Persisting peer reputation state after inbound registration failed: {e}");
             }
             // The source port of an inbound TCP connection is ephemeral. Learn
-            // the peer's IP on the standard network port as an *unconfirmed*
-            // candidate; only a later successful outbound dial makes it PEX
-            // shareable. This is deliberately compatible with the existing
-            // Hello payload, whose strict length parser cannot be extended
-            // without a protocol-version change. A future protocol revision
-            // may add an explicitly advertised listening endpoint to Hello as
-            // part of a coordinated version/handshake migration.
+            // the peer's IP on the port it ADVERTISED in its Hello as an
+            // *unconfirmed* candidate; only a later successful outbound dial
+            // makes it PEX shareable. This is the "coordinated
+            // version/handshake migration" the previous comment here promised:
+            // PROTOCOL_VERSION 3 carries the field (spec A1), and a v2 peer
+            // decodes as advertised_port 0 — declared unreachable — which
+            // learn_inbound_peer counts but keeps out of the dial pool, in
+            // place of the old guess of the default network port that filled
+            // every pool with ip:33369 entries nobody was listening on
+            // (spec A2). The IP is the connection's source address, never one
+            // taken from the payload.
             {
                 let mut pex = trace_lock("pex", &svc.pex).await;
-                pex.learn_inbound_peer(addr.ip(), config.network.default_port());
+                pex.learn_inbound_peer(addr.ip(), peer_hello.advertised_port);
+                refresh_pex_metrics(&pex, &svc.metrics);
+            }
+            // A4: the announced port is a hypothesis until it answers from
+            // the outside — routers acknowledge mappings they never honour
+            // (R-A3.2), and peers can lie. Dial back and only a completed
+            // connection confirms the address for gossip. The target IP is
+            // the socket's source address; the payload contributed only the
+            // port, and an unusable one never got past learn_inbound_peer.
+            // The limiter enforces one probe per source IP per window and a
+            // global concurrency cap (R-A4.1); a refused probe just leaves
+            // the address unconfirmed, which is the safe state.
+            if peer_hello.advertised_port != 0
+                && dom_wire::message::sane_advertised_port(peer_hello.advertised_port)
+            {
+                spawn_dialback_probe(
+                    svc.task_supervisor.clone(),
+                    addr.ip(),
+                    peer_hello.advertised_port,
+                    svc.dialback.clone(),
+                    svc.pex.clone(),
+                    svc.metrics.clone(),
+                )
+                .await;
             }
             refresh_peer_metrics(&svc.peers, &svc.metrics, Some(&svc.state_events)).await;
             // An inbound peer with a taller chain is a normal IBD source.
@@ -1728,24 +1947,6 @@ async fn connect_outbound(
         tx_fluff_tx,
         tx_stem_tx,
     } = channels.clone();
-    let mut stream = match tokio::select! {
-        _ = shutdown.wait() => return OutboundAttemptOutcome::Shutdown,
-        result = tokio::net::TcpStream::connect(addr) => result,
-    } {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(
-                event = "session_closed_reason",
-                peer_addr = %addr,
-                direction = "outbound",
-                reason = %e,
-                failure_class = "operational_network",
-                "outbound connection failed"
-            );
-            warn!("Connection to {addr} failed: {e}");
-            return OutboundAttemptOutcome::RetryableFailure;
-        }
-    };
     let genesis_hash = match config.network {
         dom_config::Network::Mainnet => dom_core::GENESIS_HASH_MAINNET,
         dom_config::Network::Testnet => dom_core::GENESIS_HASH_TESTNET,
@@ -1753,30 +1954,105 @@ async fn connect_outbound(
     };
     let chain_id =
         *derive_chain_id(config.network.magic(), &Hash256::from_bytes(genesis_hash)).as_bytes();
-    let transport = match tokio::select! {
-        _ = shutdown.wait() => return OutboundAttemptOutcome::Shutdown,
-        result = dom_wire::handshake::perform_handshake_initiator(
-            &mut stream,
-            &privkey,
-            config.network.magic(),
-            &chain_id,
-        ) => result,
-    } {
-        Ok(t) => t,
-        Err(e) => {
-            if let Ok(peer_addr) = addr.parse() {
-                let _ = record_pending_peer_violation(&chain, &svc.peers, peer_addr, &e).await;
+    // Strategy B (spec A1): a failed prologue poisons both the Noise state and
+    // the TCP connection — the responder has already seen bytes it could not
+    // authenticate — so each fallback version needs a fresh connection. Lead
+    // with what per-peer memory says (the newest for an unknown peer) and walk
+    // down on failure; only a peer that fails on every supported version is
+    // recorded as misbehaving.
+    let peer_ip = addr
+        .parse::<std::net::SocketAddr>()
+        .ok()
+        .map(|socket| socket.ip());
+    let mut prologue_version = peer_ip
+        .map(|ip| svc.prologue_prefs.version_for(ip))
+        .unwrap_or(dom_core::WIRE_PROTOCOL_VERSION);
+    let (mut stream, transport) = loop {
+        let mut stream = match tokio::select! {
+            _ = shutdown.wait() => return OutboundAttemptOutcome::Shutdown,
+            result = tokio::net::TcpStream::connect(addr) => result,
+        } {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    event = "session_closed_reason",
+                    peer_addr = %addr,
+                    direction = "outbound",
+                    reason = %e,
+                    failure_class = "operational_network",
+                    "outbound connection failed"
+                );
+                warn!("Connection to {addr} failed: {e}");
+                return OutboundAttemptOutcome::RetryableFailure;
             }
-            warn!("Handshake failed with {addr}: {e}");
-            return OutboundAttemptOutcome::RetryableFailure;
+        };
+        match tokio::select! {
+            _ = shutdown.wait() => return OutboundAttemptOutcome::Shutdown,
+            result = dom_wire::handshake::perform_handshake_initiator_versioned(
+                &mut stream,
+                &privkey,
+                prologue_version,
+                config.network.magic(),
+                &chain_id,
+            ) => result,
+        } {
+            Ok(t) => {
+                if let Some(ip) = peer_ip {
+                    svc.prologue_prefs.record_success(ip, prologue_version);
+                }
+                break (stream, t);
+            }
+            Err(e) => {
+                // Same evidence rule as the responder: only an AEAD failure
+                // is about the prologue. A dead seed timing out must not walk
+                // the dialer through every version against a host that never
+                // answered Noise in the first place.
+                let fallback = if dom_wire::handshake::is_prologue_mismatch(&e) {
+                    peer_ip.and_then(|ip| {
+                        svc.prologue_prefs
+                            .demote_after_failure(ip, prologue_version)
+                    })
+                } else {
+                    None
+                };
+                match fallback {
+                    Some(next) => {
+                        // Expected once per cross-version pair during the
+                        // transition; reconnect immediately with the older
+                        // prologue rather than waiting a full retry cycle.
+                        info!(
+                            "Handshake with {addr} failed on prologue v{prologue_version}; \
+                             reconnecting with v{next}: {e}"
+                        );
+                        prologue_version = next;
+                        continue;
+                    }
+                    None => {
+                        if let Ok(peer_addr) = addr.parse() {
+                            let _ =
+                                record_pending_peer_violation(&chain, &svc.peers, peer_addr, &e)
+                                    .await;
+                        }
+                        warn!("Handshake failed with {addr}: {e}");
+                        return OutboundAttemptOutcome::RetryableFailure;
+                    }
+                }
+            }
         }
     };
-    info!("Connected to {addr}");
+    info!("Connected to {addr} (prologue v{prologue_version})");
 
     let mut codec = dom_wire::codec::NoiseCodec::new(transport, config.network.magic());
     match tokio::select! {
         _ = shutdown.wait() => return OutboundAttemptOutcome::Shutdown,
-        result = hello_exchange(&mut stream, &mut codec, &config, &chain_id, &chain) => result,
+        result = hello_exchange(
+            &mut stream,
+            &mut codec,
+            &config,
+            &chain_id,
+            &chain,
+            svc.live_advertised_port.load(std::sync::atomic::Ordering::Relaxed) as u16,
+        ) => result,
     } {
         Ok(peer_hello) => {
             let peer_id = codec.peer_id();
@@ -1828,6 +2104,7 @@ async fn connect_outbound(
             {
                 let mut pex = trace_lock("pex", &svc.pex).await;
                 pex.mark_connected(&canonical_addr);
+                refresh_pex_metrics(&pex, &svc.metrics);
             }
             if let Err(e) = persist_peer_rotation_state(&chain, &svc.peers).await {
                 warn!("Persisting peer rotation state after outbound registration failed: {e}");
@@ -1959,10 +2236,11 @@ async fn hello_exchange(
     config: &NodeConfig,
     chain_id: &[u8; 32],
     chain: &Arc<Mutex<ChainState>>,
+    advertised_port: u16,
 ) -> Result<dom_wire::message::HelloPayload, DomError> {
     tokio::time::timeout(
         tokio::time::Duration::from_secs(HELLO_EXCHANGE_TIMEOUT_SECS),
-        hello_exchange_inner(stream, codec, config, chain_id, chain),
+        hello_exchange_inner(stream, codec, config, chain_id, chain, advertised_port),
     )
     .await
     .map_err(|_| {
@@ -1977,12 +2255,53 @@ fn node_user_agent() -> String {
     format!("dom-node/{}", env!("CARGO_PKG_VERSION"))
 }
 
+/// The port this node tells peers to reach it on (spec A1).
+///
+/// `DOM_ADVERTISED_PORT` wins when set, because the externally reachable port
+/// is not knowable from inside the process whenever a NAT, a container
+/// publish, or a manual forward remaps it — the listen socket only knows the
+/// inside of that mapping. Otherwise the listen port is the best available
+/// answer.
+///
+/// Returns 0 — "not reachable" — rather than a guess whenever the value is
+/// unusable: an unparseable address, or a port that
+/// [`sane_advertised_port`](dom_wire::message::sane_advertised_port) refuses.
+/// A wrong port is worse than no port: peers would spend their dial budget on
+/// an address that cannot answer, while 0 simply keeps this node out of the
+/// pool until A3/A4 can establish a real mapping.
+fn advertised_port(config: &NodeConfig) -> u16 {
+    let port = match std::env::var("DOM_ADVERTISED_PORT") {
+        Ok(raw) => match raw.trim().parse::<u16>() {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::warn!(
+                    value = %raw,
+                    "DOM_ADVERTISED_PORT is not a valid port; advertising unreachable"
+                );
+                return 0;
+            }
+        },
+        Err(_) => config
+            .p2p_listen_addr
+            .rsplit_once(':')
+            .and_then(|(_, p)| p.parse::<u16>().ok())
+            .unwrap_or(0),
+    };
+    if dom_wire::message::sane_advertised_port(port) {
+        port
+    } else {
+        tracing::warn!(port, "refusing to advertise a privileged port");
+        0
+    }
+}
+
 async fn hello_exchange_inner(
     stream: &mut tokio::net::TcpStream,
     codec: &mut dom_wire::codec::NoiseCodec,
     config: &NodeConfig,
     chain_id: &[u8; 32],
     chain: &Arc<Mutex<ChainState>>,
+    advertised_port: u16,
 ) -> Result<dom_wire::message::HelloPayload, DomError> {
     use dom_wire::message::{Command, HelloPayload, WireMessage};
 
@@ -2003,6 +2322,7 @@ async fn hello_exchange_inner(
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
+        advertised_port,
     };
 
     let msg = WireMessage {
@@ -2021,10 +2341,16 @@ async fn hello_exchange_inner(
     }
     let peer_hello = HelloPayload::from_bytes(&peer_msg.payload)?;
 
-    if peer_hello.version != dom_core::WIRE_PROTOCOL_VERSION {
+    // R-A1.3: this must never be an equality test. A peer one version behind
+    // still speaks a wire format this build can read — the Noise prologue is
+    // what actually gates compatibility, and it already succeeded by the time
+    // this Hello arrived. Rejecting on inequality here would undo the
+    // version-tolerant prologue and partition the network on the next bump,
+    // which is precisely the failure Strategy B exists to prevent.
+    if !dom_wire::handshake::SUPPORTED_PROLOGUE_VERSIONS.contains(&peer_hello.version) {
         return Err(DomError::Invalid(format!(
-            "protocol version mismatch: ours={} theirs={}",
-            dom_core::WIRE_PROTOCOL_VERSION,
+            "unsupported protocol version: ours={:?} theirs={}",
+            dom_wire::handshake::SUPPORTED_PROLOGUE_VERSIONS,
             peer_hello.version
         )));
     }
@@ -2932,6 +3258,74 @@ async fn record_duplicate_block_relay(
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     exceeded
+}
+
+/// Fire one reachability probe at `source_ip:advertised_port` (spec A4).
+///
+/// Detached: the inbound session must not wait on a probe, and a slow target
+/// costs at most `DIALBACK_CONNECT_TIMEOUT` of one bounded slot. Success
+/// promotes the address to confirmed — the only state PEX gossips — through
+/// the same `mark_connected` an ordinary completed outbound uses. Failure
+/// changes nothing: unconfirmed is the safe state, and the regular outbound
+/// cooldown machinery governs any retry.
+async fn spawn_dialback_probe(
+    supervisor: NodeTaskSupervisor,
+    source_ip: std::net::IpAddr,
+    advertised_port: u16,
+    limiter: Arc<crate::dialback::DialbackLimiter>,
+    pex: Arc<Mutex<crate::pex::PexManager>>,
+    metrics: Arc<Metrics>,
+) {
+    use std::sync::atomic::Ordering;
+    supervisor
+        .spawn_dialback(async move {
+            let Some(slot) = limiter.try_begin(source_ip) else {
+                return Ok(());
+            };
+            metrics.dialback_attempts.fetch_add(1, Ordering::Relaxed);
+            let target = std::net::SocketAddr::new(source_ip, advertised_port);
+            let connected = tokio::time::timeout(
+                crate::dialback::DIALBACK_CONNECT_TIMEOUT,
+                tokio::net::TcpStream::connect(target),
+            )
+            .await;
+            drop(slot);
+            match connected {
+                Ok(Ok(_stream)) => {
+                    metrics.dialback_success.fetch_add(1, Ordering::Relaxed);
+                    let mut px = trace_lock("pex", &pex).await;
+                    if px.mark_connected(&target.to_string()) {
+                        refresh_pex_metrics(&px, &metrics);
+                        tracing::debug!(%target, "dial-back confirmed advertised endpoint");
+                    }
+                }
+                _ => {
+                    tracing::debug!(%target, "dial-back could not reach advertised endpoint");
+                }
+            }
+            Ok(())
+        })
+        .await;
+}
+
+/// Publish the PEX pool composition gauges (spec A5).
+///
+/// Called from the paths that mutate the pool rather than on a timer, so the
+/// gauges are exact at every scrape without a dedicated task. All three are
+/// unlabeled totals (R-A5.1).
+fn refresh_pex_metrics(pex: &crate::pex::PexManager, metrics: &Metrics) {
+    use std::sync::atomic::Ordering;
+    let confirmed = pex.confirmed_count() as u64;
+    let known = pex.known_count() as u64;
+    metrics
+        .pex_confirmed_peers
+        .store(confirmed, Ordering::Relaxed);
+    metrics
+        .pex_unconfirmed_peers
+        .store(known.saturating_sub(confirmed), Ordering::Relaxed);
+    metrics
+        .pex_unreachable_peers
+        .store(pex.unreachable_peers_seen(), Ordering::Relaxed);
 }
 
 async fn refresh_peer_metrics(
@@ -5178,7 +5572,9 @@ async fn message_loop(
                         } else {
                             let added = {
                                 let mut px = trace_lock("pex", &svc.pex).await;
-                                px.process_addr_message(payload.entries)
+                                let added = px.process_addr_message(payload.entries);
+                                refresh_pex_metrics(&px, &svc.metrics);
+                                added
                             };
                             tracing::debug!(
                                 "PEX: learned {added} new peer address(es) from {peer_addr}"
@@ -5197,7 +5593,7 @@ async fn message_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        annotate_send_err, bind_metrics_listener, catchup_interval,
+        annotate_send_err, bind_metrics_listener, bind_p2p_listener, catchup_interval,
         clear_persisted_mempool_snapshot, clear_persisted_peer_reputation,
         continue_ibd_header_sync, decode_deferred_block_bytes, decode_ibd_block_response,
         decode_relay_block, deferred_replay_action, getblockdata_hashes_to_serve, ibd_now,
@@ -5214,6 +5610,46 @@ mod tests {
         LEGACY_PEER_ROTATION_METADATA_KEY, MEMPOOL_METADATA_KEY, METRICS_CONTENT_TYPE,
         NOISE_STATIC_KEY_METADATA_KEY, PEER_REPUTATION_METADATA_KEY, PEER_ROTATION_METADATA_KEY,
     };
+
+    /// A8: the v4-only path is untouched — plain bind, accepts v4.
+    #[tokio::test]
+    async fn v4_p2p_listener_binds_and_accepts() {
+        let listener = bind_p2p_listener("127.0.0.1:0").await.expect("v4 bind");
+        let port = listener.local_addr().expect("addr").port();
+        let client = tokio::net::TcpStream::connect(("127.0.0.1", port));
+        let (accepted, connected) = tokio::join!(listener.accept(), client);
+        accepted.expect("accept v4");
+        connected.expect("connect v4");
+    }
+
+    /// A8: one IPv6 socket with IPV6_V6ONLY=false serves both families —
+    /// the single-socket scheme that avoids the double-bind EADDRINUSE
+    /// (R-A8.2).
+    ///
+    /// Environment-gated, not platform-gated: a container with no ::1 (this
+    /// repo's sandboxes included) cannot exercise dual-stack at all, and a
+    /// hard failure there would misreport infra as a regression. CI's runners
+    /// have loopback IPv6 and run the real assertion.
+    #[tokio::test]
+    async fn dual_stack_p2p_listener_accepts_both_families() {
+        if tokio::net::TcpListener::bind("[::1]:0").await.is_err() {
+            eprintln!("skipping dual-stack assertion: environment has no IPv6 loopback");
+            return;
+        }
+        let listener = bind_p2p_listener("[::]:0").await.expect("dual-stack bind");
+        let port = listener.local_addr().expect("addr").port();
+
+        let v6 = tokio::net::TcpStream::connect(("::1", port));
+        let (accepted, connected) = tokio::join!(listener.accept(), v6);
+        accepted.expect("accept v6");
+        connected.expect("connect v6");
+
+        let v4 = tokio::net::TcpStream::connect(("127.0.0.1", port));
+        let (accepted, connected) = tokio::join!(listener.accept(), v4);
+        accepted.expect("accept v4 through the v6 socket");
+        connected.expect("connect v4 through the v6 socket");
+    }
+
     use crate::future_block_queue::DeferredBlock;
     use crate::metrics::Metrics;
     use crate::orphan_pool::OrphanBlock;

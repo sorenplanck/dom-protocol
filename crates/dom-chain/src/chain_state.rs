@@ -2320,7 +2320,7 @@ mod randomx_seed_tests {
     //! a "proof-of-work invalid" rejection on otherwise valid blocks.
     use super::*;
     use dom_consensus::block::ProofOfWork;
-    use dom_core::PROTOCOL_VERSION;
+    use dom_core::BLOCK_VERSION_LEGACY;
     use dom_pow::CompactTarget;
 
     const TEST_LMDB_MAP_SIZE: usize = 64 << 20; // 64 MiB
@@ -2336,7 +2336,7 @@ mod randomx_seed_tests {
 
     fn synth_header(height: u64) -> BlockHeader {
         BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: BLOCK_VERSION_LEGACY,
             height: BlockHeight(height),
             prev_hash: Hash256::ZERO,
             timestamp: Timestamp(1_704_067_200 + height),
@@ -2701,7 +2701,7 @@ mod mtp_branch_tests {
     //! taking timestamps from a competing branch.
     use super::*;
     use dom_consensus::block::ProofOfWork;
-    use dom_core::PROTOCOL_VERSION;
+    use dom_core::BLOCK_VERSION_LEGACY;
     use dom_pow::CompactTarget;
 
     const TEST_LMDB_MAP_SIZE: usize = 64 << 20;
@@ -2717,7 +2717,7 @@ mod mtp_branch_tests {
     /// Build a header at height `h`, parent `prev`, with an explicit timestamp.
     fn hdr(h: u64, prev: Hash256, ts: u64) -> (BlockHeader, Hash256) {
         let header = BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: BLOCK_VERSION_LEGACY,
             height: BlockHeight(h),
             prev_hash: prev,
             timestamp: Timestamp(ts),

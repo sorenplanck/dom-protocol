@@ -40,8 +40,8 @@ use dom_consensus::{
     compute_block_pmmr_roots, Block, CoinbaseKernel, CoinbaseTransaction, TransactionOutput,
 };
 use dom_core::{
-    Amount, BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
-    PROTOCOL_VERSION,
+    Amount, BlockHeight, Hash256, Timestamp, BLOCK_VERSION_LEGACY, KERNEL_FEAT_COINBASE,
+    KERNEL_FEAT_PLAIN,
 };
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
 use dom_pow::CompactTarget;
@@ -133,7 +133,7 @@ fn build_consistent_block(height: u64, include_tx: bool) -> Block {
         compute_block_pmmr_roots(BlockHeight(height), &coinbase, &txs).expect("compute roots");
 
     let header = BlockHeader {
-        version: PROTOCOL_VERSION,
+        version: BLOCK_VERSION_LEGACY,
         height: BlockHeight(height),
         prev_hash: Hash256::ZERO,
         timestamp: Timestamp(1_704_067_200 + height),

@@ -194,8 +194,8 @@ mod tests {
         CoinbaseKernel, TransactionInput, TransactionKernel, TransactionOutput,
     };
     use dom_core::{
-        Amount, BlockHeight, Hash256, Timestamp, INITIAL_BLOCK_REWARD, KERNEL_FEAT_COINBASE,
-        KERNEL_FEAT_PLAIN, PROTOCOL_VERSION, WEIGHT_COINBASE_KERNEL, WEIGHT_OUTPUT,
+        Amount, BlockHeight, Hash256, Timestamp, BLOCK_VERSION_LEGACY, INITIAL_BLOCK_REWARD,
+        KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN, WEIGHT_COINBASE_KERNEL, WEIGHT_OUTPUT,
     };
     use dom_crypto::hash::blake2b_256_tagged;
     use dom_crypto::keys::SecretKey;
@@ -225,7 +225,7 @@ mod tests {
 
     fn dummy_header() -> BlockHeader {
         BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: BLOCK_VERSION_LEGACY,
             height: BlockHeight::GENESIS,
             prev_hash: Hash256::ZERO,
             timestamp: Timestamp(1_704_067_200),
@@ -428,7 +428,7 @@ mod tests {
         let total_kernel_offset = aggregate_tx_offsets(&transactions);
         Block {
             header: BlockHeader {
-                version: PROTOCOL_VERSION,
+                version: BLOCK_VERSION_LEGACY,
                 height: BlockHeight(1),
                 prev_hash: Hash256::from_bytes([0x55; 32]),
                 timestamp: Timestamp(1_704_067_260),
@@ -735,7 +735,7 @@ mod tests {
             compute_block_pmmr_roots(BlockHeight(1), &coinbase, &[]).expect("pmmr roots");
         let block = Block {
             header: BlockHeader {
-                version: PROTOCOL_VERSION,
+                version: BLOCK_VERSION_LEGACY,
                 height: BlockHeight(1),
                 prev_hash: Hash256::from_bytes([0x55; 32]),
                 timestamp: Timestamp(1_704_067_260),
@@ -971,7 +971,7 @@ mod tests {
         let _ = proof; // used via cb_proof
         let block = Block {
             header: BlockHeader {
-                version: dom_core::PROTOCOL_VERSION,
+                version: dom_core::BLOCK_VERSION_LEGACY,
                 height: BlockHeight(1),
                 prev_hash: Hash256::from_bytes([0x55; 32]),
                 timestamp: Timestamp(1_704_067_260),
@@ -1023,7 +1023,7 @@ mod tests {
                 .expect("pmmr roots");
         let block = Block {
             header: BlockHeader {
-                version: PROTOCOL_VERSION,
+                version: BLOCK_VERSION_LEGACY,
                 height: BlockHeight(1),
                 prev_hash: Hash256::from_bytes([0x55; 32]),
                 timestamp: Timestamp(1_704_067_260),

@@ -8,8 +8,8 @@ use dom_consensus::{
     TransactionOutput,
 };
 use dom_core::{
-    BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE, NETWORK_MAGIC_REGTEST,
-    PROTOCOL_VERSION, TAG_KERNEL_MSG_COINBASE,
+    BlockHeight, DomError, Hash256, Timestamp, BLOCK_VERSION_LEGACY, KERNEL_FEAT_COINBASE,
+    NETWORK_MAGIC_REGTEST, TAG_KERNEL_MSG_COINBASE,
 };
 use dom_crypto::{
     hash::{blake2b_256, blake2b_256_tagged},
@@ -77,7 +77,7 @@ fn mine_fast_header(
     let mut nonce = 0u64;
     loop {
         let mut header = BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: BLOCK_VERSION_LEGACY,
             height: BlockHeight::GENESIS,
             prev_hash: Hash256::ZERO,
             timestamp,

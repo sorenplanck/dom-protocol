@@ -31,7 +31,7 @@ use dom_consensus::transaction::{
     Transaction, TransactionInput, TransactionKernel, TransactionOutput,
 };
 use dom_core::{
-    Amount, Hash256, KERNEL_FEAT_PLAIN, MIN_RELAY_FEE_RATE, PROTOCOL_VERSION, TAG_KERNEL_MSG,
+    Amount, Hash256, BLOCK_VERSION_LEGACY, KERNEL_FEAT_PLAIN, MIN_RELAY_FEE_RATE, TAG_KERNEL_MSG,
 };
 use dom_crypto::hash::blake2b_256_tagged;
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
@@ -70,7 +70,7 @@ async fn connect_adversarial_peer(node: &Arc<DomNode>) -> (tokio::net::TcpStream
     let mut codec = NoiseCodec::new(transport, config.network.magic());
 
     let hello = HelloPayload {
-        version: PROTOCOL_VERSION,
+        version: BLOCK_VERSION_LEGACY,
         network_magic: config.network.magic(),
         chain_id,
         best_height: 0,
@@ -80,6 +80,9 @@ async fn connect_adversarial_peer(node: &Arc<DomNode>) -> (tokio::net::TcpStream
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
+        // Test harness peers are dial-in only; 0 = declared unreachable,
+        // which also keeps them out of any PEX pool they touch (spec A2).
+        advertised_port: 0,
     };
     let wire = WireMessage {
         magic: config.network.magic(),

@@ -529,12 +529,12 @@ mod tests {
         rangeproof_root: dom_core::Hash256,
     ) -> Block {
         use crate::block::ProofOfWork;
-        use dom_core::{Hash256, PROTOCOL_VERSION};
+        use dom_core::{Hash256, BLOCK_VERSION_LEGACY};
         use dom_pow::CompactTarget;
         use primitive_types::U256;
         Block {
             header: BlockHeader {
-                version: PROTOCOL_VERSION,
+                version: BLOCK_VERSION_LEGACY,
                 height: BlockHeight(1),
                 prev_hash: Hash256::ZERO,
                 timestamp: Timestamp(1_704_067_200),

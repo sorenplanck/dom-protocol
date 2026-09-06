@@ -105,7 +105,7 @@ fn v1_refuses_mixed_clocks_but_v2_binds_exact_authenticated_intervals() {
     }
     assert_eq!(
         hex::encode(binding.binding_digest()),
-        "d764c30462a6ee54364e1e0297fdd48c5e463ec81c16d098d6257da1593e1813"
+        "884227b8f9da73d4b28d349070c96160be7e016247c40964bba376671cd09c84"
     );
 
     // FinalClaim roles are explicit and source scopes carry their exact claim

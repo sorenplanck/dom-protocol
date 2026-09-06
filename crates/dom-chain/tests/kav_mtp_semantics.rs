@@ -21,13 +21,15 @@
 //! or boundary KAV).
 
 use dom_consensus::block::{validate_median_time_past, BlockHeader, ProofOfWork};
-use dom_core::{BlockHeight, DomError, Hash256, Timestamp, MEDIAN_TIME_WINDOW, PROTOCOL_VERSION};
+use dom_core::{
+    BlockHeight, DomError, Hash256, Timestamp, BLOCK_VERSION_LEGACY, MEDIAN_TIME_WINDOW,
+};
 use dom_pow::CompactTarget;
 use primitive_types::U256;
 
 fn header_at(ts: u64) -> BlockHeader {
     BlockHeader {
-        version: PROTOCOL_VERSION,
+        version: BLOCK_VERSION_LEGACY,
         height: BlockHeight(100),
         prev_hash: Hash256::ZERO,
         timestamp: Timestamp(ts),
