@@ -98,6 +98,7 @@ fn prepare_owner_only_empty_wallet_directory(path: &std::path::Path) -> anyhow::
     if path.exists() || std::fs::symlink_metadata(path).is_ok() {
         validate_owner_only_directory(path, "wallet directory")?;
     } else {
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         {
@@ -193,8 +194,10 @@ fn parse_arguments(arguments: impl IntoIterator<Item = OsString>) -> anyhow::Res
 
 #[cfg(test)]
 mod tests {
+    use super::parse_arguments;
+    #[cfg(unix)]
     use super::{
-        parse_arguments, prepare_owner_only_empty_wallet_directory, validate_owner_only_directory,
+        prepare_owner_only_empty_wallet_directory, validate_owner_only_directory,
         write_new_owner_only_phrase,
     };
     use std::ffi::OsString;
