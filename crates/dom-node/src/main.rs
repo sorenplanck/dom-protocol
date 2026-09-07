@@ -275,10 +275,10 @@ fn print_help() {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        configure_standalone_rpc, load_rpc_bearer_token_file, load_wallet_password_file,
-        parse_startup_action, StartupAction,
-    };
+    #[cfg(unix)]
+    use super::{configure_standalone_rpc, load_rpc_bearer_token_file, load_wallet_password_file};
+    use super::{parse_startup_action, StartupAction};
+    #[cfg(unix)]
     use dom_config::NodeConfig;
 
     #[test]

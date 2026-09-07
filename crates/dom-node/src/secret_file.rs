@@ -94,6 +94,7 @@ fn validate_owner_only_permissions(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::load_owner_only_utf8_secret_file;
 
     #[cfg(unix)]
