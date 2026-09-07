@@ -30,6 +30,7 @@ impl dom_rpc::NodeHandle for SubmitFixture {
         Ok(dom_rpc::TxAdmission {
             tx_hash: *dom_crypto::blake2b_256(&bytes).as_bytes(),
             relayed: self.relayed,
+            state: dom_rpc::TxAdmissionState::New,
         })
     }
     fn network(&self) -> &'static str {
