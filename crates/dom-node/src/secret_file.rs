@@ -79,8 +79,8 @@ pub fn load_owner_only_utf8_secret_file(
 }
 
 fn validate_owner_only_permissions(
-    metadata: &std::fs::Metadata,
-    description: &'static str,
+    #[cfg_attr(not(unix), allow(unused_variables))] metadata: &std::fs::Metadata,
+    #[cfg_attr(not(unix), allow(unused_variables))] description: &'static str,
 ) -> anyhow::Result<()> {
     #[cfg(unix)]
     {

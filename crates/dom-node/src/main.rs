@@ -32,35 +32,6 @@ fn load_wallet_password_file(path: &Path) -> anyhow::Result<String> {
     Ok(password)
 }
 
-fn configure_standalone_rpc(
-    config: &mut NodeConfig,
-    requested: &str,
-    token_file: Option<&OsStr>,
-) -> anyhow::Result<()> {
-    let addr = if requested == "default" {
-        config.network.default_rpc_listen_addr()
-    } else {
-        requested.to_owned()
-    };
-    let socket: SocketAddr = addr
-        .parse()
-        .map_err(|error| anyhow::anyhow!("invalid DOM_RPC_LISTEN_ADDR {addr:?}: {error}"))?;
-    if !socket.ip().is_loopback() {
-        anyhow::bail!("standalone RPC must bind to a loopback address");
-    }
-    let token_file = token_file
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "DOM_RPC_BEARER_TOKEN_FILE is required when DOM_RPC_LISTEN_ADDR enables RPC"
-            )
-        })?;
-    let token = load_rpc_bearer_token_file(Path::new(token_file))?;
-    config.rpc_listen_addr = Some(addr);
-    config.rpc_bearer_token = Some(token);
-    Ok(())
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StartupAction {
     Run,
@@ -85,13 +56,6 @@ where
         "--help" | "-h" => Ok(StartupAction::Help),
         _ => anyhow::bail!("unknown argument {argument:?}; use --help"),
     }
-}
-
-fn print_help() {
-    println!(
-        "DOM node {}\n\nUsage:\n  DOM_NETWORK=<mainnet|testnet|regtest> dom-node\n\nThe network must be selected explicitly before the node initializes storage, listeners, mining, or peer discovery. Standalone RPC additionally requires a loopback DOM_RPC_LISTEN_ADDR and an owner-only DOM_RPC_BEARER_TOKEN_FILE. An existing WalletDir should be opened with DOM_WALLET_PATH plus owner-only DOM_WALLET_PASSWORD_FILE.\n\nOptions:\n  -h, --help       Print help\n  -V, --version    Print version",
-        env!("CARGO_PKG_VERSION")
-    );
 }
 
 #[tokio::main]
@@ -484,4 +448,40 @@ mod tests {
         shutdown_tx.send(()).expect("request auth probe shutdown");
         server.await.expect("join auth probe server").unwrap();
     }
+}
+
+fn configure_standalone_rpc(
+    config: &mut NodeConfig,
+    requested: &str,
+    token_file: Option<&OsStr>,
+) -> anyhow::Result<()> {
+    let addr = if requested == "default" {
+        config.network.default_rpc_listen_addr()
+    } else {
+        requested.to_owned()
+    };
+    let socket: SocketAddr = addr
+        .parse()
+        .map_err(|error| anyhow::anyhow!("invalid DOM_RPC_LISTEN_ADDR {addr:?}: {error}"))?;
+    if !socket.ip().is_loopback() {
+        anyhow::bail!("standalone RPC must bind to a loopback address");
+    }
+    let token_file = token_file
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "DOM_RPC_BEARER_TOKEN_FILE is required when DOM_RPC_LISTEN_ADDR enables RPC"
+            )
+        })?;
+    let token = load_rpc_bearer_token_file(Path::new(token_file))?;
+    config.rpc_listen_addr = Some(addr);
+    config.rpc_bearer_token = Some(token);
+    Ok(())
+}
+
+fn print_help() {
+    println!(
+        "DOM node {}\n\nUsage:\n  DOM_NETWORK=<mainnet|testnet|regtest> dom-node\n\nThe network must be selected explicitly before the node initializes storage, listeners, mining, or peer discovery. Standalone RPC additionally requires a loopback DOM_RPC_LISTEN_ADDR and an owner-only DOM_RPC_BEARER_TOKEN_FILE. An existing WalletDir should be opened with DOM_WALLET_PATH plus owner-only DOM_WALLET_PASSWORD_FILE.\n\nOptions:\n  -h, --help       Print help\n  -V, --version    Print version",
+        env!("CARGO_PKG_VERSION")
+    );
 }
