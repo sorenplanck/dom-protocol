@@ -1495,7 +1495,7 @@ impl Wallet {
             .into_iter()
             .map(|output| dom_slate::SlateInput {
                 commitment: output.commitment,
-                blinding: *output.blinding,
+                blinding: output.blinding,
             })
             .collect();
 
@@ -1527,7 +1527,7 @@ impl Wallet {
         let pending_change = built.change.as_ref().map(|change| PendingChange {
             commitment: change.commitment,
             value: change.value,
-            blinding: change.blinding,
+            blinding: *change.blinding,
         });
         let sender_excess_blinding = built.excess_blinding;
         let sender_nonce = built.nonce;
@@ -1596,8 +1596,8 @@ impl Wallet {
                     response_envelope_bytes: Vec::new(),
                 }),
                 send_slate_secrets: Some(PendingSendSlateSecrets {
-                    sender_excess_blinding,
-                    sender_nonce,
+                    sender_excess_blinding: *sender_excess_blinding,
+                    sender_nonce: *sender_nonce,
                 }),
                 receive_slate: None,
                 receive_slate_secrets: None,
