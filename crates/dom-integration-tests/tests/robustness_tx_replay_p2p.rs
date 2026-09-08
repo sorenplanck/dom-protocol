@@ -31,8 +31,7 @@ use dom_consensus::transaction::{
     Transaction, TransactionInput, TransactionKernel, TransactionOutput,
 };
 use dom_core::{
-    Amount, Hash256, BLOCK_VERSION_LEGACY, KERNEL_FEAT_PLAIN, MIN_RELAY_FEE_RATE, TAG_KERNEL_MSG,
-    WIRE_PROTOCOL_VERSION,
+    Amount, Hash256, KERNEL_FEAT_PLAIN, MIN_RELAY_FEE_RATE, TAG_KERNEL_MSG, WIRE_PROTOCOL_VERSION,
 };
 use dom_crypto::hash::blake2b_256_tagged;
 use dom_crypto::pedersen::{BlindingFactor, Commitment};

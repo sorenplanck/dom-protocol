@@ -12,7 +12,7 @@
 
 use dom_config::Network;
 use dom_consensus::derive_chain_id;
-use dom_core::{Hash256, BLOCK_VERSION_LEGACY, WIRE_PROTOCOL_VERSION};
+use dom_core::{Hash256, WIRE_PROTOCOL_VERSION};
 use dom_integration_tests::helpers::*;
 use dom_node::node::DomNode;
 use dom_node::pex::MAX_ADDR_MESSAGES_PER_WINDOW;
