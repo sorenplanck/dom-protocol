@@ -216,7 +216,7 @@ impl HelloPayload {
 
     /// Serialize in this payload's own declared version's shape.
     pub fn to_bytes(&self) -> Result<Vec<u8>, DomError> {
-        return self.to_bytes_for_wire_version(self.version);
+        self.to_bytes_for_wire_version(self.version)
     }
 
     /// Deserialize.
