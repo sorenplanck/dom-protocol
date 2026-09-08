@@ -11,6 +11,7 @@ use axum::{
     Json, Router,
 };
 use dom_core::WIRE_PROTOCOL_VERSION;
+use dom_wallet_core_api::{ChainIdentity as CoreChainIdentity, ScanBlock};
 use serde::{Deserialize, Serialize};
 use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc};
 use tracing::{error, info, warn};
@@ -74,6 +75,42 @@ pub trait NodeHandle: Send + Sync + 'static {
         Err(RpcError::Internal("wallet not available".into()))
     }
 
+    /// Create and durably retain a public Wallet V3 recovery Slate offer.
+    fn wallet_slate_create_v1(
+        &self,
+        _request: WalletSlateCreateRequestV1,
+    ) -> Result<WalletSlateOfferV1, RpcError> {
+        Err(RpcError::Internal("wallet Slate API not available".into()))
+    }
+
+    /// Finalize and persist an exact Wallet V3 Slate response without
+    /// admission or relay, leaving room for recipient third-message checking.
+    fn wallet_slate_finalize_v1(
+        &self,
+        _request: WalletSlateFinalizeRequestV1,
+    ) -> Result<WalletSlateFinalizedV1, RpcError> {
+        Err(RpcError::Internal("wallet Slate API not available".into()))
+    }
+
+    /// Admit and relay only an exact transaction previously finalized and
+    /// persisted by this WalletDir, after the recipient's third-message check.
+    fn wallet_slate_submit_v1(
+        &self,
+        _request: WalletSlateSubmitRequestV1,
+    ) -> Result<WalletSlateSubmittedV1, RpcError> {
+        Err(RpcError::Internal("wallet Slate API not available".into()))
+    }
+
+    /// Mine an exact bounded number of real blocks on an explicitly
+    /// configured regtest node whose continuous miner is disabled.
+    fn regtest_mine_v1(&self, _request: RegtestMineRequestV1) -> RegtestMineFuture {
+        Box::pin(async {
+            Err(RpcError::Internal(
+                "regtest mining API not available".into(),
+            ))
+        })
+    }
+
     /// Per-block chain scan for the heights `from..=to` (clamped — see
     /// [`MAX_SCAN_RANGE`]), plus the current tip. Read-only projection of the
     /// canonical chain the node already has on disk; serves the v2 wallet's
@@ -85,6 +122,18 @@ pub trait NodeHandle: Send + Sync + 'static {
     /// [`RpcError::Overloaded`] immediately. Mining always has priority.
     fn scan_chain(&self, _from: u64, _to: u64) -> Result<ChainScan, RpcError> {
         Err(RpcError::Internal("chain scan not supported".into()))
+    }
+
+    /// Serve one authenticated, full-fidelity F7 scanner page.
+    ///
+    /// Implementations must validate the request's chain identity and anchor,
+    /// return a contiguous canonical prefix, and never wait for a contended
+    /// chain lock. The default is unsupported so existing test handles remain
+    /// source compatible.
+    fn scan_chain_full_v1(&self, _request: FullScanRequestV1) -> Result<ChainScanFullV1, RpcError> {
+        Err(RpcError::Internal(
+            "full-fidelity chain scan v1 not supported".into(),
+        ))
     }
 
     /// Request the node's existing coordinated shutdown path. The RPC handler
@@ -108,6 +157,10 @@ pub trait NodeHandle: Send + Sync + 'static {
 
 /// Type-erased asynchronous request to the node's shutdown coordinator.
 pub type ShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
+/// Type-erased bounded regtest mining request owned by the node runtime.
+pub type RegtestMineFuture =
+    Pin<Box<dyn Future<Output = Result<RegtestMineResultV1, RpcError>> + Send + 'static>>;
 
 /// Maximum number of heights a single [`NodeHandle::scan_chain`] / `/chain/scan`
 /// call returns. Bounds how long the chain lock is held so block connection is
@@ -158,7 +211,7 @@ pub struct ChainAncestry {
 }
 
 /// Canonical tip (height + hash) returned alongside a scan.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChainTip {
     /// Tip height.
     pub height: u64,
@@ -201,6 +254,105 @@ pub struct ChainScan {
     pub blocks: Vec<ScanBlockData>,
 }
 
+/// Version of the authenticated full-fidelity F7 scanner schema.
+pub const FULL_SCAN_SCHEMA_VERSION_V1: u16 = 1;
+
+/// Maximum block count in one full-fidelity page.
+pub const MAX_FULL_SCAN_BLOCKS_V1: u64 = 64;
+
+/// Approximate maximum encoded response size. Implementations always return at
+/// least one requested block when it exists, even when that block alone is
+/// larger than this soft budget.
+pub const FULL_SCAN_RESPONSE_SOFT_LIMIT_BYTES_V1: usize = 8 * 1024 * 1024;
+
+/// Canonical anchor immediately preceding a full scanner page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FullScanAnchorV1 {
+    /// Anchor height.
+    pub height: u64,
+    /// Canonical block identifier at `height`.
+    pub block_hash: [u8; 32],
+}
+
+/// Full-fidelity scanner request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FullScanRequestV1 {
+    /// Exact supported scanner schema version.
+    pub schema_version: u16,
+    /// Expected network magic.
+    pub network_magic: u32,
+    /// Expected consensus chain identifier.
+    pub chain_id: [u8; 32],
+    /// First canonical height to return.
+    pub start_height: u64,
+    /// Maximum number of blocks requested.
+    pub max_blocks: u64,
+    /// Canonical block at `start_height - 1`; forbidden at height zero and
+    /// mandatory for every nonzero start.
+    pub anchor: Option<FullScanAnchorV1>,
+}
+
+/// Restart-safe continuation returned after a nonterminal page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FullScanContinuationV1 {
+    /// Next height to request.
+    pub next_height: u64,
+    /// Last block returned, to be supplied as the next request's anchor.
+    pub anchor: FullScanAnchorV1,
+    /// Tip identifier under which this page was produced. A changed tip is not
+    /// itself an error; the next anchor validation decides canonicality.
+    pub snapshot_tip: ChainTip,
+}
+
+/// Authenticated full-fidelity scanner page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainScanFullV1 {
+    /// Scanner projection version.
+    pub schema_version: u16,
+    /// Chain identity and snapshot tip observed under the same chain lock.
+    pub identity: CoreChainIdentity,
+    /// Validated request anchor.
+    pub request_anchor: Option<FullScanAnchorV1>,
+    /// Contiguous canonical blocks.
+    pub blocks: Vec<ScanBlock>,
+    /// Continuation when the snapshot tip was not reached.
+    pub continuation: Option<FullScanContinuationV1>,
+}
+
+/// Conservative encoded-size estimate for one full-fidelity block.
+pub fn full_scan_block_wire_weight_v1(block: &ScanBlock) -> usize {
+    const BLOCK_ENVELOPE: usize = 1024;
+    const TX_ENVELOPE: usize = 768;
+    const INPUT_ENVELOPE: usize = 96;
+    const OUTPUT_ENVELOPE: usize = 256;
+    const KERNEL_ENVELOPE: usize = 384;
+
+    let coinbase = block
+        .coinbase
+        .output_proof_envelope
+        .len()
+        .saturating_mul(2)
+        .saturating_add(KERNEL_ENVELOPE);
+    block.transactions.iter().fold(
+        BLOCK_ENVELOPE
+            .saturating_add(block.canonical_header_bytes.len().saturating_mul(2))
+            .saturating_add(coinbase),
+        |total, tx| {
+            let outputs = tx.outputs.iter().fold(0usize, |sum, output| {
+                sum.saturating_add(OUTPUT_ENVELOPE)
+                    .saturating_add(output.range_proof.len().saturating_mul(2))
+                    .saturating_add(output.recovery_capsule.len().saturating_mul(2))
+            });
+            total
+                .saturating_add(TX_ENVELOPE)
+                .saturating_add(tx.canonical_bytes.len().saturating_mul(2))
+                .saturating_add(tx.inputs.len().saturating_mul(INPUT_ENVELOPE))
+                .saturating_add(tx.kernels.len().saturating_mul(KERNEL_ENVELOPE))
+                .saturating_add(outputs)
+        },
+    )
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpendRequest {
     /// Recipient commitment (hex-encoded 33 bytes).
@@ -211,6 +363,87 @@ pub struct SpendRequest {
     pub amount_noms: u64,
     /// Fee in noms.
     pub fee_noms: u64,
+}
+
+/// Public-only request for the authenticated Wallet V3 Slate sender boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletSlateCreateRequestV1 {
+    /// Optional canonical lowercase Wallet V3 recipient address. When absent,
+    /// the official Wallet V3 automatic one-time identity framing is used.
+    /// This is public material, never a recipient blinding factor.
+    #[serde(default)]
+    pub recipient_address: Option<String>,
+    /// Recipient amount in noms.
+    pub amount_noms: u64,
+    /// Exact kernel fee in noms.
+    pub fee_noms: u64,
+    /// Inclusive canonical expiry height.
+    pub expires_at_height: u64,
+}
+
+/// Exact public Wallet V3 sender offer retained by the node WalletDir.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalletSlateOfferV1 {
+    /// Canonical recovery Slate envelope bytes.
+    pub canonical_slate: Vec<u8>,
+    /// Public Slate identifier committed by the envelope.
+    pub slate_id: [u8; 32],
+    /// Public replay identifier committed by the envelope.
+    pub replay_id: [u8; 32],
+}
+
+/// Exact public Wallet V3 recipient response submitted for finalization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletSlateFinalizeRequestV1 {
+    /// Hex encoding of canonical recovery Slate envelope bytes.
+    pub canonical_response_hex: String,
+}
+
+/// Finalized, durably retained public transaction awaiting recipient checking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalletSlateFinalizedV1 {
+    /// Exact canonical DOM transaction bytes retained for restart replay.
+    pub canonical_transaction: Vec<u8>,
+    /// Exact hash of `canonical_transaction`.
+    pub transaction_hash: [u8; 32],
+    /// Opaque public hash naming the durable pending sender record.
+    pub pending_key: [u8; 32],
+}
+
+/// Submit authority for one exact, already-persisted Wallet V3 transaction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletSlateSubmitRequestV1 {
+    /// Hex encoding of the 32-byte pending sender-record key.
+    pub pending_key_hex: String,
+    /// Hex encoding of the expected exact canonical transaction hash.
+    pub expected_transaction_hash_hex: String,
+}
+
+/// Exact persisted Wallet V3 transaction and its node admission result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalletSlateSubmittedV1 {
+    /// Exact canonical bytes loaded from the WalletDir (never request bytes).
+    pub canonical_transaction: Vec<u8>,
+    /// Idempotent node admission outcome.
+    pub admission: TxAdmission,
+}
+
+/// Authenticated regtest-only bounded mining request.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct RegtestMineRequestV1 {
+    /// Exact number of new canonical blocks requested (1..=1000).
+    pub count: u32,
+}
+
+/// Exact canonical result of a bounded regtest mining request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegtestMineResultV1 {
+    /// Height of the first new block.
+    pub start_height: u64,
+    /// Height of the last new block.
+    pub end_height: u64,
+    /// Canonical hashes in ascending height order, exactly `count` entries.
+    pub block_hashes: Vec<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -247,8 +480,41 @@ pub struct KernelInfo {
 /// restart. The RPC surfaces this as a warning so the wallet can retransmit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TxAdmission {
+    /// Exact transaction identifier.
     pub tx_hash: [u8; 32],
+    /// Whether this call handed the exact bytes to a live peer relay.
     pub relayed: bool,
+    /// Idempotent lifecycle state observed by the node.
+    pub state: TxAdmissionState,
+}
+
+/// Idempotent transaction-submission lifecycle state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxAdmissionState {
+    /// Newly admitted to the local mempool by this call.
+    New,
+    /// Exact bytes were already present in the local mempool.
+    Mempool,
+    /// Exact bytes were already present in a canonical block.
+    Confirmed,
+}
+
+impl TxAdmissionState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Mempool => "mempool",
+            Self::Confirmed => "confirmed",
+        }
+    }
+
+    pub const fn already_known(self) -> bool {
+        !matches!(self, Self::New)
+    }
+
+    pub const fn confirmed(self) -> bool {
+        matches!(self, Self::Confirmed)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -272,6 +538,12 @@ pub enum RpcError {
     InvalidHex(String),
     #[error("invalid transaction: {0}")]
     InvalidTx(String),
+    #[error("invalid scan request: {0}")]
+    InvalidScan(String),
+    #[error("scanner anchor is no longer canonical: {0}")]
+    ScanReorg(String),
+    #[error("canonical chain gap: {0}")]
+    CanonicalGap(String),
     #[error("rejected: {0}")]
     Rejected(String),
     #[error("overloaded: {0}")]
@@ -283,10 +555,12 @@ pub enum RpcError {
 impl RpcError {
     fn status_code(&self) -> StatusCode {
         match self {
-            Self::InvalidHex(_) | Self::InvalidTx(_) => StatusCode::BAD_REQUEST,
-            Self::Rejected(_) => StatusCode::CONFLICT,
+            Self::InvalidHex(_) | Self::InvalidTx(_) | Self::InvalidScan(_) => {
+                StatusCode::BAD_REQUEST
+            }
+            Self::Rejected(_) | Self::ScanReorg(_) => StatusCode::CONFLICT,
             Self::Overloaded(_) => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::CanonicalGap(_) | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
@@ -360,6 +634,13 @@ struct SubmitTxResponse {
     relayed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     tx_hash: Option<String>,
+    /// Idempotent lifecycle state for an accepted submission.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<&'static str>,
+    /// Whether the exact bytes were known before this call.
+    already_known: bool,
+    /// Whether the exact bytes are already in a canonical block.
+    confirmed: bool,
     /// Non-fatal advisory (e.g. accepted but not relayed: no peers connected).
     #[serde(skip_serializing_if = "Option::is_none")]
     warning: Option<String>,
@@ -488,6 +769,10 @@ pub fn router(handle: Arc<dyn NodeHandle>, bearer_token: Arc<BearerToken>) -> Ro
     let rate_limit_auth_read = middleware::rate_limit_read();
     let rate_limit_submit = middleware::rate_limit_submit();
     let rate_limit_wallet_spend = middleware::rate_limit_submit();
+    let rate_limit_wallet_slate_create = middleware::rate_limit_submit();
+    let rate_limit_wallet_slate_finalize = middleware::rate_limit_submit();
+    let rate_limit_wallet_slate_submit = middleware::rate_limit_submit();
+    let rate_limit_regtest_mine = middleware::rate_limit_submit();
 
     let public_routes = Router::new()
         .route("/status", get(status))
@@ -519,6 +804,7 @@ pub fn router(handle: Arc<dyn NodeHandle>, bearer_token: Arc<BearerToken>) -> Ro
         .route("/tx/:tx_hash", get(get_tx))
         .route("/wallet/balance", get(wallet_balance_handler))
         .route("/chain/scan", get(chain_scan_handler))
+        .route("/chain/scan/scriptless/v1", get(chain_scan_full_v1_handler))
         .route("/build-info", get(build_info_handler))
         .route("/shutdown", post(shutdown_handler))
         .layer(rate_limit_auth_read);
@@ -529,6 +815,22 @@ pub fn router(handle: Arc<dyn NodeHandle>, bearer_token: Arc<BearerToken>) -> Ro
         .route(
             "/wallet/spend",
             post(wallet_spend_handler).layer(rate_limit_wallet_spend),
+        )
+        .route(
+            "/wallet/slate/v1/create",
+            post(wallet_slate_create_v1_handler).layer(rate_limit_wallet_slate_create),
+        )
+        .route(
+            "/wallet/slate/v1/finalize",
+            post(wallet_slate_finalize_v1_handler).layer(rate_limit_wallet_slate_finalize),
+        )
+        .route(
+            "/wallet/slate/v1/submit",
+            post(wallet_slate_submit_v1_handler).layer(rate_limit_wallet_slate_submit),
+        )
+        .route(
+            "/regtest/mine/v1",
+            post(regtest_mine_v1_handler).layer(rate_limit_regtest_mine),
         )
         .route_layer(axum::middleware::from_fn_with_state(
             bearer_token,
@@ -739,7 +1041,7 @@ async fn submit_tx(
     };
     match handle.submit_tx(tx_bytes) {
         Ok(admission) => {
-            let warning = if admission.relayed {
+            let warning = if admission.state == TxAdmissionState::Confirmed || admission.relayed {
                 None
             } else {
                 info!(
@@ -754,6 +1056,9 @@ async fn submit_tx(
                     accepted: true,
                     relayed: admission.relayed,
                     tx_hash: Some(hex::encode(admission.tx_hash)),
+                    state: Some(admission.state.as_str()),
+                    already_known: admission.state.already_known(),
+                    confirmed: admission.state.confirmed(),
                     warning,
                     error: None,
                 }),
@@ -935,6 +1240,9 @@ fn submit_error(err: RpcError) -> (StatusCode, Json<SubmitTxResponse>) {
             accepted: false,
             relayed: false,
             tx_hash: None,
+            state: None,
+            already_known: false,
+            confirmed: false,
             warning: None,
             error: Some(err.to_string()),
         }),
@@ -1029,6 +1337,306 @@ struct ChainScanResponse {
     from: u64,
     to: u64,
     blocks: Vec<ScanBlockDto>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FullScanQueryV1 {
+    from: u64,
+    to: u64,
+    expected_network_magic: Option<u32>,
+    expected_chain_id: Option<String>,
+    anchor_hash: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct FullScanIdentityDtoV1 {
+    network: &'static str,
+    network_magic: u32,
+    chain_id: String,
+    genesis_hash: String,
+    protocol_version: u32,
+    range_proof_serialization_version: u8,
+    coinbase_maturity: u64,
+    tip_height: u64,
+    tip_hash: String,
+}
+
+#[derive(Debug, Serialize)]
+struct FullScanAnchorDtoV1 {
+    height: u64,
+    block_hash: String,
+}
+
+#[derive(Debug, Serialize)]
+struct FullScanInputDtoV1 {
+    spent_commitment: String,
+}
+
+#[derive(Debug, Serialize)]
+struct FullScanOutputDtoV1 {
+    commitment: String,
+    range_proof: String,
+    recovery_capsule: String,
+    recovery_version: u16,
+    is_coinbase: bool,
+    block_height: u64,
+    block_hash: String,
+    output_position: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct FullScanKernelDtoV1 {
+    excess: String,
+    features: u8,
+    fee: u64,
+    lock_height: u64,
+    excess_signature: String,
+}
+
+#[derive(Debug, Serialize)]
+struct FullScanTransactionDtoV1 {
+    block_height: u64,
+    block_hash: String,
+    transaction_index: u32,
+    tx_hash: String,
+    canonical_bytes: String,
+    inputs: Vec<FullScanInputDtoV1>,
+    outputs: Vec<FullScanOutputDtoV1>,
+    kernels: Vec<FullScanKernelDtoV1>,
+    offset: String,
+}
+
+#[derive(Debug, Serialize)]
+struct FullScanCoinbaseDtoV1 {
+    output_commitment: String,
+    explicit_value: u64,
+    kernel_excess: String,
+    kernel_features: u8,
+    kernel_excess_signature: String,
+    offset: String,
+    output_proof_envelope: String,
+}
+
+#[derive(Debug, Serialize)]
+struct FullScanBlockDtoV1 {
+    height: u64,
+    block_hash: String,
+    previous_block_hash: String,
+    canonical_header_bytes: String,
+    timestamp: u64,
+    canonical_marker: String,
+    transactions: Vec<FullScanTransactionDtoV1>,
+    coinbase: FullScanCoinbaseDtoV1,
+    total_fees_noms: u64,
+    protocol_version: u32,
+    range_proof_serialization_version: u8,
+}
+
+#[derive(Debug, Serialize)]
+struct FullScanContinuationDtoV1 {
+    next_height: u64,
+    anchor: FullScanAnchorDtoV1,
+    snapshot_tip_height: u64,
+    snapshot_tip_hash: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ChainScanFullResponseV1 {
+    schema_version: u16,
+    status: &'static str,
+    canonical: bool,
+    identity: FullScanIdentityDtoV1,
+    requested_from: u64,
+    requested_to: u64,
+    served_from: u64,
+    served_to: Option<u64>,
+    request_anchor: Option<FullScanAnchorDtoV1>,
+    blocks: Vec<FullScanBlockDtoV1>,
+    continuation: Option<FullScanContinuationDtoV1>,
+}
+
+fn full_scan_anchor_dto_v1(anchor: FullScanAnchorV1) -> FullScanAnchorDtoV1 {
+    FullScanAnchorDtoV1 {
+        height: anchor.height,
+        block_hash: hex::encode(anchor.block_hash),
+    }
+}
+
+fn full_scan_input_dto_v1(input: dom_wallet_core_api::ScanInput) -> FullScanInputDtoV1 {
+    FullScanInputDtoV1 {
+        spent_commitment: hex::encode(input.spent_commitment),
+    }
+}
+
+fn full_scan_output_dto_v1(output: dom_wallet_core_api::ScanOutput) -> FullScanOutputDtoV1 {
+    FullScanOutputDtoV1 {
+        commitment: hex::encode(output.commitment),
+        range_proof: hex::encode(output.range_proof),
+        recovery_capsule: hex::encode(output.recovery_capsule),
+        recovery_version: output.recovery_version,
+        is_coinbase: output.is_coinbase,
+        block_height: output.block_height,
+        block_hash: hex::encode(output.block_hash),
+        output_position: output.output_position,
+    }
+}
+
+fn full_scan_kernel_dto_v1(kernel: dom_wallet_core_api::ScanKernel) -> FullScanKernelDtoV1 {
+    FullScanKernelDtoV1 {
+        excess: hex::encode(kernel.excess),
+        features: kernel.features,
+        fee: kernel.fee,
+        lock_height: kernel.lock_height,
+        excess_signature: hex::encode(kernel.excess_signature),
+    }
+}
+
+fn full_scan_transaction_dto_v1(
+    tx: dom_wallet_core_api::ScanTransaction,
+) -> FullScanTransactionDtoV1 {
+    FullScanTransactionDtoV1 {
+        block_height: tx.location.block_height,
+        block_hash: hex::encode(tx.location.block_hash),
+        transaction_index: tx.location.transaction_index,
+        tx_hash: hex::encode(tx.tx_hash),
+        canonical_bytes: hex::encode(tx.canonical_bytes),
+        inputs: tx.inputs.into_iter().map(full_scan_input_dto_v1).collect(),
+        outputs: tx
+            .outputs
+            .into_iter()
+            .map(full_scan_output_dto_v1)
+            .collect(),
+        kernels: tx
+            .kernels
+            .into_iter()
+            .map(full_scan_kernel_dto_v1)
+            .collect(),
+        offset: hex::encode(tx.offset),
+    }
+}
+
+fn full_scan_block_dto_v1(block: ScanBlock) -> FullScanBlockDtoV1 {
+    FullScanBlockDtoV1 {
+        height: block.height,
+        block_hash: hex::encode(block.block_hash),
+        previous_block_hash: hex::encode(block.previous_block_hash),
+        canonical_header_bytes: hex::encode(block.canonical_header_bytes),
+        timestamp: block.timestamp,
+        canonical_marker: hex::encode(block.canonical_marker),
+        transactions: block
+            .transactions
+            .into_iter()
+            .map(full_scan_transaction_dto_v1)
+            .collect(),
+        coinbase: FullScanCoinbaseDtoV1 {
+            output_commitment: hex::encode(block.coinbase.output_commitment),
+            explicit_value: block.coinbase.explicit_value,
+            kernel_excess: hex::encode(block.coinbase.kernel_excess),
+            kernel_features: block.coinbase.kernel_features,
+            kernel_excess_signature: hex::encode(block.coinbase.kernel_excess_signature),
+            offset: hex::encode(block.coinbase.offset),
+            output_proof_envelope: hex::encode(block.coinbase.output_proof_envelope),
+        },
+        total_fees_noms: block.total_fees_noms,
+        protocol_version: block.protocol_version,
+        range_proof_serialization_version: block.range_proof_serialization_version,
+    }
+}
+
+async fn chain_scan_full_v1_handler(
+    State(handle): State<Arc<dyn NodeHandle>>,
+    Query(query): Query<FullScanQueryV1>,
+) -> impl IntoResponse {
+    let request = (|| {
+        if query.from > query.to {
+            return Err(RpcError::InvalidScan("from must not exceed to".to_string()));
+        }
+        let requested_blocks = query
+            .to
+            .checked_sub(query.from)
+            .and_then(|span| span.checked_add(1))
+            .ok_or_else(|| RpcError::InvalidScan("scan range overflows".to_string()))?;
+        if requested_blocks > MAX_FULL_SCAN_BLOCKS_V1 {
+            return Err(RpcError::InvalidScan(format!(
+                "requested range contains {requested_blocks} blocks; maximum is {MAX_FULL_SCAN_BLOCKS_V1}"
+            )));
+        }
+        let chain_id = query
+            .expected_chain_id
+            .as_deref()
+            .map(parse_hash_hex)
+            .transpose()?;
+        let anchor = match (query.from, query.anchor_hash.as_deref()) {
+            (0, None) => None,
+            (0, Some(_)) => {
+                return Err(RpcError::InvalidScan(
+                    "anchor_hash is forbidden when from is zero".to_string(),
+                ));
+            }
+            (from, Some(hash)) => Some(FullScanAnchorV1 {
+                height: from - 1,
+                block_hash: parse_hash_hex(hash)?,
+            }),
+            (_, None) => {
+                return Err(RpcError::InvalidScan(
+                    "anchor_hash is required when from is nonzero".to_string(),
+                ));
+            }
+        };
+        Ok(FullScanRequestV1 {
+            schema_version: FULL_SCAN_SCHEMA_VERSION_V1,
+            network_magic: query.expected_network_magic.unwrap_or(0),
+            chain_id: chain_id.unwrap_or([0u8; 32]),
+            start_height: query.from,
+            max_blocks: requested_blocks,
+            anchor,
+        })
+    })();
+    let request = match request {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    match handle.scan_chain_full_v1(request) {
+        Ok(scan) => {
+            let identity = FullScanIdentityDtoV1 {
+                network: scan.identity.network.as_str(),
+                network_magic: scan.identity.network_magic,
+                chain_id: hex::encode(scan.identity.chain_id),
+                genesis_hash: hex::encode(scan.identity.genesis_hash),
+                protocol_version: scan.identity.protocol_version,
+                range_proof_serialization_version: scan.identity.range_proof_serialization_version,
+                coinbase_maturity: scan.identity.coinbase_maturity,
+                tip_height: scan.identity.current_tip.height,
+                tip_hash: hex::encode(scan.identity.current_tip.hash),
+            };
+            Json(ChainScanFullResponseV1 {
+                schema_version: scan.schema_version,
+                status: "ok",
+                canonical: true,
+                identity,
+                requested_from: query.from,
+                requested_to: query.to,
+                served_from: query.from,
+                served_to: scan.blocks.last().map(|block| block.height),
+                request_anchor: scan.request_anchor.map(full_scan_anchor_dto_v1),
+                blocks: scan
+                    .blocks
+                    .into_iter()
+                    .map(full_scan_block_dto_v1)
+                    .collect(),
+                continuation: scan
+                    .continuation
+                    .map(|continuation| FullScanContinuationDtoV1 {
+                        next_height: continuation.next_height,
+                        anchor: full_scan_anchor_dto_v1(continuation.anchor),
+                        snapshot_tip_height: continuation.snapshot_tip.height,
+                        snapshot_tip_hash: hex::encode(continuation.snapshot_tip.hash),
+                    }),
+            })
+            .into_response()
+        }
+        Err(error) => error.into_response(),
+    }
 }
 
 /// `GET /chain/scan?from&to` — per-block output/input commitments for a height
@@ -1140,6 +1748,98 @@ async fn wallet_spend_handler(
     }
 }
 
+async fn wallet_slate_create_v1_handler(
+    State(handle): State<Arc<dyn NodeHandle>>,
+    Json(request): Json<WalletSlateCreateRequestV1>,
+) -> impl IntoResponse {
+    match handle.wallet_slate_create_v1(request) {
+        Ok(offer) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "schema_version": 1,
+                "canonical_slate_hex": hex::encode(offer.canonical_slate),
+                "slate_id": hex::encode(offer.slate_id),
+                "replay_id": hex::encode(offer.replay_id),
+            })),
+        )
+            .into_response(),
+        Err(error) => {
+            warn!("wallet Slate create error: {error}");
+            error.into_response()
+        }
+    }
+}
+
+async fn wallet_slate_finalize_v1_handler(
+    State(handle): State<Arc<dyn NodeHandle>>,
+    Json(request): Json<WalletSlateFinalizeRequestV1>,
+) -> impl IntoResponse {
+    match handle.wallet_slate_finalize_v1(request) {
+        Ok(finalized) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "schema_version": 1,
+                "canonical_tx_hex": hex::encode(finalized.canonical_transaction),
+                "tx_hash": hex::encode(finalized.transaction_hash),
+                "pending_key": hex::encode(finalized.pending_key),
+            })),
+        )
+            .into_response(),
+        Err(error) => {
+            warn!("wallet Slate finalize error: {error}");
+            error.into_response()
+        }
+    }
+}
+
+async fn wallet_slate_submit_v1_handler(
+    State(handle): State<Arc<dyn NodeHandle>>,
+    Json(request): Json<WalletSlateSubmitRequestV1>,
+) -> impl IntoResponse {
+    match handle.wallet_slate_submit_v1(request) {
+        Ok(submitted) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "schema_version": 1,
+                "canonical_tx_hex": hex::encode(submitted.canonical_transaction),
+                "tx_hash": hex::encode(submitted.admission.tx_hash),
+                "relayed": submitted.admission.relayed,
+                "state": submitted.admission.state.as_str(),
+                "already_known": submitted.admission.state.already_known(),
+                "confirmed": submitted.admission.state.confirmed(),
+            })),
+        )
+            .into_response(),
+        Err(error) => {
+            warn!("wallet Slate submit error: {error}");
+            error.into_response()
+        }
+    }
+}
+
+async fn regtest_mine_v1_handler(
+    State(handle): State<Arc<dyn NodeHandle>>,
+    Json(request): Json<RegtestMineRequestV1>,
+) -> impl IntoResponse {
+    match handle.regtest_mine_v1(request).await {
+        Ok(result) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "schema_version": 1,
+                "start_height": result.start_height,
+                "end_height": result.end_height,
+                "count": result.block_hashes.len(),
+                "block_hashes": result.block_hashes.into_iter().map(hex::encode).collect::<Vec<_>>(),
+            })),
+        )
+            .into_response(),
+        Err(error) => {
+            warn!("regtest bounded mining error: {error}");
+            error.into_response()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1157,7 +1857,6 @@ mod tests {
     };
     use tower::ServiceExt;
 
-    #[derive(Default)]
     struct MockNode {
         height: u64,
         txs: Mutex<HashMap<[u8; 32], MempoolTxInfo>>,
@@ -1165,8 +1864,11 @@ mod tests {
         /// When true, submit_tx reports the tx as accepted-but-not-relayed
         /// (the no-peers case exercised by F3).
         no_peers: bool,
+        submit_state: TxAdmissionState,
         /// Canned chain scan for `/chain/scan` tests; `None` → unsupported.
         scan: Option<ChainScan>,
+        /// Canned full-fidelity scan for the authenticated Scriptless route.
+        full_scan: Option<ChainScanFullV1>,
         shutdown_requested: Arc<AtomicBool>,
         identity: Option<ChainIdentity>,
         ancestry: Option<ChainAncestry>,
@@ -1181,7 +1883,9 @@ mod tests {
                 txs: Mutex::new(HashMap::new()),
                 network: "regtest",
                 no_peers: false,
+                submit_state: TxAdmissionState::New,
                 scan: None,
+                full_scan: None,
                 shutdown_requested: Arc::new(AtomicBool::new(false)),
                 identity: None,
                 ancestry: None,
@@ -1212,11 +1916,27 @@ mod tests {
             }
         }
 
+        fn with_full_scan(scan: ChainScanFullV1) -> Self {
+            Self {
+                height: scan.identity.current_tip.height,
+                full_scan: Some(scan),
+                ..Self::new(0)
+            }
+        }
+
         /// A node that accepts txs but has no peers to relay to.
         fn no_peers(height: u64) -> Self {
             Self {
                 no_peers: true,
                 ..Self::new(height)
+            }
+        }
+
+        fn with_submit_state(state: TxAdmissionState) -> Self {
+            Self {
+                submit_state: state,
+                no_peers: true,
+                ..Self::new(0)
             }
         }
     }
@@ -1265,6 +1985,14 @@ mod tests {
                 .clone()
                 .ok_or_else(|| RpcError::Internal("chain ancestry not supported".into()))
         }
+        fn scan_chain_full_v1(
+            &self,
+            _request: FullScanRequestV1,
+        ) -> Result<ChainScanFullV1, RpcError> {
+            self.full_scan.clone().ok_or_else(|| {
+                RpcError::Internal("full-fidelity chain scan v1 not supported".into())
+            })
+        }
         fn mempool_size(&self) -> usize {
             self.txs.lock().unwrap().len()
         }
@@ -1296,7 +2024,8 @@ mod tests {
             );
             Ok(TxAdmission {
                 tx_hash: hash,
-                relayed: !self.no_peers,
+                relayed: !self.no_peers && self.submit_state != TxAdmissionState::Confirmed,
+                state: self.submit_state,
             })
         }
         fn get_block_header(&self, _: &[u8; 32]) -> Option<Vec<u8>> {
@@ -1315,6 +2044,57 @@ mod tests {
                 reserved_noms: 0,
                 confirmed_dom: 0.000_000_042,
                 immature_dom: 0.0,
+            })
+        }
+        fn wallet_slate_create_v1(
+            &self,
+            _request: WalletSlateCreateRequestV1,
+        ) -> Result<WalletSlateOfferV1, RpcError> {
+            Ok(WalletSlateOfferV1 {
+                canonical_slate: vec![0xa1, 0xb2],
+                slate_id: [0x11; 32],
+                replay_id: [0x22; 32],
+            })
+        }
+        fn wallet_slate_finalize_v1(
+            &self,
+            _request: WalletSlateFinalizeRequestV1,
+        ) -> Result<WalletSlateFinalizedV1, RpcError> {
+            Ok(WalletSlateFinalizedV1 {
+                canonical_transaction: vec![0xc3, 0xd4],
+                transaction_hash: [0x33; 32],
+                pending_key: [0x44; 32],
+            })
+        }
+        fn wallet_slate_submit_v1(
+            &self,
+            _request: WalletSlateSubmitRequestV1,
+        ) -> Result<WalletSlateSubmittedV1, RpcError> {
+            Ok(WalletSlateSubmittedV1 {
+                canonical_transaction: vec![0xc3, 0xd4],
+                admission: TxAdmission {
+                    tx_hash: [0x33; 32],
+                    relayed: false,
+                    state: TxAdmissionState::Mempool,
+                },
+            })
+        }
+        fn regtest_mine_v1(&self, request: RegtestMineRequestV1) -> RegtestMineFuture {
+            Box::pin(async move {
+                if request.count == 0 || request.count > 1000 {
+                    return Err(RpcError::Rejected("count out of bounds".to_string()));
+                }
+                Ok(RegtestMineResultV1 {
+                    start_height: 43,
+                    end_height: 42 + u64::from(request.count),
+                    block_hashes: (0..request.count)
+                        .map(|offset| {
+                            let mut hash = [0u8; 32];
+                            hash[..4].copy_from_slice(&(offset + 1).to_le_bytes());
+                            hash
+                        })
+                        .collect(),
+                })
             })
         }
     }
@@ -1990,6 +2770,9 @@ mod tests {
         let body = body_json(r).await;
         assert_eq!(body["accepted"], serde_json::json!(true));
         assert_eq!(body["relayed"], serde_json::json!(true));
+        assert_eq!(body["state"], serde_json::json!("new"));
+        assert_eq!(body["already_known"], serde_json::json!(false));
+        assert_eq!(body["confirmed"], serde_json::json!(false));
         assert!(body.get("warning").is_none());
     }
 
@@ -2012,10 +2795,42 @@ mod tests {
         let body = body_json(r).await;
         assert_eq!(body["accepted"], serde_json::json!(true));
         assert_eq!(body["relayed"], serde_json::json!(false));
+        assert_eq!(body["state"], serde_json::json!("new"));
+        assert_eq!(body["already_known"], serde_json::json!(false));
+        assert_eq!(body["confirmed"], serde_json::json!(false));
         assert_eq!(
             body["warning"],
             serde_json::json!(WARN_ACCEPTED_NOT_RELAYED)
         );
+    }
+
+    #[tokio::test]
+    async fn submit_idempotent_states_are_additive_and_confirmed_needs_no_retry() {
+        let valid_tx_hex = hex::encode(vec![0xdeu8; 64]);
+        for (state, expected, confirmed, warning) in [
+            (TxAdmissionState::Mempool, "mempool", false, true),
+            (TxAdmissionState::Confirmed, "confirmed", true, false),
+        ] {
+            let response = app_with(MockNode::with_submit_state(state))
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/tx/submit")
+                        .header("content-type", "application/json")
+                        .body(Body::from(format!(r#"{{"tx_hex":"{valid_tx_hex}"}}"#)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = body_json(response).await;
+            assert_eq!(body["accepted"], serde_json::json!(true));
+            assert_eq!(body["relayed"], serde_json::json!(false));
+            assert_eq!(body["state"], serde_json::json!(expected));
+            assert_eq!(body["already_known"], serde_json::json!(true));
+            assert_eq!(body["confirmed"], serde_json::json!(confirmed));
+            assert_eq!(body.get("warning").is_some(), warning);
+        }
     }
 
     #[tokio::test]
@@ -2332,6 +3147,147 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wallet_slate_three_message_routes_require_bearer() {
+        let requests = [
+            (
+                "/wallet/slate/v1/create",
+                serde_json::json!({
+                    "amount_noms": 1,
+                    "fee_noms": 1,
+                    "expires_at_height": 10
+                }),
+            ),
+            (
+                "/wallet/slate/v1/finalize",
+                serde_json::json!({"canonical_response_hex": "a1b2"}),
+            ),
+            (
+                "/wallet/slate/v1/submit",
+                serde_json::json!({
+                    "pending_key_hex": "44".repeat(32),
+                    "expected_transaction_hash_hex": "33".repeat(32)
+                }),
+            ),
+        ];
+        for (uri, body) in requests {
+            let response = app()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn wallet_slate_finalize_is_distinct_from_explicit_submit() {
+        let finalize = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/wallet/slate/v1/finalize")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(r#"{"canonical_response_hex":"a1b2"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(finalize.status(), StatusCode::OK);
+        let finalize = body_json(finalize).await;
+        assert_eq!(finalize["canonical_tx_hex"], serde_json::json!("c3d4"));
+        assert_eq!(finalize["tx_hash"], serde_json::json!("33".repeat(32)));
+        assert_eq!(finalize["pending_key"], serde_json::json!("44".repeat(32)));
+        assert!(finalize.get("state").is_none());
+        assert!(finalize.get("relayed").is_none());
+
+        let submit = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/wallet/slate/v1/submit")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "pending_key_hex": "44".repeat(32),
+                            "expected_transaction_hash_hex": "33".repeat(32)
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(submit.status(), StatusCode::OK);
+        let submit = body_json(submit).await;
+        assert_eq!(submit["canonical_tx_hex"], serde_json::json!("c3d4"));
+        assert_eq!(submit["state"], serde_json::json!("mempool"));
+        assert_eq!(submit["already_known"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn bounded_regtest_mining_requires_bearer_and_reports_exact_count() {
+        let body = serde_json::json!({"count": 3}).to_string();
+        let unauthorized = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/regtest/mine/v1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let authorized = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/regtest/mine/v1")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authorized.status(), StatusCode::OK);
+        let response = body_json(authorized).await;
+        assert_eq!(response["start_height"], serde_json::json!(43));
+        assert_eq!(response["end_height"], serde_json::json!(45));
+        assert_eq!(response["count"], serde_json::json!(3));
+        assert_eq!(response["block_hashes"].as_array().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn bounded_regtest_mining_rejects_zero_and_excessive_counts() {
+        for count in [0, 1001] {
+            let response = app()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/regtest/mine/v1")
+                        .header("content-type", "application/json")
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::from(serde_json::json!({"count": count}).to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+        }
+    }
+
+    #[tokio::test]
     async fn chain_scan_empty_range_returns_only_tip() {
         let r = app_with(MockNode::with_scan(2, canned_scan()))
             .oneshot(
@@ -2347,6 +3303,156 @@ mod tests {
         let j = body_json(r).await;
         assert_eq!(j["tip"]["height"], serde_json::json!(2));
         assert_eq!(j["blocks"].as_array().unwrap().len(), 0);
+    }
+
+    fn canned_full_scan_v1() -> ChainScanFullV1 {
+        use dom_wallet_core_api::{
+            BlockRef, CoinbaseScanMetadata, CoreNetwork, ScanInput, ScanKernel, ScanOutput,
+            ScanTransaction, TransactionLocation,
+        };
+
+        let input = ScanInput {
+            spent_commitment: [0xA1; 33],
+        };
+        let output = ScanOutput {
+            commitment: [0xB2; 33],
+            range_proof: vec![0xC3; 739],
+            recovery_capsule: Vec::new(),
+            recovery_version: 0,
+            is_coinbase: false,
+            block_height: 7,
+            block_hash: [0xD4; 32],
+            output_position: 1,
+        };
+        let kernel = ScanKernel {
+            excess: [0xE5; 33],
+            features: 0,
+            fee: 42,
+            lock_height: 0,
+            excess_signature: [0xF6; 65],
+        };
+        let block = ScanBlock {
+            height: 7,
+            block_hash: [0xD4; 32],
+            previous_block_hash: [0xD3; 32],
+            canonical_header_bytes: vec![0x71; 200],
+            timestamp: 1_700_000_007,
+            canonical_marker: [0xD4; 32],
+            outputs: vec![output.clone()],
+            inputs: vec![input],
+            kernels: vec![kernel.clone()],
+            transactions: vec![ScanTransaction {
+                location: TransactionLocation {
+                    block_height: 7,
+                    block_hash: [0xD4; 32],
+                    transaction_index: 0,
+                },
+                tx_hash: [0x77; 32],
+                canonical_bytes: vec![0x88; 314],
+                inputs: vec![input],
+                outputs: vec![output],
+                kernels: vec![kernel],
+                offset: [0x99; 32],
+            }],
+            coinbase: CoinbaseScanMetadata {
+                output_commitment: [0xC0; 33],
+                explicit_value: 1_000,
+                kernel_excess: [0xC1; 33],
+                kernel_features: 1,
+                kernel_excess_signature: [0xC2; 65],
+                offset: [0xC3; 32],
+                output_proof_envelope: vec![0xC4; 739],
+            },
+            total_fees_noms: 42,
+            protocol_version: 3,
+            range_proof_serialization_version: 2,
+        };
+        ChainScanFullV1 {
+            schema_version: 1,
+            identity: CoreChainIdentity {
+                network: CoreNetwork::Regtest,
+                network_magic: dom_core::NETWORK_MAGIC_REGTEST,
+                chain_id: [0x11; 32],
+                genesis_hash: [0x22; 32],
+                protocol_version: 3,
+                range_proof_serialization_version: 2,
+                coinbase_maturity: 1_000,
+                current_tip: BlockRef {
+                    height: 7,
+                    hash: [0xD4; 32],
+                },
+            },
+            request_anchor: None,
+            blocks: vec![block],
+            continuation: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn scriptless_scan_v1_is_authenticated_and_full_fidelity() {
+        let unauthenticated = app_with(MockNode::with_full_scan(canned_full_scan_v1()))
+            .oneshot(
+                Request::builder()
+                    .uri("/chain/scan/scriptless/v1?from=0&to=0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app_with(MockNode::with_full_scan(canned_full_scan_v1()))
+            .oneshot(
+                Request::builder()
+                    .uri("/chain/scan/scriptless/v1?from=0&to=0")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["schema_version"], serde_json::json!(1));
+        assert_eq!(json["status"], serde_json::json!("ok"));
+        assert_eq!(json["canonical"], serde_json::json!(true));
+        assert_eq!(
+            json["identity"]["chain_id"],
+            serde_json::json!("11".repeat(32))
+        );
+        assert_eq!(
+            json["blocks"][0]["transactions"][0]["tx_hash"],
+            serde_json::json!("77".repeat(32))
+        );
+        assert_eq!(
+            json["blocks"][0]["transactions"][0]["canonical_bytes"],
+            serde_json::json!("88".repeat(314))
+        );
+        assert_eq!(
+            json["blocks"][0]["transactions"][0]["kernels"][0]["excess_signature"],
+            serde_json::json!("f6".repeat(65))
+        );
+    }
+
+    #[tokio::test]
+    async fn scriptless_scan_v1_requires_anchor_and_enforces_range_bound() {
+        for uri in [
+            "/chain/scan/scriptless/v1?from=1&to=1",
+            "/chain/scan/scriptless/v1?from=0&to=64",
+            "/chain/scan/scriptless/v1?from=2&to=1",
+        ] {
+            let response = app_with(MockNode::with_full_scan(canned_full_scan_v1()))
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
     }
 
     // ───────────────────────────────────────────────────────────────────────

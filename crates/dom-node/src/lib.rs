@@ -17,6 +17,7 @@ pub(crate) mod portmap;
 pub(crate) mod prologue_prefs;
 pub mod relay;
 pub mod replay_snapshot;
+pub mod secret_file;
 pub mod task_supervisor;
 #[cfg(test)]
 pub(crate) mod test_dir;

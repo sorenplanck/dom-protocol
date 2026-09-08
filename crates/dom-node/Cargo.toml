@@ -10,6 +10,10 @@ license.workspace = true
 name = "dom-node"
 path = "src/main.rs"
 
+[[bin]]
+name = "dom-wallet-bootstrap"
+path = "src/bin/dom-wallet-bootstrap.rs"
+
 [dependencies]
 socket2.workspace     = true
 igd-next.workspace    = true
@@ -46,3 +50,4 @@ futures.workspace       = true
 tempfile = "3"
 proptest.workspace = true
 lmdb.workspace = true
+dom-slate.workspace = true
