@@ -1,6 +1,6 @@
 use dom_config::Network;
 use dom_consensus::derive_chain_id;
-use dom_core::{Hash256, BLOCK_VERSION_LEGACY};
+use dom_core::{Hash256, BLOCK_VERSION_LEGACY, WIRE_PROTOCOL_VERSION};
 use dom_integration_tests::helpers::*;
 use dom_node::node::DomNode;
 use dom_wire::codec::NoiseCodec;
@@ -33,7 +33,7 @@ async fn connect_adversarial_peer(node: &Arc<DomNode>) -> (tokio::net::TcpStream
     let mut codec = NoiseCodec::new(transport, config.network.magic());
 
     let hello = HelloPayload {
-        version: BLOCK_VERSION_LEGACY,
+        version: WIRE_PROTOCOL_VERSION,
         network_magic: config.network.magic(),
         chain_id,
         best_height: 0,
