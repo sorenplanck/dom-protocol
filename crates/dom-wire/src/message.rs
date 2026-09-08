@@ -185,26 +185,38 @@ const TIMESTAMP_LEN: usize = 8;
 const ADVERTISED_PORT_LEN: usize = 2;
 
 impl HelloPayload {
-    /// Serialize.
-    pub fn to_bytes(&self) -> Result<Vec<u8>, DomError> {
+    /// Serialize in the shape of the session's negotiated wire version.
+    ///
+    /// Strategy B (spec A1) tolerates the peer's prologue version, and the
+    /// Hello must match it: deployed v2 decoders enforce BOTH an exact
+    /// payload length and `version == 2`, so a v3-shaped Hello on a
+    /// v2-prologue session is rejected as malformed and the peer hangs up
+    /// right after the exchange (R-A1.1). On a v2 session this writes
+    /// `wire_version` into the version slot and stops after
+    /// `local_timestamp`; `advertised_port` is carried only from version 3.
+    pub fn to_bytes_for_wire_version(&self, wire_version: u32) -> Result<Vec<u8>, DomError> {
         let ua = self.user_agent.as_bytes();
         if ua.len() > dom_core::MAX_USER_AGENT_BYTES {
             return Err(DomError::Invalid("user agent too long".into()));
         }
         let mut out = Vec::with_capacity(4 + 4 + 32 + 8 + 32 + 2 + ua.len() + 8 + 2);
-        out.extend_from_slice(&self.version.to_le_bytes());
+        out.extend_from_slice(&wire_version.to_le_bytes());
         out.extend_from_slice(&self.network_magic.to_le_bytes());
         out.extend_from_slice(&self.chain_id);
         out.extend_from_slice(&self.best_height.to_le_bytes());
         out.extend_from_slice(&self.best_hash);
         out.extend_from_slice(&(ua.len() as u16).to_le_bytes());
         out.extend_from_slice(ua);
-        // local_timestamp: PROTOCOL_VERSION 2 (Doc 4.5b — time discipline)
         out.extend_from_slice(&self.local_timestamp.to_le_bytes());
-        // advertised_port: PROTOCOL_VERSION 3 (spec A1). Appended last so a v2
-        // decoder, which stops after local_timestamp, is unaffected.
-        out.extend_from_slice(&self.advertised_port.to_le_bytes());
+        if wire_version >= 3 {
+            out.extend_from_slice(&self.advertised_port.to_le_bytes());
+        }
         Ok(out)
+    }
+
+    /// Serialize in this payload's own declared version's shape.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, DomError> {
+        return self.to_bytes_for_wire_version(self.version);
     }
 
     /// Deserialize.
@@ -591,6 +603,45 @@ impl AddrPayload {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hello_for_v2_session_matches_the_deployed_v2_decoder_exactly() {
+        // The v2 decoder in the field enforces an exact payload length and
+        // `version == 2`. Both properties must hold for a Hello sent on a
+        // v2-prologue session, or the peer hangs up after the exchange.
+        let hello = super::HelloPayload {
+            version: 3,
+            network_magic: dom_core::NETWORK_MAGIC_MAINNET,
+            chain_id: [0x11; 32],
+            best_height: 7,
+            best_hash: [0x22; 32],
+            user_agent: "dom-node/0.2.0".into(),
+            local_timestamp: 1_704_067_200,
+            advertised_port: 33_369,
+        };
+        let v2 = hello.to_bytes_for_wire_version(2).unwrap();
+        let v3 = hello.to_bytes_for_wire_version(3).unwrap();
+        // Exact v2 length: fixed header + ua + timestamp, no port bytes.
+        assert_eq!(v2.len(), 82 + hello.user_agent.len() + 8);
+        assert_eq!(v3.len(), v2.len() + 2);
+        // Version slot mirrors the session, not the node's own maximum.
+        assert_eq!(u32::from_le_bytes(v2[0..4].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(v3[0..4].try_into().unwrap()), 3);
+        // Round-trips through the tolerant decoder: the v2 shape yields
+        // port 0 (unknown), the v3 shape carries the port.
+        assert_eq!(
+            super::HelloPayload::from_bytes(&v2)
+                .unwrap()
+                .advertised_port,
+            0
+        );
+        assert_eq!(
+            super::HelloPayload::from_bytes(&v3)
+                .unwrap()
+                .advertised_port,
+            33_369
+        );
+    }
+
     use super::*;
 
     #[test]

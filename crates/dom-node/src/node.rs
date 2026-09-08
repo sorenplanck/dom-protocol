@@ -1772,6 +1772,7 @@ async fn handle_inbound(
             &chain_id,
             &chain,
             svc.live_advertised_port.load(std::sync::atomic::Ordering::Relaxed) as u16,
+            prologue_version,
         ) => result,
     } {
         Ok(peer_hello) => {
@@ -2058,6 +2059,7 @@ async fn connect_outbound(
             &chain_id,
             &chain,
             svc.live_advertised_port.load(std::sync::atomic::Ordering::Relaxed) as u16,
+            prologue_version,
         ) => result,
     } {
         Ok(peer_hello) => {
@@ -2243,10 +2245,19 @@ async fn hello_exchange(
     chain_id: &[u8; 32],
     chain: &Arc<Mutex<ChainState>>,
     advertised_port: u16,
+    wire_version: u32,
 ) -> Result<dom_wire::message::HelloPayload, DomError> {
     tokio::time::timeout(
         tokio::time::Duration::from_secs(HELLO_EXCHANGE_TIMEOUT_SECS),
-        hello_exchange_inner(stream, codec, config, chain_id, chain, advertised_port),
+        hello_exchange_inner(
+            stream,
+            codec,
+            config,
+            chain_id,
+            chain,
+            advertised_port,
+            wire_version,
+        ),
     )
     .await
     .map_err(|_| {
@@ -2308,6 +2319,7 @@ async fn hello_exchange_inner(
     chain_id: &[u8; 32],
     chain: &Arc<Mutex<ChainState>>,
     advertised_port: u16,
+    wire_version: u32,
 ) -> Result<dom_wire::message::HelloPayload, DomError> {
     use dom_wire::message::{Command, HelloPayload, WireMessage};
 
@@ -2317,8 +2329,10 @@ async fn hello_exchange_inner(
         (c.tip_height.0, *c.tip_hash.as_bytes())
     };
 
+    // The Hello mirrors the session's negotiated prologue version: deployed
+    // v2 peers reject both `version != 2` and any trailing bytes (R-A1.1).
     let our_hello = HelloPayload {
-        version: dom_core::WIRE_PROTOCOL_VERSION,
+        version: wire_version,
         network_magic: config.network.magic(),
         chain_id: *chain_id,
         best_height,
@@ -2334,7 +2348,7 @@ async fn hello_exchange_inner(
     let msg = WireMessage {
         magic: config.network.magic(),
         command: Command::Hello,
-        payload: our_hello.to_bytes()?,
+        payload: our_hello.to_bytes_for_wire_version(wire_version)?,
     };
     codec.send(stream, &msg).await?;
 
