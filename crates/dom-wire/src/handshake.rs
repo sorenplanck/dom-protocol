@@ -84,22 +84,50 @@ pub fn write_timeout_secs() -> u64 {
 /// upgraded nodes settle on it immediately and never pay the retry.
 pub const SUPPORTED_PROLOGUE_VERSIONS: &[u32] = &[3, 2];
 
+/// Marker the responder embeds in its message-3 read failure when the peer
+/// hung up after being sent message 2.
+///
+/// In Noise_XX the initiator is the first side able to detect a prologue
+/// mismatch: message 2 carries the responder's static key under an AEAD whose
+/// hash includes the prologue, so the initiator fails there and closes —
+/// message 3 is never written. The responder therefore never observes the
+/// "msg3 decrypt" failure the evidence rule was originally written around; it
+/// observes an EOF. This marker records the one thing that EOF does prove:
+/// the peer spoke real Noise up to message 2 and then gave up.
+///
+/// It rides on a `DomError::Internal`, which the node's scoring rules exempt
+/// from ban points — an aborted cross-version handshake is expected traffic,
+/// not misbehaviour.
+pub const RESPONDER_ABORTED_AFTER_MSG2: &str = "peer closed after msg2";
+
 /// Whether a handshake failure is evidence of a prologue version mismatch.
 ///
-/// Only an AEAD failure on one of the MAC-carrying messages (msg2 for the
-/// initiator, msg3 for the responder) says anything about the prologue: it
-/// means both sides ran real Noise and their transcripts diverged. Everything
-/// else — early EOF, timeouts, connection resets — is a peer that went away
-/// or never spoke Noise at all, and MUST NOT demote version memory: a
-/// readiness probe, a port scanner, or a monitoring health check that
-/// connects and closes would otherwise walk every real peer at that IP down
-/// to the oldest version (the exact failure a poisoned-memory test caught).
+/// Two shapes qualify, and only these two:
+///
+/// - an AEAD failure on a MAC-carrying message (msg2 for the initiator, msg3
+///   for the responder): both sides ran real Noise and their transcripts
+///   diverged;
+/// - the responder being hung up on straight after it wrote msg2
+///   ([`RESPONDER_ABORTED_AFTER_MSG2`]): the initiator got far enough to read
+///   msg2 and bailed, which is what a prologue mismatch looks like from this
+///   end.
+///
+/// Everything else — an EOF before msg1, timeouts, connection resets — is a
+/// peer that went away or never spoke Noise at all, and MUST NOT demote
+/// version memory: a readiness probe, a port scanner, or a monitoring health
+/// check that connects and closes would otherwise walk every real peer at
+/// that IP down to the oldest version (the exact failure a poisoned-memory
+/// test caught). Reaching the marker costs a well-formed message 1, so a bare
+/// connect-and-close still proves nothing.
 pub fn is_prologue_mismatch(err: &DomError) -> bool {
     match err {
         DomError::Invalid(msg) => {
             (msg.contains("noise read msg2") || msg.contains("noise read msg3"))
                 && msg.contains("decrypt")
         }
+        // The abort keeps the non-punishable `Internal` kind it has always had;
+        // only the marker distinguishes it from an ordinary framing failure.
+        DomError::Internal(msg) => msg.contains(RESPONDER_ABORTED_AFTER_MSG2),
         _ => false,
     }
 }
@@ -310,12 +338,14 @@ pub async fn perform_handshake_responder(
 
 /// Perform the responder handshake pinned to one prologue version.
 ///
-/// The responder cannot probe: in Noise_XX a prologue mismatch only surfaces
-/// at message 3, after message 2 has already been written, so the version has
-/// to be chosen before anything is known about the initiator. The caller
-/// supplies it from per-peer memory and treats a failure as the signal to
-/// lead with the next older version when this peer reconnects — which the
-/// existing dial loops already do on their own.
+/// The responder cannot probe: the version has to be chosen before anything is
+/// known about the initiator. A mismatch surfaces here as the initiator
+/// hanging up right after msg2 (it detects the divergence first, when
+/// decrypting msg2), reported as an `Internal` error carrying
+/// [`RESPONDER_ABORTED_AFTER_MSG2`]. The caller supplies the version from
+/// per-peer memory and treats that failure as the signal to lead with the next
+/// older version when this peer reconnects — which the existing dial loops
+/// already do on their own.
 pub async fn perform_handshake_responder_versioned(
     stream: &mut tokio::net::TcpStream,
     static_privkey: &[u8; 32],
@@ -360,7 +390,21 @@ async fn perform_handshake_responder_inner(
     write_framed(stream, &buf[..len]).await?;
 
     // <- s, se  (message 3)
-    let msg3 = read_framed(stream).await?;
+    //
+    // A peer that read msg2 and then closed is the responder-side signature of
+    // a prologue mismatch (see `RESPONDER_ABORTED_AFTER_MSG2`), so the failure
+    // is tagged rather than surfacing as a bare framing error. Everything
+    // needed for that inference already happened: msg1 parsed, msg2 went out.
+    //
+    // Deliberately still an `Internal` error: an abort is not misbehaviour, and
+    // the node's scoring rules give `Internal` no ban points. Tagging it as
+    // `Invalid` would make every cross-version peer accrue violations for
+    // doing exactly what the protocol forces it to do.
+    let msg3 = read_framed(stream).await.map_err(|e| {
+        DomError::Internal(format!(
+            "noise read msg3: {RESPONDER_ABORTED_AFTER_MSG2}: {e}"
+        ))
+    })?;
     hs.read_message(&msg3, &mut payload)
         .map_err(|e| DomError::Invalid(format!("noise read msg3: {e}")))?;
 
@@ -615,6 +659,87 @@ mod tests {
             "v2 initiator never reached the v3 node"
         );
         responder.await.unwrap();
+    }
+
+    /// Regression for the 2026-09-08 inbound outage.
+    ///
+    /// The test above walks the responder through its versions by hand, so it
+    /// passed while production could not: what decides the walk in dom-node is
+    /// `is_prologue_mismatch` applied to the error the responder actually
+    /// gets. A v2 initiator fails when it decrypts msg2 and hangs up without
+    /// writing msg3, so the responder never sees an AEAD failure — it sees an
+    /// EOF. Unless that EOF is evidence, per-peer memory never demotes and no
+    /// cross-version peer can ever connect inbound.
+    #[tokio::test]
+    async fn responder_reads_an_abort_after_msg2_as_prologue_evidence() {
+        let (ipriv, _) = generate_static_keypair();
+        let (rpriv, _) = generate_static_keypair();
+        let magic = dom_core::NETWORK_MAGIC_REGTEST;
+        let chain_id = [0x42u8; 32];
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let responder = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            perform_handshake_responder_versioned(&mut s, &rpriv, 3, magic, &chain_id).await
+        });
+
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let initiator_err =
+            perform_handshake_initiator_versioned(&mut s, &ipriv, 2, magic, &chain_id)
+                .await
+                .expect_err("a v2 initiator cannot complete against a v3 responder");
+        assert!(
+            is_prologue_mismatch(&initiator_err),
+            "initiator side lost its evidence: {initiator_err:?}"
+        );
+        drop(s);
+
+        let responder_err = responder
+            .await
+            .unwrap()
+            .expect_err("the responder cannot complete either");
+        assert!(
+            is_prologue_mismatch(&responder_err),
+            "responder must treat the abort as version evidence, got: {responder_err:?}"
+        );
+        // The kind matters as much as the marker: dom-node exempts `Internal`
+        // from ban points, so promoting this to `Invalid` would fine the other
+        // hub +10 every time it probes and drags it towards a ban.
+        assert!(
+            matches!(responder_err, DomError::Internal(_)),
+            "an aborted cross-version handshake must stay unpunishable, got: {responder_err:?}"
+        );
+    }
+
+    /// The other half of the rule: reaching the marker costs a well-formed
+    /// message 1, so a readiness probe or port scanner that connects and
+    /// closes still proves nothing and cannot walk an IP's version memory down.
+    #[tokio::test]
+    async fn a_connect_and_close_probe_is_not_prologue_evidence() {
+        let (rpriv, _) = generate_static_keypair();
+        let magic = dom_core::NETWORK_MAGIC_REGTEST;
+        let chain_id = [0x42u8; 32];
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let responder = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            perform_handshake_responder_versioned(&mut s, &rpriv, 3, magic, &chain_id).await
+        });
+
+        drop(tokio::net::TcpStream::connect(addr).await.unwrap());
+
+        let err = responder
+            .await
+            .unwrap()
+            .expect_err("a probe that sends nothing cannot complete");
+        assert!(
+            !is_prologue_mismatch(&err),
+            "a probe that never spoke Noise must not demote anything, got: {err:?}"
+        );
     }
 
     /// §7: `v3_node_accepts_v2_handshake_and_vice_versa` — the degenerate

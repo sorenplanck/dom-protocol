@@ -1967,14 +1967,19 @@ async fn connect_outbound(
     // with what per-peer memory says (the newest for an unknown peer) and walk
     // down on failure; only a peer that fails on every supported version is
     // recorded as misbehaving.
-    let peer_ip = addr
+    //
+    // The version memory is keyed by IP, and a seed configured by name
+    // (`seed2.dom-protocol.org:33369`) does not parse as a `SocketAddr` — so
+    // the IP has to come off the connected socket instead. Deriving it from
+    // the config string left every DNS-seed dial without memory *and* without
+    // fallback, failing forever against a peer the same host reached fine when
+    // PEX handed it over as a bare IP.
+    let mut peer_ip = addr
         .parse::<std::net::SocketAddr>()
         .ok()
         .map(|socket| socket.ip());
-    let mut prologue_version = peer_ip
-        .map(|ip| svc.prologue_prefs.version_for(ip))
-        .unwrap_or(dom_core::WIRE_PROTOCOL_VERSION);
-    let (mut stream, transport) = loop {
+    let mut next_version: Option<u32> = None;
+    let (mut stream, transport, prologue_version) = loop {
         let mut stream = match tokio::select! {
             _ = shutdown.wait() => return OutboundAttemptOutcome::Shutdown,
             result = tokio::net::TcpStream::connect(addr) => result,
@@ -1993,6 +1998,14 @@ async fn connect_outbound(
                 return OutboundAttemptOutcome::RetryableFailure;
             }
         };
+        if peer_ip.is_none() {
+            peer_ip = stream.peer_addr().ok().map(|socket| socket.ip());
+        }
+        let prologue_version = *next_version.get_or_insert_with(|| {
+            peer_ip
+                .map(|ip| svc.prologue_prefs.version_for(ip))
+                .unwrap_or(dom_core::WIRE_PROTOCOL_VERSION)
+        });
         match tokio::select! {
             _ = shutdown.wait() => return OutboundAttemptOutcome::Shutdown,
             result = dom_wire::handshake::perform_handshake_initiator_versioned(
@@ -2007,7 +2020,7 @@ async fn connect_outbound(
                 if let Some(ip) = peer_ip {
                     svc.prologue_prefs.record_success(ip, prologue_version);
                 }
-                break (stream, t);
+                break (stream, t, prologue_version);
             }
             Err(e) => {
                 // Same evidence rule as the responder: only an AEAD failure
@@ -2031,7 +2044,7 @@ async fn connect_outbound(
                             "Handshake with {addr} failed on prologue v{prologue_version}; \
                              reconnecting with v{next}: {e}"
                         );
-                        prologue_version = next;
+                        next_version = Some(next);
                         continue;
                     }
                     None => {
