@@ -1974,11 +1974,14 @@ async fn connect_outbound(
     // the config string left every DNS-seed dial without memory *and* without
     // fallback, failing forever against a peer the same host reached fine when
     // PEX handed it over as a bare IP.
-    let mut peer_ip = addr
+    let config_ip = addr
         .parse::<std::net::SocketAddr>()
         .ok()
         .map(|socket| socket.ip());
-    let mut next_version: Option<u32> = None;
+    // Fallback walk for the rare connection whose socket cannot even name the
+    // peer; everything with an IP rides the keyed memory instead, which
+    // `demote_after_failure` updates synchronously.
+    let mut unkeyed_version: Option<u32> = None;
     let (mut stream, transport, prologue_version) = loop {
         let mut stream = match tokio::select! {
             _ = shutdown.wait() => return OutboundAttemptOutcome::Shutdown,
@@ -1998,14 +2001,16 @@ async fn connect_outbound(
                 return OutboundAttemptOutcome::RetryableFailure;
             }
         };
-        if peer_ip.is_none() {
-            peer_ip = stream.peer_addr().ok().map(|socket| socket.ip());
-        }
-        let prologue_version = *next_version.get_or_insert_with(|| {
-            peer_ip
-                .map(|ip| svc.prologue_prefs.version_for(ip))
-                .unwrap_or(dom_core::WIRE_PROTOCOL_VERSION)
-        });
+        // A DNS name can resolve to several backends and each reconnect may
+        // land on a different one, so ask the socket every time: both the
+        // version led with and any demotion recorded below must belong to the
+        // endpoint this connection actually reached, not to whichever backend
+        // the first attempt happened to hit.
+        let peer_ip = config_ip.or_else(|| stream.peer_addr().ok().map(|socket| socket.ip()));
+        let prologue_version = match peer_ip {
+            Some(ip) => svc.prologue_prefs.version_for(ip),
+            None => unkeyed_version.unwrap_or(dom_core::WIRE_PROTOCOL_VERSION),
+        };
         match tokio::select! {
             _ = shutdown.wait() => return OutboundAttemptOutcome::Shutdown,
             result = dom_wire::handshake::perform_handshake_initiator_versioned(
@@ -2028,10 +2033,21 @@ async fn connect_outbound(
                 // the dialer through every version against a host that never
                 // answered Noise in the first place.
                 let fallback = if dom_wire::handshake::is_prologue_mismatch(&e) {
-                    peer_ip.and_then(|ip| {
-                        svc.prologue_prefs
-                            .demote_after_failure(ip, prologue_version)
-                    })
+                    match peer_ip {
+                        Some(ip) => svc
+                            .prologue_prefs
+                            .demote_after_failure(ip, prologue_version),
+                        // No IP to key memory by: walk the supported list
+                        // directly so even this connection still gets its
+                        // one-version-per-attempt fallback.
+                        None => dom_wire::handshake::SUPPORTED_PROLOGUE_VERSIONS
+                            .iter()
+                            .position(|v| *v == prologue_version)
+                            .and_then(|idx| {
+                                dom_wire::handshake::SUPPORTED_PROLOGUE_VERSIONS.get(idx + 1)
+                            })
+                            .copied(),
+                    }
                 } else {
                     None
                 };
@@ -2044,7 +2060,7 @@ async fn connect_outbound(
                             "Handshake with {addr} failed on prologue v{prologue_version}; \
                              reconnecting with v{next}: {e}"
                         );
-                        next_version = Some(next);
+                        unkeyed_version = Some(next);
                         continue;
                     }
                     None => {

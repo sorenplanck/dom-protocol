@@ -400,10 +400,17 @@ async fn perform_handshake_responder_inner(
     // the node's scoring rules give `Internal` no ban points. Tagging it as
     // `Invalid` would make every cross-version peer accrue violations for
     // doing exactly what the protocol forces it to do.
-    let msg3 = read_framed(stream).await.map_err(|e| {
-        DomError::Internal(format!(
-            "noise read msg3: {RESPONDER_ABORTED_AFTER_MSG2}: {e}"
-        ))
+    //
+    // Only the I/O shape (`Internal` — the peer hung up or the read timed out)
+    // is tagged. Every other failure kind keeps its original classification:
+    // a peer that follows msg2 with an oversized frame is `Malformed` and must
+    // stay punishable — laundering it into the abort marker would both waive
+    // its ban points and demote this IP's version memory on garbage.
+    let msg3 = read_framed(stream).await.map_err(|e| match e {
+        DomError::Internal(io) => DomError::Internal(format!(
+            "noise read msg3: {RESPONDER_ABORTED_AFTER_MSG2}: {io}"
+        )),
+        other => other,
     })?;
     hs.read_message(&msg3, &mut payload)
         .map_err(|e| DomError::Invalid(format!("noise read msg3: {e}")))?;
@@ -739,6 +746,52 @@ mod tests {
         assert!(
             !is_prologue_mismatch(&err),
             "a probe that never spoke Noise must not demote anything, got: {err:?}"
+        );
+    }
+
+    /// The abort marker must only tag the I/O shape of the msg3 read. A peer
+    /// that follows msg2 with an oversized frame is `Malformed`, and has to
+    /// stay that way: laundering it into the marker would both waive its ban
+    /// points and demote the IP's version memory on garbage.
+    #[tokio::test]
+    async fn an_oversized_frame_after_msg2_stays_malformed_and_is_not_evidence() {
+        let (ipriv, _) = generate_static_keypair();
+        let (rpriv, _) = generate_static_keypair();
+        let magic = dom_core::NETWORK_MAGIC_REGTEST;
+        let chain_id = [0x42u8; 32];
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let responder = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            perform_handshake_responder_versioned(&mut s, &rpriv, 3, magic, &chain_id).await
+        });
+
+        // Real Noise up to msg2, same prologue version — then garbage.
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut hs = build_initiator_versioned(&ipriv, 3, magic, &chain_id).unwrap();
+        let mut buf = vec![0u8; NOISE_MAX_MSG];
+        let len = hs.write_message(&[], &mut buf).unwrap();
+        write_framed(&mut s, &buf[..len]).await.unwrap();
+        let _msg2 = read_framed(&mut s).await.unwrap();
+        let oversized = ((NOISE_MAX_MSG + 1) as u32).to_le_bytes();
+        {
+            use tokio::io::AsyncWriteExt;
+            s.write_all(&oversized).await.unwrap();
+        }
+
+        let err = responder
+            .await
+            .unwrap()
+            .expect_err("an oversized msg3 frame cannot complete");
+        assert!(
+            matches!(err, DomError::Malformed(_)),
+            "an oversized frame must keep its punishable kind, got: {err:?}"
+        );
+        assert!(
+            !is_prologue_mismatch(&err),
+            "a framing violation must not demote version memory, got: {err:?}"
         );
     }
 
