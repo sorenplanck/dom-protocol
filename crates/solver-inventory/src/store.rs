@@ -4594,6 +4594,23 @@ mod provisioning_tests {
 
     type TestResult = core::result::Result<(), Box<dyn Error>>;
 
+    /// Every test here takes exclusive flocks, and two of them fork/exec
+    /// children of this same binary. Between fork and exec a child holds
+    /// copies of every parent file descriptor, so a lock a sibling test
+    /// just released by dropping its store can still read as held for the
+    /// stretch of that window - on a loaded CI runner, long enough for the
+    /// sibling's reopen to see StorageAuthorityHeld instead of the error
+    /// its assertion pins. Serializing the module removes the overlap
+    /// without touching production semantics; the guard shrugs off a
+    /// poisoned lock because it only orders tests, protecting no state.
+    static SUBPROCESS_FLOCK_ISOLATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn isolation_guard() -> std::sync::MutexGuard<'static, ()> {
+        SUBPROCESS_FLOCK_ISOLATION
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn owner_directory() -> core::result::Result<tempfile::TempDir, std::io::Error> {
         let directory = tempfile::tempdir()?;
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
@@ -4683,6 +4700,7 @@ PRAGMA user_version = 1;
 
     #[test]
     fn creation_crash_child() -> TestResult {
+        let _isolation = isolation_guard();
         let Some(path) = std::env::var_os("DOM_SOLVER_INVENTORY_TEST_CRASH_PATH") else {
             return Ok(());
         };
@@ -4693,6 +4711,7 @@ PRAGMA user_version = 1;
 
     #[test]
     fn migration_crash_child() -> TestResult {
+        let _isolation = isolation_guard();
         let Some(path) = std::env::var_os("DOM_SOLVER_INVENTORY_TEST_MIGRATION_PATH") else {
             return Ok(());
         };
@@ -4704,6 +4723,7 @@ PRAGMA user_version = 1;
 
     #[test]
     fn subprocess_creation_boundaries_require_explicit_resume() -> TestResult {
+        let _isolation = isolation_guard();
         for boundary in [
             "after-lock-fsync",
             "after-database-fsync",
@@ -4745,6 +4765,7 @@ PRAGMA user_version = 1;
 
     #[test]
     fn retained_files_lock_binding_and_schema_are_fail_closed() -> TestResult {
+        let _isolation = isolation_guard();
         let directory = owner_directory()?;
         let path = directory.path().join("inventory.sqlite");
         let mut store = DurableInventoryStoreV1::create(&path, [0xb1; 32])?;
@@ -4810,6 +4831,7 @@ PRAGMA user_version = 1;
 
     #[test]
     fn strict_resume_sidecars_and_economic_state_are_fail_closed() -> TestResult {
+        let _isolation = isolation_guard();
         let directory = owner_directory()?;
         let path = directory.path().join("missing.sqlite");
         assert!(matches!(
@@ -4860,6 +4882,7 @@ PRAGMA user_version = 1;
 
     #[test]
     fn explicit_v1_migration_preserves_economic_state_and_v1_apis() -> TestResult {
+        let _isolation = isolation_guard();
         let directory = owner_directory()?;
         let path = directory.path().join("inventory-v1.sqlite");
         let binding = [0xd4; 32];
@@ -4900,6 +4923,7 @@ PRAGMA user_version = 1;
 
     #[test]
     fn migration_is_atomic_across_real_subprocess_crash_boundaries() -> TestResult {
+        let _isolation = isolation_guard();
         for boundary in [
             "before-migration-transaction",
             "before-migration-commit",
@@ -4943,6 +4967,7 @@ PRAGMA user_version = 1;
 
     #[test]
     fn migration_refuses_foreign_future_and_noncanonical_v1_schema() -> TestResult {
+        let _isolation = isolation_guard();
         for mutation in ["foreign", "future", "meta"] {
             let directory = owner_directory()?;
             let path = directory.path().join("inventory-invalid-v1.sqlite");
