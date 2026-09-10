@@ -23,6 +23,13 @@ name: CI
 #   - PR runs cancel their own superseded runs; pushes to main/mainnetswap
 #     never cancel.
 #   - actions bumped to their Node 24 majors (Node 20 runtime removal).
+#   - dom-scriptless-store's ~66-minute unit suite (the single slowest test
+#     binary; it made the Linux legs the 2h critical path) moved out of
+#     `build-test` into the sharded `scriptless-store-tests` job, and the
+#     evidence-only rerun of the same suite moved out of
+#     `interop-real-backend` into `store-evidence-tests`. Same commands,
+#     same feature sets; the shards partition each suite exactly (module
+#     filter + `--skip` complement). Both jobs gate.
 # Deliberately NOT changed: opt-level (test timing semantics), the
 # `cargo build --all-targets` step (it is the only place the non-Linux
 # legs compile dom-integration-tests test targets), the crate-tests job
@@ -171,7 +178,7 @@ jobs:
                 dom-wallet-recovery dom-wallet2 dom-wire"
           if [ "$RUNNER_OS" = "Linux" ]; then
             echo "SCOPE_BUILD=--workspace" >> "$GITHUB_ENV"
-            echo "SCOPE_TEST=--workspace --exclude dom-integration-tests --exclude dom-node" >> "$GITHUB_ENV"
+            echo "SCOPE_TEST=--workspace --exclude dom-integration-tests --exclude dom-node --exclude dom-scriptless-store" >> "$GITHUB_ENV"
           else
             B=""; T=""
             for c in $NODE; do
@@ -203,6 +210,79 @@ jobs:
       - name: cargo test -p dom-node --all-targets (serial)
         shell: bash
         run: cargo test -p dom-node --all-targets -- --test-threads=1
+
+  # dom-scriptless-store's unit suite is the single slowest test binary in
+  # the repository: 408 tests, ~66 minutes wall on linux-x86_64 (fsync-heavy
+  # inventory/session_store coverage with real process death), which made the
+  # Linux build-test leg the >2h critical path of every run. Same split shape
+  # as clippy above: the exact same tests, moved into a parallel job and
+  # sharded by module filter. The two shards partition the suite exactly —
+  # one runs every test matching runtime::linux::session_store, the other
+  # runs everything else via --skip of the same pattern — so no test can
+  # fall between the shards. build-test excludes the crate from SCOPE_TEST
+  # (Linux legs only; the non-Linux legs never tested it).
+  scriptless-store-tests:
+    name: "store tests (${{ matrix.host }}, ${{ matrix.shard }})"
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: linux-x86_64
+            runner: ubuntu-latest
+            shard: session-store
+            filter: "runtime::linux::session_store"
+          - host: linux-x86_64
+            runner: ubuntu-latest
+            shard: rest
+            filter: "--skip runtime::linux::session_store"
+          - host: linux-arm64
+            runner: ubuntu-22.04-arm
+            shard: session-store
+            filter: "runtime::linux::session_store"
+          - host: linux-arm64
+            runner: ubuntu-22.04-arm
+            shard: rest
+            filter: "--skip runtime::linux::session_store"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Free disk space (Linux runners)
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            /usr/local/lib/node_modules
+          df -h /
+
+      - uses: dtolnay/rust-toolchain@stable
+        id: rust
+
+      # Both shards share one cache key per host: their compiled artifacts
+      # are identical (same crate, same features), so the first shard to
+      # finish saves and the other's save is a no-op. The build-test prefix
+      # is the warm fallback because it compiled the same dev/test profile.
+      - name: Cache cargo registry + target
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-store-tests-${{ matrix.host }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-store-tests-${{ matrix.host }}-${{ steps.rust.outputs.cachekey }}-
+            cargo-build-${{ matrix.host }}-${{ steps.rust.outputs.cachekey }}-
+
+      - name: Install Linux build tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+
+      - name: cargo test -p dom-scriptless-store (shard)
+        run: cargo test -p dom-scriptless-store --all-targets -- ${{ matrix.filter }}
 
   clippy:
     name: clippy (${{ matrix.host }})
@@ -472,11 +552,56 @@ jobs:
       # default feature set only, so a crate's optional surface can rot
       # unnoticed: `mod signer_e2e` is gated on `all(test, evidence-only)`,
       # which neither `cargo test --workspace` nor a plain clippy run compiles.
+      # The evidence-only TEST run (~1h of fsync-heavy store coverage) moved
+      # to the sharded `store-evidence-tests` job so it no longer serializes
+      # behind this job's guards; the clippy surface checks stay here.
       - name: Optional feature surfaces
         run: |
           cargo clippy -p dom-scriptless-store --features evidence-only --all-targets --locked -- -D warnings
-          cargo test  -p dom-scriptless-store --features evidence-only --locked
           cargo clippy -p store --features failpoints --all-targets --locked -- -D warnings
+
+  # The other half of "Optional feature surfaces": the evidence-only test
+  # suite of dom-scriptless-store, unchanged in command and scope, sharded
+  # exactly like scriptless-store-tests (filter + --skip complement, so the
+  # two shards partition the suite with no gap). Runs on the same host the
+  # step always ran on. Release-blocker: wired into the gate below.
+  store-evidence-tests:
+    name: "store tests (evidence-only, ${{ matrix.shard }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: session-store
+            filter: "runtime::linux::session_store"
+          - shard: rest
+            filter: "--skip runtime::linux::session_store"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        id: rust
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-store-evidence-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-store-evidence-${{ steps.rust.outputs.cachekey }}-
+            cargo-interop-real-backend-${{ steps.rust.outputs.cachekey }}-
+
+      - name: Install Linux build tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+
+      - name: cargo test -p dom-scriptless-store --features evidence-only (shard)
+        run: cargo test -p dom-scriptless-store --features evidence-only --locked -- ${{ matrix.filter }}
 
   # Kept verbatim on purpose: `cargo test -p <crate>` without `--all-targets`
   # runs doctests, which no other job does. Not redundant with build-test.
@@ -626,6 +751,8 @@ jobs:
       - fmt
       - supply-chain
       - build-test
+      - scriptless-store-tests
+      - store-evidence-tests
       - clippy
       - interop-evm-contracts
       - interop-real-backend
@@ -639,6 +766,8 @@ jobs:
           test "${{ needs.fmt.result }}" = "success"
           test "${{ needs.supply-chain.result }}" = "success"
           test "${{ needs.build-test.result }}" = "success"
+          test "${{ needs.scriptless-store-tests.result }}" = "success"
+          test "${{ needs.store-evidence-tests.result }}" = "success"
           test "${{ needs.clippy.result }}" = "success"
           test "${{ needs.interop-evm-contracts.result }}" = "success"
           test "${{ needs.interop-real-backend.result }}" = "success"
