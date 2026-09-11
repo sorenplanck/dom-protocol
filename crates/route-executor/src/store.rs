@@ -3335,11 +3335,31 @@ fn is_constraint(error: &rusqlite::Error) -> bool {
 }
 
 #[cfg(test)]
+mod subprocess_flock_isolation {
+    //! Tests in this file take exclusive flocks and fork/exec children of
+    //! this same test binary. Between fork and exec a child holds copies of
+    //! every parent file descriptor, so a lock a sibling test just released
+    //! by dropping its store can still read as held for the stretch of that
+    //! window - on a loaded CI runner, long enough for the sibling's reopen
+    //! to observe the wrong error. Serializing these tests removes the
+    //! overlap without touching production semantics; the guard shrugs off
+    //! a poisoned lock because it only orders tests, protecting no state.
+    static FENCE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    pub(crate) fn isolation_guard() -> std::sync::MutexGuard<'static, ()> {
+        FENCE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn digest_domains_are_distinct() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let bytes = b"same bytes";
         assert_ne!(snapshot_hash(bytes), effect_hash_value(bytes));
         assert_ne!(effect_hash_value(bytes), timer_hash_value(bytes));
@@ -3433,6 +3453,7 @@ mod tests {
 
         #[test]
         fn creation_fault_process_child() -> TestResult {
+            let _isolation = super::subprocess_flock_isolation::isolation_guard();
             let Some(path) = std::env::var_os("ROUTE_EXECUTOR_TEST_FAULT_PATH") else {
                 return Ok(());
             };
@@ -3451,6 +3472,7 @@ mod tests {
 
         #[test]
         fn resume_create_recovers_only_real_crash_prefixes_and_reopens() -> TestResult {
+            let _isolation = super::subprocess_flock_isolation::isolation_guard();
             for boundary in [
                 CreationBoundaryV1::ProcessLockPublished,
                 CreationBoundaryV1::DatabaseFileSynced,
@@ -3492,6 +3514,7 @@ mod tests {
 
         #[test]
         fn resume_create_refuses_foreign_authority_schema_meta_and_economic_rows() -> TestResult {
+            let _isolation = super::subprocess_flock_isolation::isolation_guard();
             let (_directory, path) = test_path()?;
             create_owner_database_file(&path)?;
             assert_eq!(

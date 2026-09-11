@@ -7305,6 +7305,25 @@ fn sync_owner_directory(path: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
+mod subprocess_flock_isolation {
+    //! Tests in this file take exclusive flocks and fork/exec children of
+    //! this same test binary. Between fork and exec a child holds copies of
+    //! every parent file descriptor, so a lock a sibling test just released
+    //! by dropping its store can still read as held for the stretch of that
+    //! window - on a loaded CI runner, long enough for the sibling's reopen
+    //! to observe the wrong error. Serializing these tests removes the
+    //! overlap without touching production semantics; the guard shrugs off
+    //! a poisoned lock because it only orders tests, protecting no state.
+    static FENCE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    pub(crate) fn isolation_guard() -> std::sync::MutexGuard<'static, ()> {
+        FENCE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
 mod provisioning_tests {
     use super::*;
     use std::error::Error;
@@ -7486,6 +7505,7 @@ mod provisioning_tests {
 
     #[test]
     fn creation_fault_child() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let Some(path) = std::env::var_os(CREATION_FAULT_PATH_ENV) else {
             return Ok(());
         };
@@ -7510,6 +7530,7 @@ mod provisioning_tests {
 
     #[test]
     fn lock_probe_child() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let Some(path) = std::env::var_os(LOCK_PROBE_PATH_ENV) else {
             return Ok(());
         };
@@ -7525,6 +7546,7 @@ mod provisioning_tests {
 
     #[test]
     fn production_create_crash_prefixes_resume_strictly_and_idempotently() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         for boundary in [
             CreationBoundaryV1::ProcessLockPublished,
             CreationBoundaryV1::DatabaseFileSynced,
@@ -7571,6 +7593,7 @@ mod provisioning_tests {
 
     #[test]
     fn strict_resume_refuses_missing_lock_foreign_state_and_malformed_sidecars() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, missing_lock) = secure_path("missing-lock.sqlite3")?;
         create_owner_file(&missing_lock, &[])?;
         assert!(matches!(
@@ -7614,6 +7637,7 @@ mod provisioning_tests {
 
     #[test]
     fn open_authenticates_valid_economic_state_but_resume_requires_empty() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path) = secure_path("economic.sqlite3")?;
         drop(DurableEvmActuatorV1::create(&path).test_context("create economic store")?);
         let chain_id = 31_337u64;
@@ -7651,6 +7675,7 @@ mod provisioning_tests {
 
     #[test]
     fn retained_database_and_lock_swaps_fail_closed() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, database_path) = secure_path("database-swap.sqlite3")?;
         let store =
             DurableEvmActuatorV1::create(&database_path).test_context("create swap store")?;
@@ -7679,6 +7704,7 @@ mod provisioning_tests {
 
     #[test]
     fn v3_migration_is_atomic_preserves_economic_rows_and_reopens_idempotently() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path) = secure_path("legacy-v3.sqlite3")?;
         drop(DurableEvmActuatorV1::create(&path).test_context("create V4 fixture")?);
         let connection = Connection::open(&path).test_context("open V4 fixture")?;
@@ -7746,6 +7772,7 @@ mod provisioning_tests {
 
     #[test]
     fn permissions_links_and_second_process_are_refused() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path) = secure_path("process-lock.sqlite3")?;
         let store = DurableEvmActuatorV1::create(&path).test_context("create locked store")?;
         let executable = std::env::current_exe().test_context("resolve test executable")?;

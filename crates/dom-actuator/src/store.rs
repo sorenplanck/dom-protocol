@@ -7794,6 +7794,25 @@ fn sync_directory(path: &Path) -> DomActuatorResult<()> {
 }
 
 #[cfg(test)]
+mod subprocess_flock_isolation {
+    //! Tests in this file take exclusive flocks and fork/exec children of
+    //! this same test binary. Between fork and exec a child holds copies of
+    //! every parent file descriptor, so a lock a sibling test just released
+    //! by dropping its store can still read as held for the stretch of that
+    //! window - on a loaded CI runner, long enough for the sibling's reopen
+    //! to observe the wrong error. Serializing these tests removes the
+    //! overlap without touching production semantics; the guard shrugs off
+    //! a poisoned lock because it only orders tests, protecting no state.
+    static FENCE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    pub(crate) fn isolation_guard() -> std::sync::MutexGuard<'static, ()> {
+        FENCE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::{DomParticipantV1, WalletReservationRequestV1};
@@ -8530,6 +8549,7 @@ pub(crate) mod tests {
 
     #[test]
     fn creation_fault_process_child() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let Some(path) = std::env::var_os(CREATION_FAULT_PATH_ENV) else {
             return Ok(());
         };
@@ -8546,6 +8566,7 @@ pub(crate) mod tests {
 
     #[test]
     fn provisioning_lock_probe_process_child() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let Some(path) = std::env::var_os(LOCK_PROBE_PATH_ENV) else {
             return Ok(());
         };
@@ -8564,6 +8585,7 @@ pub(crate) mod tests {
 
     #[test]
     fn production_resume_recovers_every_durable_creation_prefix() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         for boundary in [
             CreationBoundaryV1::ProcessLockPublished,
             CreationBoundaryV1::DatabaseFileSynced,
@@ -8603,6 +8625,7 @@ pub(crate) mod tests {
 
     #[test]
     fn production_resume_refuses_missing_lock_foreign_sqlite_and_economic_state() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path) = empty_store_path()?;
         drop(create_database_authority(&path)?);
         require_dom_error(
@@ -8662,6 +8685,7 @@ pub(crate) mod tests {
 
     #[test]
     fn production_resume_refuses_malformed_sidecars_modes_and_links() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         use std::os::unix::fs::PermissionsExt;
 
         let (_directory, path) = empty_store_path()?;
@@ -8716,6 +8740,7 @@ pub(crate) mod tests {
 
     #[test]
     fn production_process_lock_and_retained_named_paths_fail_closed() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         use std::os::unix::fs::OpenOptionsExt;
 
         let (_directory, path) = empty_store_path()?;
@@ -8771,6 +8796,7 @@ pub(crate) mod tests {
 
     #[test]
     fn live_store_refuses_tampered_journal_before_read_or_write() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path, mut store, lease) = setup()?;
         let retained_binding = binding(1, 2)?;
         store.bind_session(lease, retained_binding, 1_001)?;
@@ -8812,6 +8838,7 @@ pub(crate) mod tests {
 
     #[test]
     fn production_store_rejects_weak_directory_and_database_modes() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         use std::os::unix::fs::PermissionsExt;
 
         let directory = tempfile::tempdir().test_context("tempdir")?;
@@ -8838,6 +8865,7 @@ pub(crate) mod tests {
 
     #[test]
     fn mainnet_adapter_identity_uses_startup_safe_genesis() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let genesis =
             dom_core::startup_genesis_hash_for_network_magic(dom_core::NETWORK_MAGIC_MAINNET)
                 .test_context("finalized mainnet genesis")?;
@@ -8870,6 +8898,7 @@ pub(crate) mod tests {
 
     #[test]
     fn restart_duplicate_is_idempotent_and_equivocation_fails() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -8904,6 +8933,7 @@ pub(crate) mod tests {
 
     #[test]
     fn cross_route_effect_and_output_reservation_are_exclusive() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, _path, mut store, lease) = setup()?;
         let first = binding(1, 2)?;
         let second = binding(3, 4)?;
@@ -8941,6 +8971,7 @@ pub(crate) mod tests {
 
     #[test]
     fn public_nonce_or_share_binding_is_globally_one_shot() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, _path, mut store, lease) = setup()?;
         let first = binding(1, 2)?;
         let second = binding(3, 4)?;
@@ -8988,6 +9019,7 @@ pub(crate) mod tests {
 
     #[test]
     fn funding_is_impossible_until_refund_is_durable() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, _path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -9026,6 +9058,7 @@ pub(crate) mod tests {
 
     #[test]
     fn stale_fence_cannot_complete_and_takeover_requires_reconciliation() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path, mut store, lease_one) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -9062,6 +9095,7 @@ pub(crate) mod tests {
 
     #[test]
     fn takeover_replays_only_an_exact_completed_chain_outbox_receipt() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path, mut store, lease_one) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -9127,6 +9161,7 @@ pub(crate) mod tests {
 
     #[test]
     fn unattempted_claim_is_classified_and_all_send_authority_stays_closed() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, _path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -9208,6 +9243,7 @@ pub(crate) mod tests {
 
     #[test]
     fn unadmitted_claim_revokes_prepared_refund_capability_without_mutation() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, _path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -9244,6 +9280,7 @@ pub(crate) mod tests {
 
     #[test]
     fn potentially_exposed_claim_survives_restart_without_replay_or_admission() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -9300,6 +9337,7 @@ pub(crate) mod tests {
 
     #[test]
     fn admitted_claim_reissues_only_its_durable_proof_without_new_attempt() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, _path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -9359,6 +9397,7 @@ pub(crate) mod tests {
     #[test]
     fn unadmitted_custody_with_inconsistent_completed_operation_is_rejected_on_reopen() -> TestResult
     {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -9391,6 +9430,7 @@ pub(crate) mod tests {
 
     #[test]
     fn tampered_claim_admission_is_rejected_during_restart_audit() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -9430,6 +9470,7 @@ pub(crate) mod tests {
 
     #[test]
     fn takeover_reissues_durable_admission_without_rebroadcasting() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path, mut store, lease_one) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -9484,6 +9525,7 @@ pub(crate) mod tests {
 
     #[test]
     fn prepared_claim_without_custody_cannot_advance_or_refence_after_takeover() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path, mut store, lease_one) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -9558,6 +9600,7 @@ pub(crate) mod tests {
 
     #[test]
     fn pre_takeover_pending_receipt_cannot_cross_the_new_fence() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path, mut store, lease_one) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -9591,6 +9634,7 @@ pub(crate) mod tests {
 
     #[test]
     fn stale_claim_fence_and_takeover_cannot_reauthorize_legacy_claim() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path, mut store, lease_one) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -9644,6 +9688,7 @@ pub(crate) mod tests {
 
     #[test]
     fn funding_checkpoint_survives_restart_and_reorgs_after_terminal_progress() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -9773,6 +9818,7 @@ pub(crate) mod tests {
 
     #[test]
     fn funding_reorg_is_isolated_per_dom_leg_across_restart() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path, mut store, lease) = setup()?;
         let upstream = binding(1, 2)?;
         let downstream = binding(1, 3)?;
@@ -9857,6 +9903,7 @@ pub(crate) mod tests {
 
     #[test]
     fn active_claim_checkpoint_cannot_authenticate_a_bare_reorg_stage() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -9905,6 +9952,7 @@ pub(crate) mod tests {
 
     #[test]
     fn potentially_exposed_claim_finality_is_exact_without_minting_admission() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -9974,6 +10022,7 @@ pub(crate) mod tests {
 
     #[test]
     fn potentially_exposed_claim_reorg_requires_exact_prior_finality() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -10260,6 +10309,7 @@ pub(crate) mod tests {
     #[test]
     fn production_final_claim_v2_attempt_latches_before_rpc_and_blocks_every_refund() -> TestResult
     {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, _path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -10378,6 +10428,7 @@ pub(crate) mod tests {
     #[test]
     fn production_final_claim_v2_refuses_foreign_sender_and_self_receiver_without_writing(
     ) -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, _path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -10428,6 +10479,7 @@ pub(crate) mod tests {
 
     #[test]
     fn production_final_claim_v2_latch_requires_the_exact_revalidated_authority() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, _path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -10467,6 +10519,7 @@ pub(crate) mod tests {
     #[test]
     fn production_final_claim_v2_retry_is_byte_identical_and_never_mints_a_new_identity(
     ) -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, _path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -10535,6 +10588,7 @@ pub(crate) mod tests {
 
     #[test]
     fn production_final_claim_v2_admission_requires_the_exact_admitted_receipt() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, _path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -10645,6 +10699,7 @@ pub(crate) mod tests {
 
     #[test]
     fn production_final_claim_v2_admission_is_idempotent_and_conflict_fails_closed() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, _path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -10730,6 +10785,7 @@ pub(crate) mod tests {
     #[test]
     fn production_exposed_final_claim_v2_survives_takeover_without_replay_or_refence() -> TestResult
     {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -10841,6 +10897,7 @@ pub(crate) mod tests {
 
     #[test]
     fn production_exposed_final_claim_v2_same_owner_replays_exactly_after_expiry() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -10921,6 +10978,7 @@ pub(crate) mod tests {
 
     #[test]
     fn production_final_claim_v2_owner_binding_tamper_fails_closed_on_restart() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -10950,6 +11008,7 @@ pub(crate) mod tests {
 
     #[test]
     fn production_tampered_final_claim_v2_records_fail_closed_on_restart() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -10997,6 +11056,7 @@ pub(crate) mod tests {
 
     #[test]
     fn production_final_claim_v2_schema_is_versioned_and_carries_no_claim_bytes() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, _path, store, _lease) = setup()?;
         let version: i64 = store
             .connection
@@ -11027,6 +11087,7 @@ pub(crate) mod tests {
 
     #[test]
     fn production_settlement_child_journal_replays_exact_outcome_after_restart() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -11128,6 +11189,7 @@ pub(crate) mod tests {
 
     #[test]
     fn production_settlement_child_attempt_cannot_cross_dom_sessions() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path, mut store, lease) = setup()?;
         let upstream = binding(1, 2)?;
         let downstream = binding(1, 3)?;
@@ -11206,6 +11268,7 @@ pub(crate) mod tests {
 
     #[test]
     fn production_settlement_child_outcome_codec_is_strict_and_typed() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let canonical = DomSettlementChildPortCallOutcomeV1::Final {
             evidence_digest: digest(190),
         }
@@ -11238,6 +11301,7 @@ pub(crate) mod tests {
     #[test]
     fn production_final_claim_settlement_child_uses_v2_attempt_tx_not_exposure_receipt(
     ) -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, _path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -11282,6 +11346,7 @@ pub(crate) mod tests {
 
     #[test]
     fn production_v7_store_is_refused_without_migration() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path, store, _lease) = setup()?;
         store
             .connection
@@ -11297,6 +11362,7 @@ pub(crate) mod tests {
 
     #[test]
     fn production_final_claim_v2_conservative_join_never_downgrades_exposure() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         use DomClaimCustodyClassificationV1::{Admitted, PotentiallyExposed, Unattempted};
 
         for (local, contracts, expected) in [
@@ -11320,6 +11386,7 @@ pub(crate) mod tests {
 
     #[test]
     fn production_final_claim_v2_reorg_and_finality_never_mint_admission() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         // This is the sender half: a terminal checkpoint on the owner-only
         // mirror never fabricates an admission. The receiver half needs the
         // Contracts plane and lives beside its fixture, in `contracts.rs`, as
@@ -11378,6 +11445,7 @@ pub(crate) mod tests {
 
     #[test]
     fn production_final_claim_v2_rpc_holds_no_actuator_store_lock() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         type DispatchWithoutControlStore<'store> =
             for<'actuator, 'runtime, 'prepared, 'latched> fn(
                 &'actuator crate::contracts::DomContractsActuatorV1<'store>,
@@ -11400,6 +11468,7 @@ pub(crate) mod tests {
 
     #[test]
     fn production_final_claim_v2_reentrancy_control_detects_a_held_store_lock() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store
@@ -11445,6 +11514,7 @@ pub(crate) mod tests {
     #[test]
     fn production_final_claim_v2_latched_token_binds_one_session_and_one_transaction() -> TestResult
     {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         // P1-C5: the DOM Contracts store can reissue a byte-identical
         // submission handle from the exposure record alone, so a handle by
         // itself is not proof that this control plane latched an attempt.
@@ -11513,6 +11583,7 @@ pub(crate) mod tests {
 
     #[test]
     fn payout_face_is_one_immutable_journal_revision_across_restart() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path, mut store, lease) = setup()?;
         let bound = binding(1, 2)?;
         store.bind_session(lease, bound, 1_000)?;
@@ -11577,6 +11648,7 @@ pub(crate) mod tests {
 
     #[test]
     fn payout_face_commitment_cannot_be_promised_to_two_sessions() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, _path, mut store, lease) = setup()?;
         let first = binding(1, 2)?;
         let second = binding(1, 3)?;
@@ -11602,6 +11674,7 @@ pub(crate) mod tests {
 
     #[test]
     fn payout_face_preparation_cannot_cross_store_identity() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_first_directory, _first_path, mut first_store, first_lease) = setup()?;
         let (_second_directory, _second_path, mut second_store, second_lease) = setup()?;
         let bound = binding(1, 2)?;
@@ -11636,6 +11709,7 @@ pub(crate) mod tests {
 
     #[test]
     fn payout_face_tamper_is_rejected_on_reopen() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         for statement in [
             "UPDATE dom_store_identity SET instance_id=zeroblob(32)",
             "UPDATE dom_payout_face_preparations SET prepare_digest=zeroblob(32)",

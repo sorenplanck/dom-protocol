@@ -4123,6 +4123,25 @@ fn sync_parent(path: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
+mod subprocess_flock_isolation {
+    //! Tests in this file take exclusive flocks and fork/exec children of
+    //! this same test binary. Between fork and exec a child holds copies of
+    //! every parent file descriptor, so a lock a sibling test just released
+    //! by dropping its store can still read as held for the stretch of that
+    //! window - on a loaded CI runner, long enough for the sibling's reopen
+    //! to observe the wrong error. Serializing these tests removes the
+    //! overlap without touching production semantics; the guard shrugs off
+    //! a poisoned lock because it only orders tests, protecting no state.
+    static FENCE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    pub(crate) fn isolation_guard() -> std::sync::MutexGuard<'static, ()> {
+        FENCE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
 mod provisioning_tests {
     use std::error::Error;
     use std::io::Write;
@@ -4170,6 +4189,7 @@ mod provisioning_tests {
 
     #[test]
     fn creation_crash_child() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let Some(path) = std::env::var_os("DOM_BTC_ACTUATOR_TEST_CRASH_PATH") else {
             return Ok(());
         };
@@ -4180,6 +4200,7 @@ mod provisioning_tests {
 
     #[test]
     fn subprocess_creation_boundaries_resume_only_through_explicit_api() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         for boundary in [
             "after-lock-fsync",
             "after-database-fsync",
@@ -4221,6 +4242,7 @@ mod provisioning_tests {
 
     #[test]
     fn retained_database_lock_owner_and_schema_are_fail_closed() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let directory = owner_directory()?;
         let path = directory.path().join("actuator.sqlite");
         let mut store = DurableBitcoinActuatorV1::create(&path, [0xb1; 32])?;
@@ -4297,6 +4319,7 @@ mod provisioning_tests {
 
     #[test]
     fn sidecar_near_misses_are_not_creation_authority() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let pristine = pristine_journal();
         assert_resume_rejects_journal(&pristine[..511])?;
 
@@ -4344,6 +4367,7 @@ mod provisioning_tests {
 
     #[test]
     fn resume_refuses_any_economic_state() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let directory = owner_directory()?;
         let path = directory.path().join("actuator.sqlite");
         let mut store = DurableBitcoinActuatorV1::create(&path, [0xc1; 32])?;
@@ -4590,6 +4614,7 @@ mod fresh_time_tests {
 
     #[test]
     fn funding_reconciliation_uses_post_rpc_time_without_prelookup_mutation() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let deployment = funding_deployment()?;
         let directory = tempfile::tempdir()?;
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
@@ -4612,6 +4637,7 @@ mod fresh_time_tests {
 
     #[test]
     fn funding_takeover_uses_post_rpc_time_without_refencing_expired_lease() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let deployment = funding_deployment()?;
         let directory = tempfile::tempdir()?;
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
