@@ -3811,6 +3811,25 @@ fn sync_directory(path: &Path) -> Result<(), DurableInboxError> {
 }
 
 #[cfg(test)]
+mod subprocess_flock_isolation {
+    //! Tests in this file take exclusive flocks and fork/exec children of
+    //! this same test binary. Between fork and exec a child holds copies of
+    //! every parent file descriptor, so a lock a sibling test just released
+    //! by dropping its store can still read as held for the stretch of that
+    //! window - on a loaded CI runner, long enough for the sibling's reopen
+    //! to observe the wrong error. Serializing these tests removes the
+    //! overlap without touching production semantics; the guard shrugs off
+    //! a poisoned lock because it only orders tests, protecting no state.
+    static FENCE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    pub(crate) fn isolation_guard() -> std::sync::MutexGuard<'static, ()> {
+        FENCE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
 mod database_authority_tests {
     use std::error::Error;
     use std::os::unix::fs::PermissionsExt;
@@ -3827,6 +3846,7 @@ mod database_authority_tests {
 
     #[test]
     fn sqlite_fd_proof_preserves_named_wal_authority() -> Result<(), Box<dyn Error>> {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temporary = tempfile::tempdir()?;
         let database = temporary.path().join(DATABASE_FILE_NAME);
         sqlite_file(&database, 7)?;
@@ -3854,6 +3874,7 @@ mod database_authority_tests {
 
     #[test]
     fn sqlite_fd_proof_refuses_swap_open_swap_back() -> Result<(), Box<dyn Error>> {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temporary = tempfile::tempdir()?;
         let database = temporary.path().join(DATABASE_FILE_NAME);
         let retained_name = temporary.path().join("retained.sqlite3");
@@ -4055,6 +4076,7 @@ mod applied_f6_replay_tests {
 
     #[test]
     fn zero_expected_relay_database_identity_is_rejected() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         assert!(matches!(
             DurableInboxConfigV1::new([0x54; 32], ZERO_DIGEST, wire(), SOLVER, 16),
             Err(DurableInboxError::InvalidConfiguration)
@@ -4064,6 +4086,7 @@ mod applied_f6_replay_tests {
     #[test]
     fn wrong_real_relay_database_is_refused_before_mutation_even_after_reopen(
     ) -> Result<(), Box<dyn Error>> {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temporary = tempfile::tempdir()?;
         fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
         let relay_root = temporary.path().join("wrong-relay-database");
@@ -4106,6 +4129,7 @@ mod applied_f6_replay_tests {
     #[test]
     fn local_commit_before_lost_relay_ack_redelivers_one_exact_duplicate(
     ) -> Result<(), Box<dyn Error>> {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temporary = tempfile::tempdir()?;
         fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
         let relay_root = temporary.path().join("relay-lost-delivery-ack");
@@ -4146,6 +4170,7 @@ mod applied_f6_replay_tests {
 
     #[test]
     fn refused_page_is_quarantined_before_ack_and_survives_reopen() -> Result<(), Box<dyn Error>> {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temporary = tempfile::tempdir()?;
         fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
         let relay_root = temporary.path().join("relay-quarantine");
@@ -4174,6 +4199,7 @@ mod applied_f6_replay_tests {
     #[test]
     fn page_read_lost_before_local_quarantine_commit_is_redelivered_unacked(
     ) -> Result<(), Box<dyn Error>> {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temporary = tempfile::tempdir()?;
         fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
         let relay_root = temporary.path().join("relay-quarantine-before-local");
@@ -4210,6 +4236,7 @@ mod applied_f6_replay_tests {
     #[test]
     fn quarantine_commit_before_lost_ack_converges_as_exact_duplicate() -> Result<(), Box<dyn Error>>
     {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temporary = tempfile::tempdir()?;
         fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
         let relay_root = temporary.path().join("relay-quarantine-lost-ack");
@@ -4248,6 +4275,7 @@ mod applied_f6_replay_tests {
     #[test]
     fn resolved_quarantine_frees_raw_capacity_for_the_next_relay_head() -> Result<(), Box<dyn Error>>
     {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temporary = tempfile::tempdir()?;
         fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
         let relay_root = temporary.path().join("relay-quarantine-quota");
@@ -4293,6 +4321,7 @@ mod applied_f6_replay_tests {
 
     #[test]
     fn quarantine_churn_over_twice_the_quota_keeps_bounded_storage() -> Result<(), Box<dyn Error>> {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temporary = tempfile::tempdir()?;
         fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
         let relay_root = temporary.path().join("relay-quarantine-churn");
@@ -4341,6 +4370,7 @@ mod applied_f6_replay_tests {
     #[test]
     fn resolution_commit_lost_before_compaction_resumes_without_freeing_early(
     ) -> Result<(), Box<dyn Error>> {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temporary = tempfile::tempdir()?;
         fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
         let relay_root = temporary.path().join("relay-resolution-before-compact");
@@ -4406,6 +4436,7 @@ mod applied_f6_replay_tests {
 
     #[test]
     fn compaction_commit_survives_reopen_and_is_an_exact_duplicate() -> Result<(), Box<dyn Error>> {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temporary = tempfile::tempdir()?;
         fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
         let relay_root = temporary.path().join("relay-after-compact");
@@ -4449,6 +4480,7 @@ mod applied_f6_replay_tests {
 
     #[test]
     fn quarantine_resolution_process_loss_subprocess() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let Some(root) = std::env::var_os(TEST_QUARANTINE_ROOT_ENV) else {
             return;
         };
@@ -4473,6 +4505,7 @@ mod applied_f6_replay_tests {
     #[test]
     fn actual_process_loss_at_resolution_and_compaction_commits_converges(
     ) -> Result<(), Box<dyn Error>> {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temporary = tempfile::tempdir()?;
         fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
         let make_fixture = |label: &str| -> Result<PathBuf, Box<dyn Error>> {
@@ -4549,6 +4582,7 @@ mod applied_f6_replay_tests {
     #[test]
     fn unresolved_quarantine_is_never_evicted_by_compact_receipt_churn(
     ) -> Result<(), Box<dyn Error>> {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temporary = tempfile::tempdir()?;
         fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
         let relay_root = temporary.path().join("relay-unresolved-retained");
@@ -4597,6 +4631,7 @@ mod applied_f6_replay_tests {
     #[test]
     fn evicted_compact_receipt_replay_fails_closed_without_mutation() -> Result<(), Box<dyn Error>>
     {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temporary = tempfile::tempdir()?;
         fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
         let relay_root = temporary.path().join("relay-old-compact-replay");
@@ -4682,6 +4717,7 @@ mod applied_f6_replay_tests {
     #[test]
     fn same_relay_cursor_with_different_bytes_is_quarantine_equivocation(
     ) -> Result<(), Box<dyn Error>> {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temporary = tempfile::tempdir()?;
         fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
         let relay_root = temporary.path().join("relay-quarantine-equivocation");
@@ -4737,6 +4773,7 @@ mod applied_f6_replay_tests {
 
     #[test]
     fn quarantine_record_or_chain_tamper_fails_reopen_closed() -> Result<(), Box<dyn Error>> {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temporary = tempfile::tempdir()?;
         fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
         let relay_root = temporary.path().join("relay-quarantine-tamper");
@@ -4770,6 +4807,7 @@ mod applied_f6_replay_tests {
 
     #[test]
     fn compact_root_or_receipt_tamper_fails_reopen_closed() -> Result<(), Box<dyn Error>> {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temporary = tempfile::tempdir()?;
         fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
         let make_compact_fixture = |label: &str| -> Result<PathBuf, Box<dyn Error>> {
@@ -4825,6 +4863,7 @@ mod applied_f6_replay_tests {
 
     #[test]
     fn reprocess_and_release_require_explicit_durable_authority() -> Result<(), Box<dyn Error>> {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temporary = tempfile::tempdir()?;
         fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
         let relay_root = temporary.path().join("relay-quarantine-resolution");
@@ -4887,6 +4926,7 @@ mod applied_f6_replay_tests {
     #[test]
     fn substituted_authority_record_cannot_resolve_or_free_quarantine() -> Result<(), Box<dyn Error>>
     {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temporary = tempfile::tempdir()?;
         fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
         let relay_root = temporary.path().join("relay-quarantine-substitution");
@@ -4923,6 +4963,7 @@ mod applied_f6_replay_tests {
     #[test]
     fn applied_replay_is_read_only_and_requires_exact_duplicate_receipts(
     ) -> Result<(), Box<dyn Error>> {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temporary = tempfile::tempdir()?;
         fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
         let root = temporary.path().join("applied-replay");
@@ -4974,6 +5015,7 @@ mod applied_f6_replay_tests {
     #[test]
     fn applied_replay_rejects_nonduplicate_and_failed_closed_responses(
     ) -> Result<(), Box<dyn Error>> {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temporary = tempfile::tempdir()?;
         fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
         let root = temporary.path().join("divergent-replay");

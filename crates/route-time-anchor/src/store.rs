@@ -2175,6 +2175,25 @@ fn sync_owner_directory(path: &Path) -> Result<()> {
         .map_err(|_| RouteTimeAnchorErrorV2::StorageUnavailable)
 }
 
+#[cfg(test)]
+mod subprocess_flock_isolation {
+    //! Tests in this file take exclusive flocks and fork/exec children of
+    //! this same test binary. Between fork and exec a child holds copies of
+    //! every parent file descriptor, so a lock a sibling test just released
+    //! by dropping its store can still read as held for the stretch of that
+    //! window - on a loaded CI runner, long enough for the sibling's reopen
+    //! to observe the wrong error. Serializing these tests removes the
+    //! overlap without touching production semantics; the guard shrugs off
+    //! a poisoned lock because it only orders tests, protecting no state.
+    static FENCE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    pub(crate) fn isolation_guard() -> std::sync::MutexGuard<'static, ()> {
+        FENCE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
@@ -2277,6 +2296,7 @@ mod tests {
 
     #[test]
     fn creation_fault_process_child() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let Some(path) = std::env::var_os("ROUTE_TIME_ANCHOR_TEST_FAULT_PATH") else {
             return Ok(());
         };
@@ -2298,6 +2318,7 @@ mod tests {
 
     #[test]
     fn resume_create_recovers_every_durable_creation_prefix_and_reopens() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         for boundary in [
             CreationBoundaryV2::ProcessLockPublished,
             CreationBoundaryV2::DatabaseFileSynced,
@@ -2341,6 +2362,7 @@ mod tests {
 
     #[test]
     fn resume_create_requires_lock_and_refuses_alternate_durable_state() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (_directory, path) = test_path()?;
         create_owner_database_file(&path)?;
         assert_eq!(

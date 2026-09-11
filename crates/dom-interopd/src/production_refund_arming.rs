@@ -3026,6 +3026,25 @@ enum RefundArmingFaultV1 {
 }
 
 #[cfg(test)]
+mod subprocess_flock_isolation {
+    //! Tests in this file take exclusive flocks and fork/exec children of
+    //! this same test binary. Between fork and exec a child holds copies of
+    //! every parent file descriptor, so a lock a sibling test just released
+    //! by dropping its store can still read as held for the stretch of that
+    //! window - on a loaded CI runner, long enough for the sibling's reopen
+    //! to observe the wrong error. Serializing these tests removes the
+    //! overlap without touching production semantics; the guard shrugs off
+    //! a poisoned lock because it only orders tests, protecting no state.
+    static FENCE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    pub(crate) fn isolation_guard() -> std::sync::MutexGuard<'static, ()> {
+        FENCE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::cell::Cell;
 
@@ -3537,6 +3556,7 @@ mod tests {
 
     #[test]
     fn authenticated_receipt_is_idempotent_and_rejects_transplant() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let directory = owner_directory();
         let path = directory.path().join("refund.sqlite");
         let (mut authority, controls) = test_authority(&path);
@@ -3567,6 +3587,7 @@ mod tests {
 
     #[test]
     fn incomplete_face_never_publishes_ready() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let directory = owner_directory();
         let path = directory.path().join("refund.sqlite");
         let (mut authority, controls) = test_authority(&path);
@@ -3586,6 +3607,7 @@ mod tests {
 
     #[test]
     fn crash_boundaries_are_recoverable_without_fabricating_ready() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let directory = owner_directory();
         let path = directory.path().join("refund.sqlite");
         let (mut authority, _) = test_authority(&path);
@@ -3615,6 +3637,7 @@ mod tests {
 
     #[test]
     fn named_database_replacement_and_second_owner_are_refused() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let directory = owner_directory();
         let path = directory.path().join("refund.sqlite");
         let (authority, _) = test_authority(&path);
@@ -3638,6 +3661,7 @@ mod tests {
 
     #[test]
     fn schema_extension_and_receipt_mac_tamper_are_refused() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let directory = owner_directory();
         let path = directory.path().join("refund.sqlite");
         let (mut authority, _) = test_authority(&path);
@@ -3672,6 +3696,7 @@ mod tests {
 
     #[test]
     fn authenticated_self_consistent_receipt_topology_transplant_is_refused() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let directory = owner_directory();
         let path = directory.path().join("refund.sqlite");
         let (mut authority, _) = test_authority(&path);
@@ -3716,6 +3741,7 @@ mod tests {
 
     #[test]
     fn live_owner_rejects_nonempty_lock_and_schema_mutation_before_arming() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         use std::io::Write;
 
         let lock_directory = owner_directory();
@@ -3748,6 +3774,7 @@ mod tests {
 
     #[test]
     fn strict_creation_resume_accepts_only_pristine_owner_files() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let directory = owner_directory();
         let path = directory.path().join("refund.sqlite");
         let mut lock_name = path.as_os_str().to_os_string();
@@ -3769,6 +3796,7 @@ mod tests {
 
     #[test]
     fn pristine_rollback_journal_is_resume_only_and_rejects_every_near_miss() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let directory = owner_directory();
         let valid_path = directory.path().join("valid-journal");
         let valid = pristine_journal_bytes([1, 2, 3, 4]);
@@ -3826,6 +3854,7 @@ mod tests {
 
     #[test]
     fn evm_genesis_codec_and_bitcoin_clock_domain_are_strict() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         assert_eq!(
             parse_evm_digest(&format!("0x{}", "ab".repeat(32))).expect("digest"),
             digest(0xab)
@@ -3854,6 +3883,7 @@ mod tests {
 
     #[test]
     fn incomplete_transient_and_corrupt_sources_keep_distinct_classification() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         assert_eq!(
             map_dom_error(SessionStoreError::SessionNotFound),
             AuthorityRefusalV1::Inconsistent
@@ -3882,6 +3912,7 @@ mod tests {
 
     #[test]
     fn evm_face_accepts_only_registry_resolved_configuration() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let deployment = resolved_evm_deployment();
         let expected = deployment.adapter_config();
         let face = ProductionEvmRefundFaceV1::connect("http://127.0.0.1:8545", 1, deployment)
@@ -3903,6 +3934,7 @@ mod tests {
 
     #[test]
     fn bitcoin_route_binding_rejects_wrong_asset_under_the_same_profile() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let fixture = time_common::fixture();
         let deployment = fixture
             .registry
@@ -3943,6 +3975,7 @@ mod tests {
 
     #[test]
     fn admission_face_pins_reject_registry_epoch_profile_asset_and_terms_transplants() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let fixture = time_common::fixture();
         let dom_deployment = fixture.registry.resolve_dom().expect("DOM deployment");
         let dom_binding = DomSessionBindingV1::from_resolved_deployment(
@@ -4062,6 +4095,7 @@ mod tests {
 
     #[test]
     fn evm_binding_rejects_wrong_asset_under_the_same_profile() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let fixture = time_common::fixture();
         let settlement = fixture.upstream.clone();
         let deployment = resolved_evm_deployment_for(&fixture.registry, &settlement);
@@ -4109,6 +4143,7 @@ mod tests {
 
     #[test]
     fn creation_crash_child() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let Ok(path) = std::env::var("DOM_REFUND_ARMING_TEST_CRASH_PATH") else {
             return;
         };
@@ -4123,6 +4158,7 @@ mod tests {
 
     #[test]
     fn subprocess_creation_crashes_resume_at_every_durable_boundary() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         for boundary in [
             "after-lock-fsync",
             "after-database-fsync",

@@ -4600,6 +4600,25 @@ fn sql_sequence(bytes: Vec<u8>) -> rusqlite::Result<u64> {
     Ok(u64::from_be_bytes(array))
 }
 
+#[cfg(test)]
+mod subprocess_flock_isolation {
+    //! Tests in this file take exclusive flocks and fork/exec children of
+    //! this same test binary. Between fork and exec a child holds copies of
+    //! every parent file descriptor, so a lock a sibling test just released
+    //! by dropping its store can still read as held for the stretch of that
+    //! window - on a loaded CI runner, long enough for the sibling's reopen
+    //! to observe the wrong error. Serializing these tests removes the
+    //! overlap without touching production semantics; the guard shrugs off
+    //! a poisoned lock because it only orders tests, protecting no state.
+    static FENCE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    pub(crate) fn isolation_guard() -> std::sync::MutexGuard<'static, ()> {
+        FENCE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod creation_resume_tests {
     use super::*;
@@ -4697,6 +4716,7 @@ mod creation_resume_tests {
 
     #[test]
     fn creation_process_loss_subprocess() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let Some(root) = std::env::var_os(TEST_CREATION_ROOT_ENV) else {
             return;
         };
@@ -4712,6 +4732,7 @@ mod creation_resume_tests {
 
     #[test]
     fn actual_process_loss_at_each_creation_boundary_resumes_pristine() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let parent = owner_parent();
         let config = config_with(0x61, 64);
         for boundary in [
@@ -4747,6 +4768,7 @@ mod creation_resume_tests {
 
     #[test]
     fn active_process_lock_refuses_creation_resume() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let parent = owner_parent();
         let config = config_with(0x62, 64);
         let root = parent.path().join("active-lock");
@@ -4759,6 +4781,7 @@ mod creation_resume_tests {
 
     #[test]
     fn paged_delivery_is_bounded_exact_idempotent_and_gcs_only_after_ack() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let parent = owner_parent();
         let config = config_with(0x63, 64);
         let root = parent.path().join("paged-delivery");
@@ -4875,6 +4898,7 @@ mod creation_resume_tests {
 
     #[test]
     fn process_restart_redelivers_pending_and_replays_lost_delivery_ack() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let parent = owner_parent();
         let config = config_with(0x64, 64);
         let root = parent.path().join("delivery-restart");
@@ -4921,6 +4945,7 @@ mod creation_resume_tests {
 
     #[test]
     fn page_byte_limit_cursor_transplants_and_noncontiguous_gc_fail_closed() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         assert!(DeliveryPageLimitsV2::new(0, MAX_ENVELOPE_BYTES as u32).is_err());
         assert!(DeliveryPageLimitsV2::new(
             MAX_DELIVERY_PAGE_ITEMS_V2 + 1,
@@ -4988,6 +5013,7 @@ mod creation_resume_tests {
 
     #[test]
     fn delivery_state_tamper_is_refused_on_restart() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let parent = owner_parent();
         let config = config_with(0x69, 64);
         let root = parent.path().join("delivery-state-tamper");
@@ -5034,6 +5060,7 @@ mod creation_resume_tests {
 
     #[test]
     fn delivery_state_bound_refuses_new_recipient_without_mutation() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let parent = owner_parent();
         let config = config_with(0x6a, 1);
         let root = parent.path().join("delivery-state-bound");
@@ -5128,6 +5155,7 @@ mod creation_resume_tests {
 
     #[test]
     fn obsolete_database_schema_version_is_explicitly_refused() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let parent = owner_parent();
         let config = config_with(0x67, 64);
         let root = parent.path().join("obsolete-schema");
@@ -5149,6 +5177,7 @@ mod creation_resume_tests {
 
     #[test]
     fn every_published_creation_boundary_resumes_to_one_pristine_database() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let parent = owner_parent();
         let config = config_with(0x41, 64);
 
@@ -5221,6 +5250,7 @@ mod creation_resume_tests {
 
     #[test]
     fn resume_refuses_economic_recovery_foreign_and_unsafe_state() {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let parent = owner_parent();
         let config = config_with(0x51, 64);
 

@@ -973,6 +973,25 @@ impl From<TransportError> for IdentityStoreError {
 }
 
 #[cfg(test)]
+mod subprocess_flock_isolation {
+    //! Tests in this file take exclusive flocks and fork/exec children of
+    //! this same test binary. Between fork and exec a child holds copies of
+    //! every parent file descriptor, so a lock a sibling test just released
+    //! by dropping its store can still read as held for the stretch of that
+    //! window - on a loaded CI runner, long enough for the sibling's reopen
+    //! to observe the wrong error. Serializing these tests removes the
+    //! overlap without touching production semantics; the guard shrugs off
+    //! a poisoned lock because it only orders tests, protecting no state.
+    static FENCE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    pub(crate) fn isolation_guard() -> std::sync::MutexGuard<'static, ()> {
+        FENCE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use cap_std::fs::Dir;
@@ -1222,6 +1241,7 @@ mod tests {
 
     #[test]
     fn store_issued_bridge_commits_only_a_handle_and_rejects_wrong_key_or_store() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let fixture = Dsc1BridgeFixture::new()?;
 
         let wrong_store_request = fixture.prepare_abort_request([0x41; 32], [0xa1; 32])?;
@@ -1276,6 +1296,7 @@ mod tests {
 
     #[test]
     fn store_issued_bridge_rejects_a_request_from_an_old_store_opening() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let fixture = Dsc1BridgeFixture::new()?;
         let request = fixture.prepare_abort_request([0x44; 32], [0xa4; 32])?;
         let Dsc1BridgeFixture {
@@ -1301,6 +1322,7 @@ mod tests {
 
     #[test]
     fn store_issued_bridge_revalidates_keystore_before_signing() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let fixture = Dsc1BridgeFixture::new()?;
         let request = fixture.prepare_abort_request([0x45; 32], [0xa5; 32])?;
         let envelope_path = fixture
@@ -1332,6 +1354,7 @@ mod tests {
 
     #[test]
     fn store_issued_bridge_revalidates_the_durable_request_before_signing() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let fixture = Dsc1BridgeFixture::new()?;
         let authority = fixture.prepare_abort_authority([0x46; 32], [0xa6; 32])?;
         let store_root = fixture.temporary.path().join("bridge-sessions");
@@ -1376,6 +1399,7 @@ mod tests {
 
     #[test]
     fn transactional_create_crash_cuts_never_publish_an_incomplete_root() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         for cut in [
             "identity-create-after-staging-persist",
             "identity-create-after-envelope-persist",
@@ -1436,6 +1460,7 @@ mod tests {
     #[test]
     #[ignore = "subprocess helper invoked by transactional_create_crash_cuts_never_publish_an_incomplete_root"]
     fn transactional_create_crash_child() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let parent_path = std::env::var_os("DOM_F7_IDENTITY_CREATE_PARENT")
             .ok_or(IdentityStoreError::InvalidInput)?;
         let parent = open_parent(Path::new(&parent_path))?;
@@ -1449,6 +1474,7 @@ mod tests {
 
     #[test]
     fn restart_rehydrates_the_same_public_identity() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temp = TempDir::new()?;
         let parent = open_parent(temp.path())?;
         let store = ContractsTransportIdentityStoreV1::create_production(
@@ -1480,6 +1506,7 @@ mod tests {
 
     #[test]
     fn wrong_passphrase_tamper_and_parallel_open_fail_closed() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temp = TempDir::new()?;
         let parent = open_parent(temp.path())?;
         let store = ContractsTransportIdentityStoreV1::create_production(
@@ -1540,6 +1567,7 @@ mod tests {
     /// the conversion behind it can only ever see exactly `TAG_LEN` bytes.
     #[test]
     fn open_identity_refuses_every_envelope_length_but_the_exact_one() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let (envelope, _reference) = generate_and_seal(&passphrase()?)?;
         assert_eq!(envelope.len(), ENVELOPE_LEN);
         for length in [
@@ -1567,6 +1595,7 @@ mod tests {
 
     #[test]
     fn permissive_or_multiply_linked_envelope_is_rejected() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temp = TempDir::new()?;
         let parent = open_parent(temp.path())?;
         let store = ContractsTransportIdentityStoreV1::create_production(
@@ -1603,6 +1632,7 @@ mod tests {
 
     #[test]
     fn same_inode_mutation_revokes_live_signing_and_noise_before_use() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temp = TempDir::new()?;
         let parent = open_parent(temp.path())?;
         let store = ContractsTransportIdentityStoreV1::create_production(
@@ -1656,6 +1686,7 @@ mod tests {
 
     #[test]
     fn restart_tcp_noise_uses_the_frozen_public_keys_and_dsc1_identity() -> TestResult {
+        let _isolation = super::subprocess_flock_isolation::isolation_guard();
         let temp = TempDir::new()?;
         let parent = open_parent(temp.path())?;
         let alice = ContractsTransportIdentityStoreV1::create_production(
