@@ -20,7 +20,7 @@ use deployment_registry::{
 use kaystra_core::terms::SettlementTermsV1;
 use kaystra_core::types::{AssetId, ChainId, Digest32, LockMechanism, TimelockSpec};
 use participant_binding::{AuthenticatedEvmSessionBindingsV1, EvmSettlementPositionV1};
-use route_composer::{ComposedBindingV1, ComposedBindingV2};
+use route_composer::{ComposedBindingV1, ComposedBindingV2, ComposedBindingV3};
 use route_executor::{
     CanonicalCodecV1, FrozenBindingsV1, FrozenRouteAdmissionCheckpointV2, FrozenRouteTimeFactsV2,
     LegIdV1, RouteIdV1,
@@ -334,6 +334,41 @@ impl RegistryRouteAdmissionAuthorityV1 {
         Ok(admission)
     }
 
+    /// Authenticates and admits a Level-1 blinded route (DR-PRIV-001; the
+    /// two legs commit their OWN lock points) under the same time-capability
+    /// discipline as [`Self::admit_validated_composed_route_v2`].
+    ///
+    /// The per-leg point preconditions and the offset-relation proof were
+    /// already enforced fail-closed by `ComposedBindingV3::bind` — a V3
+    /// composition existing at all is the evidence — so this path adds
+    /// exactly what V2 admission adds: the current-registry binding of every
+    /// leg shape and the frozen public time checkpoint.
+    pub fn admit_validated_composed_route_v3(
+        &self,
+        now_seconds: u64,
+        route_id: RouteIdV1,
+        composition: &ComposedBindingV3,
+        roster_snapshots: RouteRosterSnapshotsV1,
+    ) -> Result<AuthenticatedRouteAdmissionV1, RouteAdmissionRefusalV1> {
+        let request = request_from_composition_v3(route_id, composition)?;
+        let registry = self
+            .store
+            .load_current(
+                &self.authorities,
+                &self.secp,
+                RegistryValidationPolicyV1 {
+                    now_seconds,
+                    expected_network_id: self.expected_network_id,
+                    minimum_epoch: self.minimum_epoch,
+                },
+            )?
+            .ok_or(RouteAdmissionRefusalV1::RegistryMissing)?;
+        let mut admission = build_admission(registry, request)?;
+        validate_composition_registry_binding_v3(composition, &admission)?;
+        admission.bind_validated_settlements_v3(composition, roster_snapshots, now_seconds)?;
+        Ok(admission)
+    }
+
     /// Recovers an already-admitted route from its exact historical registry
     /// digest and re-derives every binding before issuing the capability.
     #[cfg(any(feature = "development", feature = "simulation", test))]
@@ -576,6 +611,18 @@ fn request_from_composition_v2(
     )
 }
 
+fn request_from_composition_v3(
+    route_id: RouteIdV1,
+    composition: &ComposedBindingV3,
+) -> Result<RouteAdmissionRequestV1, RouteAdmissionRefusalV1> {
+    request_from_composition_parts(
+        route_id,
+        composition.binding_digest(),
+        composition.upstream(),
+        composition.downstream(),
+    )
+}
+
 fn request_from_composition_parts(
     route_id: RouteIdV1,
     binding_digest: Digest32,
@@ -619,6 +666,18 @@ fn validate_composition_registry_binding(
 
 fn validate_composition_registry_binding_v2(
     composition: &ComposedBindingV2,
+    admission: &AuthenticatedRouteAdmissionV1,
+) -> Result<(), RouteAdmissionRefusalV1> {
+    validate_composition_registry_parts(
+        composition.binding_digest(),
+        composition.upstream(),
+        composition.downstream(),
+        admission,
+    )
+}
+
+fn validate_composition_registry_binding_v3(
+    composition: &ComposedBindingV3,
     admission: &AuthenticatedRouteAdmissionV1,
 ) -> Result<(), RouteAdmissionRefusalV1> {
     validate_composition_registry_parts(
@@ -692,6 +751,48 @@ fn time_binding_from_composition_v2(
 
 fn historical_time_binding_from_composition_v2(
     composition: &ComposedBindingV2,
+) -> Result<AuthenticatedRouteTimeBindingV2, RouteAdmissionRefusalV1> {
+    let value = AuthenticatedRouteTimeBindingV2 {
+        route_scope_digest: composition.route_scope_digest(),
+        policy_digest: composition.time_policy_digest(),
+        evidence_digest: composition.time_evidence_digest(),
+        proof_digest: composition.time_proof_digest(),
+        evidence_sequence: composition.evidence_sequence(),
+        issued_at_seconds: composition.time_proof_issued_at_seconds(),
+        valid_until_seconds: composition.time_proof_valid_until_seconds(),
+        validated_at_seconds: composition.time_proof_validated_at_seconds(),
+    };
+    if value.route_scope_digest == [0; 32]
+        || value.policy_digest == [0; 32]
+        || value.evidence_digest == [0; 32]
+        || value.proof_digest == [0; 32]
+        || value.evidence_sequence == 0
+        || value.issued_at_seconds == 0
+        || value.validated_at_seconds < value.issued_at_seconds
+        || value.validated_at_seconds >= value.valid_until_seconds
+    {
+        return Err(RouteAdmissionRefusalV1::TimeCapabilityNotCurrent);
+    }
+    Ok(value)
+}
+
+fn time_binding_from_composition_v3(
+    composition: &ComposedBindingV3,
+    now_seconds: u64,
+) -> Result<AuthenticatedRouteTimeBindingV2, RouteAdmissionRefusalV1> {
+    let value = historical_time_binding_from_composition_v3(composition)?;
+    if now_seconds < value.validated_at_seconds || now_seconds >= value.valid_until_seconds {
+        return Err(RouteAdmissionRefusalV1::TimeCapabilityNotCurrent);
+    }
+    Ok(value)
+}
+
+/// The frozen public time checkpoint of a V3 composition. The checkpoint
+/// TYPE stays the V2 one on purpose: the V3 binding consumes the same
+/// authenticated route-time capability, and one checkpoint shape keeps
+/// recovery from growing a second temporal format per binding family.
+fn historical_time_binding_from_composition_v3(
+    composition: &ComposedBindingV3,
 ) -> Result<AuthenticatedRouteTimeBindingV2, RouteAdmissionRefusalV1> {
     let value = AuthenticatedRouteTimeBindingV2 {
         route_scope_digest: composition.route_scope_digest(),
@@ -795,6 +896,22 @@ impl AuthenticatedRouteAdmissionV1 {
         now_seconds: u64,
     ) -> Result<(), RouteAdmissionRefusalV1> {
         let time_binding = time_binding_from_composition_v2(composition, now_seconds)?;
+        self.bind_validated_settlement_terms(
+            composition.upstream(),
+            composition.downstream(),
+            roster_snapshots,
+        )?;
+        self.route_time_binding_v2 = Some(time_binding);
+        Ok(())
+    }
+
+    fn bind_validated_settlements_v3(
+        &mut self,
+        composition: &ComposedBindingV3,
+        roster_snapshots: RouteRosterSnapshotsV1,
+        now_seconds: u64,
+    ) -> Result<(), RouteAdmissionRefusalV1> {
+        let time_binding = time_binding_from_composition_v3(composition, now_seconds)?;
         self.bind_validated_settlement_terms(
             composition.upstream(),
             composition.downstream(),

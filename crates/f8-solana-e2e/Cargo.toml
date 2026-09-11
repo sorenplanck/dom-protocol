@@ -9,6 +9,9 @@ publish = false
 [dependencies]
 blake2 = { workspace = true }
 rand = { workspace = true }
+# Level-1 blinded witnesses (L1-T9): derive per-leg witnesses through the
+# SAME leg_blinding derivation the composed binding commits to.
+route-composer = { path = "../route-composer" }
 tempfile = { workspace = true }
 ed25519-dalek = { workspace = true }
 kaystra-core = { path = "../kaystra-core" }

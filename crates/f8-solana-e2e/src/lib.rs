@@ -138,6 +138,82 @@ mod tests {
         Ok(())
     }
 
+    /// L1-T9 (Solana half): a Level-1 BLINDED leg witness — derived from
+    /// the route seed, never sampled — feeds the existing condition-lock
+    /// machinery unchanged: the range authority admits it, the role-3
+    /// DLEQ proves it, session finalization accepts it, and the exact
+    /// signed transaction assembles and journals as with any witness.
+    #[test]
+    fn blinded_leg_witness_initializes_the_session_end_to_end(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use route_composer::leg_blinding::{derive_leg_witness_v1, leg_witness_to_cross_curve_252};
+        use solana_route_secret::SolanaRouteSecret;
+        use xmr_dleq_sigma::{prove_bound, CrossCurveSecret252, ROLE_SOLANA_CONDITION_LOCK};
+
+        let directory = tempfile::tempdir()?;
+        let signing = SigningKey::from_bytes(&[7; 32]);
+        let funder = SolanaPubkey(signing.verifying_key().to_bytes());
+        let program = SolanaPubkey::from_base58(PROGRAM)?;
+        let profile = SolanaAdapterProfileV1::new(SolanaNetwork::LocalValidator, program, 3, 2)?;
+        let context = SolanaProofContextV1 {
+            settlement_id: [1; 32],
+            chain_id: [0x51; 32],
+            asset_id: [0x52; 32],
+            amount: 500,
+            beneficiary: [0x31; 32],
+            refund_to: [0x21; 32],
+            refund_after_unix: 2_000_000_000,
+            min_confirmations: 1,
+            max_reorg_depth: 32,
+            asset: SolanaAssetV1::NativeSol,
+            funder,
+        };
+        // A throwaway prepared secret only to READ the canonical proof
+        // context hash the session machinery derives; its witness is
+        // never used.
+        let context_hash = prepare_route_secret(&profile, &context, &mut rand::thread_rng())?
+            .proof()
+            .context_hash;
+
+        let seed = [0x3b; 32];
+        let route_id = [0x5c; 32];
+        let witness = derive_leg_witness_v1(&seed, &route_id, 0)?;
+        let little_endian = leg_witness_to_cross_curve_252(&witness);
+        let secret = CrossCurveSecret252::from_little_endian(*little_endian)?;
+        let proof = prove_bound(
+            &secret,
+            [1; 32],
+            context_hash,
+            ROLE_SOLANA_CONDITION_LOCK,
+            &mut rand::thread_rng(),
+        )?;
+        let route = SolanaRouteSecret::restore(*little_endian, proof, &mut rand::thread_rng())?;
+
+        let frozen = terms(route.dom_adaptor_point().0, profile.profile_hash(), funder);
+        let setup_store = SolanaSetupStore::open(directory.path().join("setup.sqlite"))?;
+        let session = finalize_session(
+            &profile,
+            &frozen,
+            SolanaAssetV1::NativeSol,
+            funder,
+            [0xA5; 32],
+            route,
+            &setup_store,
+        )?;
+        let instruction = solana_program_client::initialize(session.setup());
+        let decoded = EscrowInstructionV1::decode(&instruction.data).map_err(|e| e.to_string())?;
+        assert!(matches!(decoded, EscrowInstructionV1::InitializeNative(_)));
+
+        let plan = build_legacy_message(funder, SolanaHash([0x61; 32]), &[instruction])?;
+        let signature = SolanaSignature(signing.sign(&plan.message).to_bytes());
+        let raw = assemble_signed_transaction(&plan, &[(funder, signature)])?;
+        assert!(!raw.is_empty());
+        let delivery = SqliteSolanaDeliveryStore::open(directory.path().join("delivery.sqlite"))?;
+        let prepared = delivery.prepare_exact([1; 32], [0x44; 32], signature, &raw)?;
+        assert!(!prepared.raw_fingerprint.is_empty());
+        Ok(())
+    }
+
     #[test]
     fn wire_state_has_mutually_exclusive_terminals() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(
