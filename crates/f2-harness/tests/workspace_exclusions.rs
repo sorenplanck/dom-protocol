@@ -47,6 +47,15 @@ const ALLOWED_EXCLUSIONS: &[(&str, &str)] = &[
          like wallet-desktop, and its cycle gate (tests/cycle_gate.rs) runs \
          a positive verify plus three mutation classes",
     ),
+    (
+        "crates/dom-route-ceremony",
+        "the local route-ceremony generator for the composable EVM+Bitcoin \
+         shape: it links dom-interopd with `production` features exactly as \
+         deploy-genconfig does, so membership would trip the same \
+         exclusivity compile_error!. It is NOT ungated: built from its own \
+         directory, and every artifact it writes is produced through the \
+         daemon's own validated writers and re-checked by its loaders",
+    ),
 ];
 
 fn declared_exclusions(manifest: &str) -> Vec<String> {
