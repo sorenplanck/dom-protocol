@@ -244,6 +244,98 @@ mod tests {
         Ok(())
     }
 
+    /// L1-T9 (XMR half): a Level-1 BLINDED leg witness — derived from the
+    /// route seed and translated with δ, never sampled — feeds the
+    /// existing shared-spend machinery unchanged: the 252-bit range
+    /// authority admits it, the role-1 DLEQ proves it, setup validation
+    /// accepts it, and the spend sink completes on its reveal. The
+    /// TRANSLATED (consuming-side) witness is used on purpose: it is the
+    /// one that may use the extra bit above 2^251.
+    #[test]
+    fn blinded_leg_witness_drives_the_spend_sink_end_to_end(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use route_composer::leg_blinding::{
+            derive_leg_offset_v1, derive_leg_witness_v1, leg_witness_to_cross_curve_252,
+            translate_witness_v1,
+        };
+        use xmr_dleq_sigma::{prove_bound, CrossCurveSecret252, ROLE_XMR_SHARED_SPEND};
+
+        let seed = [0x2a; 32];
+        let route_id = [0x4b; 32];
+        let w_dn = derive_leg_witness_v1(&seed, &route_id, 0)?;
+        let delta = derive_leg_offset_v1(&seed, &route_id, 0, 1)?;
+        let w_up = translate_witness_v1(&w_dn, &delta)?;
+        let little_endian = leg_witness_to_cross_curve_252(&w_up);
+        // The range authority of last resort admits the blinded witness.
+        let secret = CrossCurveSecret252::from_little_endian(*little_endian)?;
+
+        let directory = tempfile::tempdir()?;
+        let profile = XmrAdapterProfileV1::new(XmrNetwork::Stagenet, 3, 2)?;
+        let proof = prove_bound(
+            &secret,
+            [1; 32],
+            context_hash(&profile),
+            ROLE_XMR_SHARED_SPEND,
+            &mut rand::thread_rng(),
+        )?;
+        let route = XmrRouteSecret::restore(*little_endian, proof, &mut rand::thread_rng())?;
+
+        let terms = terms(route.dom_adaptor_point().0, profile.profile_hash());
+        let terms_hash = terms.terms_hash()?;
+        let remote = XmrSpendShare::from_canonical_bytes(route.with_xmr_share(|bytes| *bytes))?;
+        let local_bytes = Scalar::from(7_u64).to_bytes();
+        let local = XmrSpendShare::from_canonical_bytes(local_bytes)?;
+        let setup = validate_setup(
+            &terms,
+            &profile,
+            XmrSetupBindingV1 {
+                settlement_id: [1; 32],
+                terms_hash,
+                dleq: route.proof().clone(),
+                funding_tx_hash: [0x55; 32],
+                expected_amount_piconero: 1_000,
+                destination: "stagenet-destination".to_owned(),
+                combined_spend_public_key: local.combine(&remote)?.public_key()?,
+            },
+            Some(V1MechanismAdmission::LaboratoryAlias),
+        )?;
+        let secrets = EncryptedSqliteSecretStore::open(
+            directory.path().join("secrets.sqlite"),
+            SecretStoreMasterKey::new([0x99; 32])?,
+        )?;
+        secrets.insert(
+            [1; 32],
+            terms_hash,
+            &XmrSecretMaterial::new(local_bytes, Scalar::from(13_u64).to_bytes())?,
+            &mut rand::thread_rng(),
+        )?;
+        let build_calls = Arc::new(AtomicUsize::new(0));
+        let broadcast_calls = Arc::new(AtomicUsize::new(0));
+        let mut sink = XmrClaimToSpendSink::new(
+            setup,
+            secrets,
+            SqliteDeliveryStore::open(directory.path().join("delivery.sqlite"))?,
+            MockBuilder {
+                calls: Arc::clone(&build_calls),
+            },
+            MockBroadcaster {
+                calls: Arc::clone(&broadcast_calls),
+                outcomes: Arc::new(Mutex::new(VecDeque::from([Ok(
+                    BroadcastAcceptance::Accepted,
+                )]))),
+            },
+        );
+        let evidence = evidence();
+        let effect = effect(evidence);
+        let outcome = route.with_revealed_dom_secret(|revealed| {
+            sink.consume_revealed_secret(&effect, &evidence, revealed)
+        });
+        assert_eq!(outcome, EffectOutcome::Completed);
+        assert_eq!(build_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(broadcast_calls.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
     #[test]
     fn wrong_revealed_witness_is_rejected_before_build() -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;

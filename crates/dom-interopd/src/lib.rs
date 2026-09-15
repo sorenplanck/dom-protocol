@@ -8,6 +8,7 @@
 
 mod admission;
 mod driver;
+mod leg_witness_authority;
 #[cfg(feature = "production")]
 mod production_bitcoin_prebroadcast;
 #[cfg(feature = "production")]
@@ -129,6 +130,11 @@ mod supervisor;
 #[path = "../../route-time-anchor/tests/common/mod.rs"]
 mod route_time_test_common;
 
+pub use leg_witness_authority::{
+    LegWitnessAuthorityRefusalV1, RouteLegWitnessAuthorityV1, LEG_BLINDING_DOWNSTREAM_LEG_BYTE_V1,
+    LEG_BLINDING_UPSTREAM_LEG_BYTE_V1,
+};
+
 pub use admission::{
     AuthenticatedRouteAdmissionV1, AuthenticatedRouteTimeBindingV2,
     RegistryRouteAdmissionAuthorityV1, RouteAdmissionRefusalV1, RouteAdmissionRequestV1,
@@ -200,9 +206,10 @@ pub use production_inputs::{
 pub use production_node::{
     load_production_node_config_v1, read_production_secrets_from_stdin,
     read_production_secrets_v2_from_stdin, read_production_secrets_v3_from_stdin,
-    DomNodeEndpointV1, ProductionNodeBoundsV1, ProductionNodeConfigV1, ProductionSecretsV1,
-    ProductionSecretsV2, ProductionSecretsV2ErrorV1, ProductionSecretsV3,
-    ProductionSecretsV3ErrorV1, MAX_DOM_NODE_BEARER_BYTES_V1, MAX_DOM_NODE_ENDPOINT_BYTES_V1,
+    read_production_secrets_v4_from_stdin, DomNodeEndpointV1, ProductionNodeBoundsV1,
+    ProductionNodeConfigV1, ProductionSecretsV1, ProductionSecretsV2, ProductionSecretsV2ErrorV1,
+    ProductionSecretsV3, ProductionSecretsV3ErrorV1, ProductionSecretsV4,
+    ProductionSecretsV4ErrorV1, MAX_DOM_NODE_BEARER_BYTES_V1, MAX_DOM_NODE_ENDPOINT_BYTES_V1,
     MAX_DOM_NODE_NETWORK_BYTES_V1, MAX_PRODUCTION_F6_HSM_CREDENTIALS_PER_LEG_V3,
     MAX_PRODUCTION_NODE_CONFIG_BYTES_V1,
 };
