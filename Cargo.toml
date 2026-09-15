@@ -181,6 +181,10 @@ exclude = [
     # set and trip the exclusivity guard. Built and tested from its own
     # directory, exactly like wallet-desktop.
     "crates/deploy-genconfig",
+    # Route ceremony generator for the EVM+Bitcoin shape; like deploy-genconfig
+    # it links dom-interopd with `production` features, so membership would
+    # trip the same exclusivity guard. Built from its own directory.
+    "crates/dom-route-ceremony",
 ]
 
 [workspace.package]

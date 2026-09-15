@@ -1,0 +1,36 @@
+[package]
+name = "dom-route-ceremony"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone workspace, for the same reason deploy-genconfig is one: this tool
+# links dom-interopd with its `production` feature and must not perturb the
+# root workspace's feature unification.
+[workspace]
+
+[dependencies]
+dom-interopd = { path = "../dom-interopd", default-features = false, features = ["production"] }
+deployment-registry = { path = "../deployment-registry" }
+chain-profile = { path = "../chain-profile" }
+btc-crypto = { path = "../adapters/btc-crypto" }
+adapter-btc = { path = "../adapters/btc" }
+kaystra-core = { path = "../kaystra-core", default-features = false }
+route-time-anchor = { path = "../route-time-anchor" }
+route-composer = { path = "../route-composer" }
+route-executor = { path = "../route-executor" }
+relay = { path = "../relay" }
+participant-binding = { path = "../participant-binding" }
+dom-actuator = { path = "../dom-actuator" }
+dom-wallet2 = { path = "../dom-wallet2" }
+dom-consensus = { path = "../dom-consensus" }
+dom-core = { path = "../dom-core" }
+
+k256 = { version = "0.13", features = ["ecdsa"] }
+sha3 = { version = "0.10", default-features = false, features = ["std"] }
+
+blake2 = { version = "0.10" }
+hex = { version = "0.4" }
+rand = { version = "0.8" }
+serde_json = { version = "1.0" }
+zeroize = { version = "1.7", features = ["derive"] }
